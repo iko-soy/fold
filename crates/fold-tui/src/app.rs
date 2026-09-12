@@ -97,6 +97,13 @@ pub struct App {
     pane_reading: Rect,
     outline_scroll: usize,
     last_click: Option<(u16, u16, Instant)>,
+    toolbar_rect: Rect,
+    toolbar: Vec<(Rect, &'static str)>,
+    kb_rects: Vec<(Rect, char)>,
+    kb_special: Vec<(Rect, &'static str)>,
+    palette_rows: Vec<(Rect, &'static str)>,
+    filter_rows_rects: Vec<(Rect, NRef)>,
+    props_row_rects: Vec<Rect>,
 }
 
 struct Prompt {
@@ -160,10 +167,50 @@ impl App {
             pane_reading: Rect::default(),
             outline_scroll: 0,
             last_click: None,
+            toolbar_rect: Rect::default(),
+            toolbar: Vec::new(),
+            kb_rects: Vec::new(),
+            kb_special: Vec::new(),
+            palette_rows: Vec::new(),
+            filter_rows_rects: Vec::new(),
+            props_row_rects: Vec::new(),
         })
     }
 
     pub fn pane_outline_pub(&self) -> Rect { self.pane_outline }
+    pub fn toolbar_labels(&self) -> Vec<String> {
+        self.toolbar.iter().map(|(_, a)| a.to_string()).collect()
+    }
+    pub fn toolbar_pos(&self, label: &str) -> Option<(u16, u16)> {
+        self.toolbar
+            .iter()
+            .find(|(_, a)| *a == label)
+            .map(|(r, _)| (r.x, r.y))
+    }
+    pub fn kb_pos(&self, c: char) -> Option<(u16, u16)> {
+        self.kb_rects
+            .iter()
+            .find(|(_, k)| *k == c)
+            .map(|(r, _)| (r.x, r.y))
+    }
+    pub fn kb_special_pos(&self, s: &str) -> Option<(u16, u16)> {
+        self.kb_special
+            .iter()
+            .find(|(_, k)| *k == s)
+            .map(|(r, _)| (r.x, r.y))
+    }
+    pub fn palette_row_pos(&self, name: &str) -> Option<(u16, u16)> {
+        self.palette_rows
+            .iter()
+            .find(|(_, n)| *n == name)
+            .map(|(r, _)| (r.x, r.y))
+    }
+    pub fn filter_row_pos(&self, i: usize) -> Option<(u16, u16)> {
+        self.filter_rows_rects.get(i).map(|(r, _)| (r.x, r.y))
+    }
+    pub fn props_row_pos(&self, i: usize) -> Option<(u16, u16)> {
+        self.props_row_rects.get(i).map(|r| (r.x, r.y))
+    }
     pub fn pane_reading_pub(&self) -> Rect { self.pane_reading }
 
     /// Turn mouse support on (called by run(); off in tests).
@@ -1074,6 +1121,70 @@ impl App {
             .unwrap_or(false);
         self.last_click = Some((x, y, Instant::now()));
 
+        // the action bar wins over everything
+        if self.mouse_enabled && self.toolbar_click(x, y) {
+            return;
+        }
+        // on-screen keyboard (edit, prompts, filter, palette)
+        if self.kb_click(x, y) {
+            return;
+        }
+        // Help closes on any click outside the toolbar
+        if self.mode == Mode::Help {
+            self.mode = Mode::Normal;
+            return;
+        }
+        // palette rows are clickable
+        if self.mode == Mode::Picker {
+            if let Some((_, name)) = self
+                .palette_rows
+                .iter()
+                .find(|(r, _)| self.point_in(*r, x, y))
+            {
+                let name = *name;
+                self.mode = Mode::Normal;
+                self.palette.clear();
+                self.run_palette(name);
+                return;
+            }
+        }
+        // filter results are clickable
+        if self.mode == Mode::Filter {
+            if let Some((_, r)) = self
+                .filter_rows_rects
+                .iter()
+                .find(|(r, _)| self.point_in(*r, x, y))
+            {
+                let r = *r;
+                let path = self.vault.tree.ancestors(r);
+                for a in &path {
+                    let k = self.vault.key_of(*a);
+                    self.folded.retain(|f| f != &k);
+                }
+                self.zoom_root = None;
+                self.move_cursor_to(r);
+                self.mode = Mode::Normal;
+                self.filter.clear();
+                self.filter_rows.clear();
+                return;
+            }
+        }
+        // props rows are clickable (select, then toolbar Edit/Del acts)
+        if self.mode == Mode::Props {
+            if let Some(i) = self
+                .props_row_rects
+                .iter()
+                .position(|r| self.point_in(*r, x, y))
+            {
+                self.props_sel = i;
+                return;
+            }
+        }
+        // prompt: Enter on click outside the keyboard acts as accept
+        if self.prompt.is_some() {
+            self.text_input(KeyCode::Enter);
+            return;
+        }
         if self.mode == Mode::Edit && self.point_in(self.pane_reading, x, y) {
             // place the text cursor
             let inner_top = self.pane_reading.y + 1;
@@ -1167,6 +1278,116 @@ impl App {
                         _ => {}
                     }
                 }
+            }
+        }
+    }
+
+    /// Handle a toolbar button click. Returns true if a button was hit.
+    fn toolbar_click(&mut self, x: u16, y: u16) -> bool {
+        let hit = self
+            .toolbar
+            .iter()
+            .find(|(r, _)| self.point_in(*r, x, y))
+            .map(|(_, a)| *a);
+        let Some(action) = hit else { return false };
+        match action {
+            "New" => self.act_new_node(false),
+            "Edit" => self.act_edit(),
+            "Props" => self.act_props(),
+            "Done" => self.act_toggle_task(),
+            "Task" => self.act_toggle_taskness(),
+            "Block" => self.act_make_block(),
+            "Yank" => self.act_yank(),
+            "Trash" => self.act_delete(),
+            "Paste" => self.act_paste(true),
+            "Capture" => {
+                self.prompt = Some(Prompt {
+                    label: "capture".into(),
+                    text: String::new(),
+                    action: PromptAction::CaptureText(false),
+                });
+            }
+            "Archive" => self.act_archive(),
+            "Refile" => {
+                self.prompt = Some(Prompt {
+                    label: "refile to".into(),
+                    text: String::new(),
+                    action: PromptAction::Refile,
+                });
+            }
+            "Undo" => self.act_undo(),
+            "Redo" => self.act_redo(),
+            "Filter" => {
+                self.mode = Mode::Filter;
+                self.filter.clear();
+            }
+            "Menu" => {
+                self.mode = Mode::Picker;
+                self.palette.clear();
+            }
+            "Help" => self.mode = Mode::Help,
+            "Quit" => self.quit = true,
+            "Save" => self.save_editor("toolbar"),
+            "Close" => match self.mode {
+                Mode::Edit => self.close_editor(),
+                Mode::Props | Mode::Filter | Mode::Picker | Mode::Help => {
+                    self.mode = Mode::Normal
+                }
+                _ => {}
+            },
+            "Discard" => {
+                self.edit_buf = None;
+                self.mode = Mode::Normal;
+                let _ = self.vault.reload();
+                self.say("changes discarded");
+            }
+            "Ours" => self.key_conflict(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+            "Theirs" => self.key_conflict(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            "Both" => self.key_conflict(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)),
+            "Prev" => self.key_conflict(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE)),
+            "Next" => self.key_conflict(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            "Del" => self.key_props(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+            _ => {}
+        }
+        true
+    }
+
+    /// Handle a click on the on-screen keyboard. Routes to whichever input
+    /// is active: the editor, a prompt, the filter box or the palette.
+    fn kb_click(&mut self, x: u16, y: u16) -> bool {
+        if let Some((_, c)) = self.kb_rects.iter().find(|(r, _)| self.point_in(*r, x, y)) {
+            let c = *c;
+            self.text_input(KeyCode::Char(c));
+            return true;
+        }
+        if let Some((_, s)) = self.kb_special.iter().find(|(r, _)| self.point_in(*r, x, y)) {
+            let s = *s;
+            match s {
+                "Space" => self.text_input(KeyCode::Char(' ')),
+                "Enter" => self.text_input(KeyCode::Enter),
+                "Bksp" => self.text_input(KeyCode::Backspace),
+                "↑" => self.text_input(KeyCode::Up),
+                "↓" => self.text_input(KeyCode::Down),
+                "←" => self.text_input(KeyCode::Left),
+                "→" => self.text_input(KeyCode::Right),
+                _ => {}
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Route a synthesized key to the active text input.
+    fn text_input(&mut self, code: KeyCode) {
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        if self.prompt.is_some() {
+            self.key_prompt(key);
+        } else {
+            match self.mode {
+                Mode::Edit => self.key_edit(key),
+                Mode::Filter => self.key_filter(key),
+                Mode::Picker => self.key_palette(key),
+                _ => {}
             }
         }
     }
@@ -1780,7 +2001,11 @@ impl App {
         let size = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
             .split(size);
         let narrow = size.width < 80;
         let panes = if narrow {
@@ -1796,7 +2021,8 @@ impl App {
         };
         if self.mode == Mode::Conflict {
             self.draw_conflict(f, chunks[0]);
-            self.draw_status(f, chunks[1]);
+            self.draw_status(f, chunks[2]);
+            self.draw_toolbar(f, chunks[1]);
             return;
         }
         self.pane_outline = panes[0];
@@ -1806,7 +2032,20 @@ impl App {
             Mode::Edit => self.draw_editor(f, panes[1]),
             _ => self.draw_reading(f, panes[1]),
         }
-        self.draw_status(f, chunks[1]);
+        let needs_keyboard = self.mouse_enabled
+            && (self.mode == Mode::Edit
+                || self.prompt.is_some()
+                || self.mode == Mode::Filter
+                || self.mode == Mode::Picker);
+        if needs_keyboard {
+            let kb = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(4)])
+                .split(chunks[0]);
+            self.draw_keyboard(f, kb[1]);
+        }
+        self.draw_status(f, chunks[2]);
+        self.draw_toolbar(f, chunks[1]);
         match self.mode {
             Mode::Filter => self.draw_filter(f, size),
             Mode::Picker => self.draw_palette(f, size),
@@ -2044,7 +2283,14 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
         }
+        self.props_row_rects.clear();
         for (i, (k, v, editable)) in self.props_rows.iter().enumerate() {
+            self.props_row_rects.push(Rect {
+                x: rect.x + 1,
+                y: rect.y + 2 + i as u16,
+                width: rect.width.saturating_sub(2),
+                height: 1,
+            });
             let style = if i == self.props_sel {
                 Style::default().bg(Color::DarkGray)
             } else if !editable {
@@ -2081,8 +2327,125 @@ impl App {
         f.render_widget(Paragraph::new(line).block(block), rect);
     }
 
-    fn draw_status(&mut self, f: &mut ratatui::Frame, area: Rect) {
-        let file = self
+    /// The clickable action bar above the status line (mouse support).
+    fn draw_toolbar(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        if !self.mouse_enabled {
+            self.toolbar.clear();
+            return;
+        }
+        self.toolbar_rect = area;
+        let actions: &[&str] = match self.mode {
+            Mode::Normal => &[
+                "New", "Edit", "Props", "Done", "Task", "Block", "Yank", "Trash", "Paste",
+                "Capture", "Archive", "Refile", "Undo", "Redo", "Filter", "Menu", "Help", "Quit",
+            ],
+            Mode::Edit => &["Save", "Close", "Discard"],
+            Mode::Conflict => &["Ours", "Theirs", "Both", "Edit", "Prev", "Next", "Done"],
+            Mode::Props => &["New", "Edit", "Del", "Close"],
+            Mode::Filter | Mode::Picker | Mode::Help => &["Close"],
+        };
+        self.toolbar.clear();
+        let mut spans: Vec<TSpan> = Vec::new();
+        let mut x = area.x + 1;
+        for a in actions {
+            let label = format!(" {} ", a);
+            let w = label.chars().count() as u16;
+            if x + w + 1 > area.x + area.width {
+                break;
+            }
+            self.toolbar.push((
+                Rect {
+                    x,
+                    y: area.y,
+                    width: w,
+                    height: 1,
+                },
+                a,
+            ));
+            spans.push(TSpan::styled(
+                label,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::DarkGray),
+            ));
+            spans.push(TSpan::raw(" "));
+            x += w + 1;
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// A small on-screen keyboard for the built-in editor (mouse support):
+    /// every character clickable, plus Enter/Backspace/arrows.
+    fn draw_keyboard(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        self.kb_rects.clear();
+        self.kb_special.clear();
+        let rows: [&str; 3] = [
+            "1234567890-=",
+            "qwertyuiop[]",
+            "asdfghjkl;'",
+        ];
+        let mut y = area.y;
+        for row in rows {
+            let mut x = area.x + 1;
+            for c in row.chars() {
+                self.kb_rects.push((
+                    Rect {
+                        x,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                    c,
+                ));
+                x += 1;
+            }
+            y += 1;
+        }
+        // fourth row: the rest of the letters + specials
+        let letters = "zxcvbnm,./";
+        let mut x = area.x + 1;
+        for c in letters.chars() {
+            self.kb_rects.push((
+                Rect {
+                    x,
+                    y,
+                    width: 1,
+                    height: 1,
+                },
+                c,
+            ));
+            x += 1;
+        }
+        let specials: &[&str] = &["Space", "Enter", "Bksp", "↑", "↓", "←", "→"];
+        for s in specials {
+            let w = s.chars().count() as u16;
+            self.kb_special.push((
+                Rect {
+                    x,
+                    y,
+                    width: w,
+                    height: 1,
+                },
+                s,
+            ));
+            x += w + 1;
+        }
+        // render all keys
+        for (r, c) in &self.kb_rects {
+            f.render_widget(
+                Paragraph::new(c.to_string()).style(Style::default().fg(Color::Cyan)),
+                *r,
+            );
+        }
+        for (r, s) in &self.kb_special {
+            f.render_widget(
+                Paragraph::new(s.to_string()).style(Style::default().fg(Color::Cyan)),
+                *r,
+            );
+        }
+    }
+
+    fn draw_status(&mut self, f: &mut ratatui::Frame, area: Rect) {        let file = self
             .current()
             .map(|r| self.vault.tree.files[r.0].path.clone())
             .unwrap_or_else(|| "root.md".into());
@@ -2148,8 +2511,18 @@ impl App {
             TSpan::styled("/ ", Style::default().add_modifier(Modifier::BOLD)),
             TSpan::raw(self.filter.clone()),
         ])];
-        for r in self.filter_rows.iter().take(h as usize - 2) {
+        self.filter_rows_rects.clear();
+        for (i, r) in self.filter_rows.iter().take(h as usize - 2).enumerate() {
             let path = self.vault.tree.path(*r).join(" › ");
+            self.filter_rows_rects.push((
+                Rect {
+                    x: rect.x + 1,
+                    y: rect.y + 2 + i as u16,
+                    width: rect.width.saturating_sub(2),
+                    height: 1,
+                },
+                *r,
+            ));
             lines.push(Line::from(TSpan::raw(format!("  {}", path))));
         }
         let block = WBlock::default().borders(Borders::ALL).title(" filter ");
@@ -2196,7 +2569,17 @@ impl App {
             TSpan::styled(": ", Style::default().add_modifier(Modifier::BOLD)),
             TSpan::raw(self.palette.clone()),
         ])];
-        for a in hits.iter().take(h as usize - 2) {
+        self.palette_rows.clear();
+        for (i, a) in hits.iter().take(h as usize - 2).enumerate() {
+            self.palette_rows.push((
+                Rect {
+                    x: rect.x + 1,
+                    y: rect.y + 2 + i as u16,
+                    width: rect.width.saturating_sub(2),
+                    height: 1,
+                },
+                a.name,
+            ));
             lines.push(Line::from(vec![
                 TSpan::raw(format!("  {:<20}", a.name)),
                 TSpan::styled(
@@ -2300,8 +2683,10 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("[[ / ]]", "previous / next heading · / search, n/N next"),
         ("", ""),
         ("MOUSE", ""),
-        ("click", "select a node · click ▾/▸ to fold · double-click zooms"),
+        ("click", "select · ▾/▸ folds · double-click zooms/follows/toggles"),
         ("wheel", "scroll the pane under the pointer"),
+        ("toolbar", "the button bar above the status line has every action"),
+        ("keyboard", "editing/prompts show an on-screen keyboard"),
         ("", ""),
         ("CONFLICTS & QUIT", ""),
         (":merge", "fold sync-conflict files in, then resolve:"),
