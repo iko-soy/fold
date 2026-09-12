@@ -150,6 +150,11 @@ impl Tree {
             .collect()
     }
 
+    /// Direct children without resolving embeds.
+    pub fn raw_children(&self, r: NRef) -> Vec<NRef> {
+        self.node(r).children.iter().map(|&c| (r.0, c)).collect()
+    }
+
     /// Derived open/total task counts for a subtree (§3.5).
     pub fn task_counts(&self, r: NRef) -> (usize, usize) {
         let mut open = 0;

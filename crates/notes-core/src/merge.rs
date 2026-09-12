@@ -197,7 +197,7 @@ fn merge_pair(
             ));
         }
         block_text.push_str("---\n\n");
-        block_text.push_str(&emit_subtree(t, b, 1, 0));
+        block_text.push_str(&emit_subtree_with_state(t, b, 1, 0));
         conflict_blocks.push((fname, block_text));
         // the embed goes right after ours
         out.push_str(&format!("{}![[{}]]\n", " ".repeat(indent), id));
@@ -207,22 +207,41 @@ fn merge_pair(
 
 /// Render a node at (level, indent) with given already-rendered children.
 fn emit_node_with(o: &Tree, a: NRef, level: usize, indent: usize, kids: &str) -> String {
+    emit_node_with_impl(o, a, level, indent, kids, false)
+}
+
+fn emit_node_with_impl(
+    o: &Tree,
+    a: NRef,
+    level: usize,
+    indent: usize,
+    kids: &str,
+    show_block_state: bool,
+) -> String {
     let n = o.node(a);
     let mut out = String::new();
     let ind = " ".repeat(indent);
+    // A block root's task state normally lives only in frontmatter (§4.9);
+    // when emitting for resolution we surface it as a checkbox so the
+    // receiving side parses it back as state.
+    let is_block_root = n.is_block() && !show_block_state;
     match n.kind {
         Kind::Section => {
             out.push_str(&ind);
             out.push_str(&"#".repeat(level.max(1)));
             out.push(' ');
-            push_task(n.task, &mut out);
+            if !is_block_root {
+                push_task(n.task, &mut out);
+            }
             out.push_str(&n.title);
             out.push('\n');
         }
         Kind::Item => {
             out.push_str(&ind);
             out.push_str("- ");
-            push_task(n.task, &mut out);
+            if !is_block_root {
+                push_task(n.task, &mut out);
+            }
             out.push_str(&n.title);
             out.push('\n');
         }
@@ -255,6 +274,16 @@ fn emit_node_with(o: &Tree, a: NRef, level: usize, indent: usize, kids: &str) ->
 }
 
 fn emit_subtree(t: &Tree, r: NRef, level: usize, indent: usize) -> String {
+    emit_subtree_impl(t, r, level, indent, false)
+}
+
+/// Emit with the block root's `todo:` shown as a checkbox — used for
+/// conflict blocks so resolution can lift their state back (§12.5).
+fn emit_subtree_with_state(t: &Tree, r: NRef, level: usize, indent: usize) -> String {
+    emit_subtree_impl(t, r, level, indent, true)
+}
+
+fn emit_subtree_impl(t: &Tree, r: NRef, level: usize, indent: usize, show_block_state: bool) -> String {
     let kids = t.resolved_children(r);
     let child_level = match t.node(r).kind {
         Kind::Section => level + 1,
@@ -269,9 +298,9 @@ fn emit_subtree(t: &Tree, r: NRef, level: usize, indent: usize) -> String {
         if i > 0 && t.node(k).kind == Kind::Section {
             kid_text.push('\n');
         }
-        kid_text.push_str(&emit_subtree(t, k, child_level, child_indent));
+        kid_text.push_str(&emit_subtree_impl(t, k, child_level, child_indent, show_block_state));
     }
-    emit_node_with(t, r, level, indent, &kid_text)
+    emit_node_with_impl(t, r, level, indent, &kid_text, show_block_state)
 }
 
 fn push_task(task: Option<TaskState>, out: &mut String) {
@@ -425,27 +454,31 @@ fn parse_conflict_name(name: &str) -> (String, String) {
 }
 
 /// Find unresolved conflict blocks: blocks with a `conflict:` key (§10.8).
+/// Returns (ours, theirs) pairs; theirs is the block right after ours.
 pub fn conflict_pairs(vault: &Vault) -> Vec<(NRef, NRef)> {
-    // (ours, theirs) — theirs is the block right after ours (§12.4)
+    conflict_pairs_tree(&vault.tree)
+}
+
+pub fn conflict_pairs_tree(tree: &Tree) -> Vec<(NRef, NRef)> {
     let mut out = Vec::new();
-    for (r, _id) in &vault.tree.blocks {
-        let n = vault.tree.node(*r);
+    for (r, _id) in &tree.blocks {
+        let n = tree.node(*r);
         if let Some(b) = &n.block {
             if b.prop("conflict").is_some() {
-                // ours is the previous sibling of the embed
-                if let Some(parent) = n.parent.map(|p| (r.0, p)) {
-                    let _ = parent;
-                }
-                // find the embed, then the sibling before it
                 let bid = b.id.clone().unwrap();
-                for (fi, f) in vault.tree.files.iter().enumerate() {
+                for (fi, f) in tree.files.iter().enumerate() {
                     for (ni, nd) in f.nodes.iter().enumerate() {
                         if nd.embed.as_ref() == Some(&bid) {
                             let p = nd.parent.map(|pp| (fi, pp)).unwrap();
-                            let sibs = vault.tree.resolved_children(p);
+                            let sibs = tree.raw_children(p);
                             if let Some(pos) = sibs.iter().position(|&s| s == (fi, ni)) {
                                 if pos > 0 {
-                                    out.push((sibs[pos - 1], *r));
+                                    let ours = sibs[pos - 1];
+                                    let ours = {
+                                        let rc = tree.resolved_child(ours);
+                                        if rc != ours { rc } else { ours }
+                                    };
+                                    out.push((ours, *r));
                                 }
                             }
                         }
@@ -455,4 +488,146 @@ pub fn conflict_pairs(vault: &Vault) -> Vec<(NRef, NRef)> {
         }
     }
     out
+}
+
+// ----------------------------------------------------------- resolution
+
+/// keep ours: delete the conflict block and its embed (to trash) (§12.5).
+pub fn resolve_keep_ours(vault: &mut Vault, theirs: NRef) -> std::io::Result<()> {
+    let b = vault.tree.node(theirs).block.clone();
+    let Some(b) = b else { return Ok(()) };
+    delete_embed_and_block(vault, &b, theirs)
+}
+
+/// keep theirs: replace ours' title/body/children and frontmatter (minus
+/// `id`/`conflict`) with the conflict block's, then delete it (§12.5).
+pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::io::Result<()> {
+    let tb = vault.tree.node(theirs).block.clone();
+    let Some(tb) = tb else { return Ok(()) };
+    // 1. replace ours' subtree text with theirs' (re-levelled to ours' spot)
+    let mut theirs_body = crate::render::render(&vault.tree, theirs, 1, true);
+    // The conflict block's state lives in its frontmatter (§4.9); surface it
+    // as a checkbox so the receiving side parses it back as task state.
+    if let Some(state) = vault.tree.node(theirs).task {
+        let marker = match state {
+            TaskState::Open => "[ ] ",
+            TaskState::Done => "[x] ",
+        };
+        let mut lines = theirs_body.lines();
+        if let Some(first) = lines.next() {
+            let inserted = if let Some(pos) = first.find("- ") {
+                let mut s = first.to_string();
+                s.insert_str(pos + 2, marker);
+                s
+            } else if let Some(pos) = first.find('#') {
+                let h = first[pos..].find(' ').map(|i| pos + i + 1).unwrap_or(first.len());
+                let mut s = first.to_string();
+                s.insert_str(h, marker);
+                s
+            } else {
+                first.to_string()
+            };
+            let rest: Vec<&str> = lines.collect();
+            theirs_body = if rest.is_empty() {
+                format!("{}\n", inserted)
+            } else {
+                format!("{}\n{}\n", inserted, rest.join("\n"))
+            };
+        }
+    }
+    let on = vault.tree.node(ours);
+    if on.is_block() {
+        // ours is a block: rewrite its file (after frontmatter) with theirs'
+        // content; frontmatter replaced below.
+        let file = ours.0;
+        let f = &vault.tree.files[file];
+        let fm_end = f.nodes[f.root_node]
+            .children
+            .first()
+            .and_then(|&rn| f.nodes[rn].block.as_ref())
+            .and_then(|b| b.frontmatter_span)
+            .map(|s| s.end)
+            .unwrap_or(0);
+        let mut new_text = f.text[..fm_end].to_string();
+        new_text.push_str(&theirs_body);
+        vault.write_file_text(file, &new_text)?;
+        // 2. frontmatter: theirs' minus id and conflict
+        let tprops: Vec<(String, String)> = tb
+            .props
+            .iter()
+            .filter(|(k, _)| k.as_str() != "id" && k.as_str() != "conflict")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // remove ours' existing keys (except id), then set theirs
+        let okeys: Vec<String> = vault.tree.files[file]
+            .nodes
+            .iter()
+            .find_map(|n| n.block.as_ref())
+            .map(|b| {
+                b.props
+                    .keys()
+                    .filter(|k| k.as_str() != "id")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for k in okeys {
+            crate::ops::set_frontmatter_key(vault, file, &k, None)?;
+        }
+        for (k, v) in tprops {
+            crate::ops::set_frontmatter_key(vault, file, &k, Some(&v))?;
+        }
+        // rename the file if the title changed (§6.4)
+        let new_title = vault.tree.node(ours).title.clone();
+        let _ = new_title;
+        vault.reload()?;
+    } else {
+        // plain node: replace its span with theirs' re-levelled text
+        let level = vault.tree.level(ours);
+        let indent = vault.tree.indent(ours);
+        let shifted = crate::ops::shift_document(&theirs_body, level, indent);
+        let file = ours.0;
+        let span = on.span;
+        vault.write_span(file, span, &shifted)?;
+    }
+    // 3. delete the conflict block and its embed (to trash)
+    let theirs_key = vault.key_of(theirs);
+    if let Some(t) = vault.find_by_key(&theirs_key) {
+        delete_embed_and_block(vault, &tb, t)?;
+    }
+    Ok(())
+}
+
+/// keep both: drop the `conflict` key; the block stays as an ordinary
+/// sibling (§12.5).
+pub fn resolve_keep_both(vault: &mut Vault, theirs: NRef) -> std::io::Result<()> {
+    crate::ops::set_frontmatter_key(vault, theirs.0, "conflict", None)
+}
+
+/// Remove a block's embed from its parent file and trash the block file.
+fn delete_embed_and_block(
+    vault: &mut Vault,
+    b: &crate::parse::Block,
+    block_ref: NRef,
+) -> std::io::Result<()> {
+    // remove the embed line from whichever file holds it
+    if let Some(id) = &b.id {
+        for (fi, f) in vault.tree.files.iter().enumerate() {
+            if let Some(ni) = f.nodes.iter().position(|nd| nd.embed.as_ref() == Some(id)) {
+                let span = vault.tree.files[fi].nodes[ni].span;
+                let text = vault.tree.files[fi].text.clone();
+                let mut start = span.start;
+                let mut end = span.end;
+                if start >= 2 && &text[start - 2..start] == "\n\n" {
+                    start -= 1;
+                } else if end < text.len() && text.as_bytes()[end] == b'\n' {
+                    end += 1;
+                }
+                vault.write_span(fi, crate::parse::Span { start, end }, "")?;
+                break;
+            }
+        }
+    }
+    let file = block_ref.0;
+    vault.trash_file(file)
 }

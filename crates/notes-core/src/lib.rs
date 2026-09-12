@@ -6,6 +6,7 @@ pub mod ident;
 pub mod merge;
 pub mod ops;
 pub mod parse;
+pub mod reading;
 pub mod render;
 pub mod syllables;
 pub mod tree;

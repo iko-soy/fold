@@ -74,6 +74,19 @@ pub struct App {
     props_editing: Option<String>,
     // text prompt (refile destination, capture text)
     prompt: Option<Prompt>,
+    // reading pane (§10.4)
+    read_cursor: usize,
+    read_search: String,
+    read_matches: Vec<usize>,
+    read_match_idx: usize,
+    // conflict view (§10.8)
+    conflict_idx: usize,
+    // watcher (§11.2)
+    watcher: Option<notify::RecommendedWatcher>,
+    watch_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+    last_watch_event: Instant,
+    self_write_until: Instant,
+    pending_reload: bool,
 }
 
 struct Prompt {
@@ -88,6 +101,7 @@ enum PromptAction {
     CaptureText(bool),
     PropSet(String),
     PropNew,
+    ReadSearch,
 }
 
 impl App {
@@ -121,9 +135,51 @@ impl App {
             props_sel: 0,
             props_editing: None,
             prompt: None,
+            read_cursor: 0,
+            read_search: String::new(),
+            read_matches: Vec::new(),
+            read_match_idx: 0,
+            conflict_idx: 0,
+            watcher: None,
+            watch_rx: None,
+            last_watch_event: Instant::now(),
+            self_write_until: Instant::now() - Duration::from_secs(1),
+            pending_reload: false,
         })
     }
 
+    /// Start the vault watcher (§11.2): recursive, events on a channel.
+    pub fn start_watcher(&mut self) {
+        use notify::{RecursiveMode, Watcher};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = self.vault.dir.clone();
+        match notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }) {
+            Ok(mut w) => {
+                if w.watch(&dir, RecursiveMode::Recursive).is_ok() {
+                    self.watcher = Some(w);
+                    self.watch_rx = Some(rx);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    pub fn read_cursor_pub(&self) -> usize { self.read_cursor }
+    pub fn mode_pub(&self) -> &'static str {
+        match self.mode {
+            Mode::Normal => "normal",
+            Mode::Edit => "edit",
+            Mode::Filter => "filter",
+            Mode::Picker => "picker",
+            Mode::Conflict => "conflict",
+            Mode::Props => "props",
+        }
+    }
+    pub fn title_of(&self, r: NRef) -> String { self.vault.tree.node(r).title.clone() }
+    pub fn vault_conflict_files(&self) -> std::io::Result<Vec<String>> { self.vault.conflict_files() }
+    pub fn vault_mut(&mut self) -> &mut Vault { &mut self.vault }
     pub fn vault_dir(&self) -> std::path::PathBuf {
         self.vault.dir.clone()
     }
@@ -131,6 +187,86 @@ impl App {
     pub fn say(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
         self.status_time = Instant::now();
+    }
+
+    /// Drain watcher events; returns true if a debounced reload should run.
+    /// Debounce state: events are drained immediately; a reload is due when
+    /// at least one relevant event arrived and 200 ms have passed since the
+    /// last one (§11.2).
+    pub fn poll_watcher(&mut self) -> bool {
+        if let Some(rx) = &self.watch_rx {
+            while let Ok(res) = rx.try_recv() {
+                if let Ok(event) = res {
+                    // ignore our own temp files and ignored patterns (§11.4)
+                    let relevant = event.paths.iter().any(|p| {
+                        let name = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                        !name.starts_with('.')
+                            && !name.ends_with(".notes-tmp")
+                            && !name.ends_with(".tmp")
+                    });
+                    if relevant {
+                        self.pending_reload = true;
+                        self.last_watch_event = Instant::now();
+                    }
+                }
+            }
+        }
+        let due = self.pending_reload
+            && self.last_watch_event.elapsed() > Duration::from_millis(200)
+            && Instant::now() > self.self_write_until;
+        if due {
+            self.pending_reload = false;
+        }
+        due
+    }
+
+    pub fn poll_watcher_debug(&mut self) -> String {
+        let mut n = 0;
+        let mut msgs = Vec::new();
+        if let Some(rx) = &self.watch_rx {
+            while let Ok(res) = rx.try_recv() {
+                n += 1;
+                msgs.push(format!("{:?}", res.map(|e| e.kind)));
+            }
+        }
+        let poll = self.poll_watcher();
+        format!("{} events: {:?} poll={} self_write={:?}", n, msgs, poll, self.self_write_until.elapsed())
+    }
+
+    /// Reload after an external change (§11.2): editor saves first, then
+    /// re-parse, cursor re-attached by id, path, nearest ancestor. A new
+    /// sync-conflict file starts the merge flow (§12).
+    pub fn reload_external(&mut self) {
+        if self.edit_buf.is_some() {
+            self.save_editor("external change");
+        }
+        let cursor_key = self.current().map(|r| self.vault.key_of(r));
+        let zoom_key = self.zoom_root.map(|z| self.vault.key_of(z));
+        // sync-conflict files start the merge flow (§11.2)
+        match self.vault.conflict_files() {
+            Ok(files) if !files.is_empty() => {
+                match notes_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+                    Ok(outcomes) => {
+                        self.say(format!("merged: {}", outcomes.join("; ")));
+                        self.mode = Mode::Conflict;
+                        self.conflict_idx = 0;
+                    }
+                    Err(e) => self.say(format!("merge error: {}", e)),
+                }
+            }
+            _ => {
+                if let Err(e) = self.vault.reload() {
+                    self.say(format!("reload error: {}", e));
+                }
+            }
+        }
+        self.zoom_root = zoom_key.and_then(|k| self.vault.find_by_key(&k));
+        if let Some(k) = cursor_key {
+            if let Some(r) = self.vault.find_by_key(&k) {
+                self.move_cursor_to(r);
+            }
+        }
+        self.clamp_cursor();
     }
 
     /// Visible outline rows: the zoom subtree, flattened, honouring folds
@@ -206,7 +342,13 @@ impl App {
 
     fn refresh_after(&mut self, action: &str) {
         self.clamp_cursor();
+        self.self_write_until = Instant::now() + Duration::from_millis(500);
         self.say(action);
+    }
+
+    /// Mark a self-write window so the watcher ignores our own saves (§11.2).
+    pub fn mark_self_write(&mut self) {
+        self.self_write_until = Instant::now() + Duration::from_millis(500);
     }
 
     // -------------------------------------------------------- actions
@@ -446,6 +588,7 @@ impl App {
             Ok(n) => {
                 if n > 0 {
                     self.say(format!("saved {} block(s) ({})", n, why));
+                    self.mark_self_write();
                 }
                 self.edit_saved_dot = false;
             }
@@ -707,6 +850,11 @@ impl App {
                             self.say("invalid key");
                         }
                     }
+                    PromptAction::ReadSearch => {
+                        self.read_search = p.text.clone();
+                        let doc = self.reading_doc();
+                        self.update_read_matches(&doc);
+                    }
                 }
             }
             KeyCode::Backspace => {
@@ -722,6 +870,130 @@ impl App {
     }
 
     // -------------------------------------------------------- input
+
+    pub fn enter_conflict_view(&mut self) {
+        if notes_core::merge::conflict_pairs(&self.vault).is_empty() {
+            self.say("no conflicts");
+            return;
+        }
+        self.mode = Mode::Conflict;
+        self.conflict_idx = 0;
+    }
+
+    pub fn key_conflict_pub(&mut self, key: KeyEvent) { self.key_conflict(key) }
+    fn key_conflict(&mut self, key: KeyEvent) {
+        let pairs = notes_core::merge::conflict_pairs(&self.vault);
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.say(format!("{} conflict pair(s) left", pairs.len()));
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                self.say(format!("{} conflict pair(s) left", pairs.len()));
+            }
+            KeyCode::Char('n') => {
+                if self.conflict_idx + 1 < pairs.len() {
+                    self.conflict_idx += 1;
+                }
+            }
+            KeyCode::Char('N') => {
+                self.conflict_idx = self.conflict_idx.saturating_sub(1);
+            }
+            KeyCode::Char('o') => {
+                if let Some(&(_, theirs)) = pairs.get(self.conflict_idx) {
+                    self.push_undo("keep ours");
+                    match notes_core::merge::resolve_keep_ours(&mut self.vault, theirs) {
+                        Ok(()) => self.say("kept ours"),
+                        Err(e) => self.say(format!("error: {}", e)),
+                    }
+                    self.conflict_idx = self.conflict_idx.saturating_sub(0).min(
+                        notes_core::merge::conflict_pairs(&self.vault)
+                            .len()
+                            .saturating_sub(1),
+                    );
+                }
+            }
+            KeyCode::Char('t') => {
+                if let Some(&(ours, theirs)) = pairs.get(self.conflict_idx) {
+                    self.push_undo("keep theirs");
+                    match notes_core::merge::resolve_keep_theirs(&mut self.vault, ours, theirs) {
+                        Ok(()) => self.say("kept theirs"),
+                        Err(e) => self.say(format!("error: {}", e)),
+                    }
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(&(_, theirs)) = pairs.get(self.conflict_idx) {
+                    self.push_undo("keep both");
+                    match notes_core::merge::resolve_keep_both(&mut self.vault, theirs) {
+                        Ok(()) => self.say("kept both"),
+                        Err(e) => self.say(format!("error: {}", e)),
+                    }
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(&(ours, _)) = pairs.get(self.conflict_idx) {
+                    self.edit_buf = Some(notes_core::edit::open_editor(&self.vault, ours));
+                    self.edit_cursor = (0, 0);
+                    self.edit_saved_dot = false;
+                    self.mode = Mode::Edit;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_conflict(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let pairs = notes_core::merge::conflict_pairs(&self.vault);
+        let block = WBlock::default()
+            .borders(Borders::ALL)
+            .title(format!(
+                " conflicts — pair {}/{} · o ours · t theirs · b both · e edit · n/N · Enter done ",
+                (self.conflict_idx + 1).min(pairs.len()),
+                pairs.len()
+            ))
+            .border_style(Style::default().fg(Color::Yellow));
+        if pairs.is_empty() {
+            f.render_widget(
+                Paragraph::new("no unresolved conflicts — Enter to close").block(block),
+                area,
+            );
+            return;
+        }
+        let (ours, theirs) = pairs[self.conflict_idx.min(pairs.len() - 1)];
+        let halves = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        let ours_text = render(&self.vault.tree, ours, 1, true);
+        let theirs_text = render(&self.vault.tree, theirs, 1, true);
+        let ours_title = format!(" ours: {} ", self.vault.tree.node(ours).title);
+        let theirs_title = format!(
+            " theirs ({}) ",
+            self.vault.tree.node(theirs)
+                .block
+                .as_ref()
+                .and_then(|b| b.prop("conflict").map(|s| s.to_string()))
+                .unwrap_or_default()
+        );
+        f.render_widget(
+            Paragraph::new(ours_text).block(
+                WBlock::default().borders(Borders::ALL).title(ours_title),
+            ),
+            halves[0],
+        );
+        f.render_widget(
+            Paragraph::new(theirs_text).block(
+                WBlock::default()
+                    .borders(Borders::ALL)
+                    .title(theirs_title)
+                    .border_style(Style::default().fg(Color::Red)),
+            ),
+            halves[1],
+        );
+        let _ = block;
+    }
 
     pub fn key_normal(&mut self, key: KeyEvent) {
         let rows = self.rows();
@@ -932,6 +1204,7 @@ impl App {
     fn push_undo(&mut self, desc: &str) {
         self.undo.push(self.snapshot(desc));
         self.redo.clear();
+        self.mark_self_write();
     }
 
     fn snapshot(&self, desc: &str) -> ops::Inverse {
@@ -959,19 +1232,221 @@ impl App {
         }
     }
 
+    pub fn key_reading_pub(&mut self, key: KeyEvent) { self.key_reading(key) }
     fn key_reading(&mut self, key: KeyEvent) {
+        let doc = self.reading_doc();
+        let nlines = doc.lines.len();
         match key.code {
             KeyCode::Tab => self.focus = Focus::Outline,
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_reading += 1,
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.read_cursor + 1 < nlines.max(1) {
+                    self.read_cursor += 1;
+                }
+                self.scroll_reading = self.read_cursor;
+            }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.scroll_reading = self.scroll_reading.saturating_sub(1)
+                self.read_cursor = self.read_cursor.saturating_sub(1);
+                self.scroll_reading = self.read_cursor;
             }
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.read_cursor = (self.read_cursor + 10).min(nlines.saturating_sub(1));
+                self.scroll_reading = self.read_cursor;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.read_cursor = self.read_cursor.saturating_sub(10);
+                self.scroll_reading = self.read_cursor;
+            }
+            KeyCode::Char('G') => {
+                self.read_cursor = nlines.saturating_sub(1);
+                self.scroll_reading = self.read_cursor;
+            }
+            KeyCode::Char('g') => {} // gg via pending
+            KeyCode::Enter => {
+                use notes_core::reading::LineRef;
+                match notes_core::reading::node_at(&doc, self.read_cursor) {
+                    Some(LineRef::Title(r)) => {
+                        let n = self.vault.tree.node(r);
+                        if n.task.is_some() {
+                            self.act_on_node(r, |app, r| {
+                                let _ = ops::toggle_task(&mut app.vault, r);
+                            });
+                        } else if n.kind == Kind::Section {
+                            self.zoom_root = Some(r);
+                            self.read_cursor = 0;
+                            self.scroll_reading = 0;
+                        }
+                    }
+                    Some(LineRef::Embed(e)) => {
+                        let t = self.vault.tree.resolved_child(e);
+                        if t != e {
+                            self.zoom_root = Some(t);
+                            self.read_cursor = 0;
+                            self.scroll_reading = 0;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             KeyCode::Backspace => {
-                self.zoom_root = None;
-                self.focus = Focus::Outline;
+                if let Some(z) = self.zoom_root {
+                    if let Some(p) = self.vault.tree.node(z).parent {
+                        let pr = (z.0, p);
+                        self.zoom_root = if self.vault.tree.node(pr).kind != Kind::Root {
+                            Some(pr)
+                        } else {
+                            None
+                        };
+                    } else {
+                        self.zoom_root = None;
+                    }
+                    self.read_cursor = 0;
+                    self.scroll_reading = 0;
+                } else {
+                    self.focus = Focus::Outline;
+                }
             }
+            KeyCode::Char('x') => {
+                if let Some(r) = self.read_node() {
+                    self.act_on_node(r, |app, r| {
+                        let _ = ops::toggle_task(&mut app.vault, r);
+                    });
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(r) = self.read_node() {
+                    let target = if self.vault.tree.node(r).is_embed() {
+                        self.vault.tree.resolved_child(r)
+                    } else {
+                        r
+                    };
+                    self.edit_buf = Some(notes_core::edit::open_editor(&self.vault, target));
+                    self.edit_cursor = (0, 0);
+                    self.edit_saved_dot = false;
+                    self.mode = Mode::Edit;
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(r) = self.read_node() {
+                    let target = if self.vault.tree.node(r).is_embed() {
+                        self.vault.tree.resolved_child(r)
+                    } else {
+                        r
+                    };
+                    self.props_target = Some(target);
+                    self.props_rows = if self.vault.tree.node(target).is_block() {
+                        ops::frontmatter_lines(&self.vault, target.0)
+                            .into_iter()
+                            .filter(|(k, _, _)| k != "id")
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    self.props_sel = 0;
+                    self.mode = Mode::Props;
+                }
+            }
+            KeyCode::Char('o') => self.open_link_under_cursor(&doc),
+            KeyCode::Char(']') => self.jump_heading(&doc, 1),
+            KeyCode::Char('[') => self.jump_heading(&doc, -1),
+            KeyCode::Char('/') => {
+                self.prompt = Some(Prompt {
+                    label: "search".into(),
+                    text: String::new(),
+                    action: PromptAction::ReadSearch,
+                });
+            }
+            KeyCode::Char('n') => self.next_match(&doc, 1),
+            KeyCode::Char('N') => self.next_match(&doc, -1),
+            KeyCode::Char('q') => self.quit = true,
             _ => {}
+        }
+    }
+
+    pub fn reading_doc_pub(&self) -> notes_core::reading::ReadingDoc { self.reading_doc() }
+    fn reading_doc(&self) -> notes_core::reading::ReadingDoc {
+        let target = self.zoom_root.or_else(|| self.current());
+        match target {
+            Some(r) => notes_core::reading::build(&self.vault, r),
+            None => notes_core::reading::ReadingDoc {
+                lines: Vec::new(),
+                refs: Vec::new(),
+            },
+        }
+    }
+
+    /// The node under the reading cursor (title/body/embed lines only).
+    fn read_node(&self) -> Option<NRef> {
+        let doc = self.reading_doc();
+        use notes_core::reading::LineRef;
+        match notes_core::reading::node_at(&doc, self.read_cursor) {
+            Some(LineRef::Title(r)) | Some(LineRef::Body(r)) | Some(LineRef::Embed(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Run a mutation on a node from the reading pane, keeping the cursor.
+    fn act_on_node(&mut self, r: NRef, f: impl Fn(&mut App, NRef)) {
+        let key = self.vault.key_of(r);
+        f(self, r);
+        let _ = key;
+    }
+
+    fn jump_heading(&mut self, doc: &notes_core::reading::ReadingDoc, dir: i32) {
+        use notes_core::reading::LineRef;
+        let mut i = self.read_cursor as i32 + dir;
+        while i >= 0 && (i as usize) < doc.lines.len() {
+            if matches!(doc.refs[i as usize], LineRef::Title(_)) {
+                let l = &doc.lines[i as usize];
+                if l.trim_start().starts_with('#') {
+                    self.read_cursor = i as usize;
+                    self.scroll_reading = self.read_cursor;
+                    return;
+                }
+            }
+            i += dir;
+        }
+    }
+
+    fn update_read_matches(&mut self, doc: &notes_core::reading::ReadingDoc) {
+        let q = self.read_search.to_lowercase();
+        self.read_matches = doc
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !q.is_empty() && l.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+        self.read_match_idx = 0;
+        if let Some(&m) = self.read_matches.first() {
+            self.read_cursor = m;
+            self.scroll_reading = m;
+        }
+        self.say(format!("{} match(es)", self.read_matches.len()));
+    }
+
+    fn next_match(&mut self, doc: &notes_core::reading::ReadingDoc, dir: i32) {
+        if self.read_matches.is_empty() {
+            self.say("no search (use /)");
+            return;
+        }
+        let _ = doc;
+        let n = self.read_matches.len() as i32;
+        self.read_match_idx = ((self.read_match_idx as i32 + dir).rem_euclid(n)) as usize;
+        let m = self.read_matches[self.read_match_idx];
+        self.read_cursor = m;
+        self.scroll_reading = m;
+    }
+
+    fn open_link_under_cursor(&mut self, doc: &notes_core::reading::ReadingDoc) {
+        let Some(line) = doc.lines.get(self.read_cursor) else { return };
+        if let Some(url) = extract_url(line) {
+            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+            match std::process::Command::new(opener).arg(&url).spawn() {
+                Ok(_) => self.say(format!("opened {}", url)),
+                Err(e) => self.say(format!("open failed: {}", e)),
+            }
+        } else {
+            self.say("no link on this line");
         }
     }
 
@@ -1075,9 +1550,15 @@ impl App {
                 Err(e) => self.say(format!("error: {}", e)),
             },
             "merge" => match notes_core::merge::merge_sync_conflicts(&mut self.vault, false) {
-                Ok(o) => self.say(format!("{} merge(s)", o.len())),
+                Ok(o) => {
+                    self.say(format!("{} merge(s)", o.len()));
+                    if !notes_core::merge::conflict_pairs(&self.vault).is_empty() {
+                        self.enter_conflict_view();
+                    }
+                }
                 Err(e) => self.say(format!("error: {}", e)),
             },
+            "resolve conflicts" => self.enter_conflict_view(),
             "toggle task" => self.act_toggle_task(),
             "toggle task-ness" => self.act_toggle_taskness(),
             "make block" => self.act_make_block(),
@@ -1129,6 +1610,11 @@ impl App {
                 .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
                 .split(chunks[0])
         };
+        if self.mode == Mode::Conflict {
+            self.draw_conflict(f, chunks[0]);
+            self.draw_status(f, chunks[1]);
+            return;
+        }
         self.draw_outline(f, panes[0]);
         match self.mode {
             Mode::Edit => self.draw_editor(f, panes[1]),
@@ -1151,6 +1637,7 @@ impl App {
                     PromptAction::CaptureText(t) => PromptAction::CaptureText(*t),
                     PromptAction::PropSet(k) => PromptAction::PropSet(k.clone()),
                     PromptAction::PropNew => PromptAction::PropNew,
+                    PromptAction::ReadSearch => PromptAction::ReadSearch,
                 },
             };
             self.draw_prompt(f, size, &p);
@@ -1256,16 +1743,15 @@ impl App {
         let target = self.zoom_root.or_else(|| self.current());
         let mut lines: Vec<Line> = Vec::new();
         if let Some(r) = target {
-            let text = if self.raw_mode {
-                render(&self.vault.tree, r, 1, false)
+            if self.raw_mode {
+                let text = render(&self.vault.tree, r, 1, false);
+                for l in text.lines() {
+                    lines.push(style_markdown_line(l, &self.vault, r));
+                }
             } else {
-                render(&self.vault.tree, r, 1, true)
-            };
-            for l in text.lines() {
-                lines.push(style_markdown_line(l, &self.vault, r));
-            }
-            // block properties as a dimmed header (§4.4, §10.1)
-            if !self.raw_mode {
+                let doc = notes_core::reading::build(&self.vault, r);
+                // block properties as a dimmed header (§4.4, §10.1)
+                let mut prop_header: Option<Line> = None;
                 if let Some(b) = &self.vault.tree.node(r).block {
                     let props: Vec<String> = b
                         .props
@@ -1274,18 +1760,35 @@ impl App {
                         .map(|(k, v)| format!("{} {}", k, v))
                         .collect();
                     if !props.is_empty() {
-                        lines.insert(
-                            1.min(lines.len()),
-                            Line::from(TSpan::styled(
-                                props.join(" · "),
-                                Style::default().fg(Color::DarkGray),
-                            )),
-                        );
+                        prop_header = Some(Line::from(TSpan::styled(
+                            props.join(" · "),
+                            Style::default().fg(Color::DarkGray),
+                        )));
                     }
+                }
+                for (i, l) in doc.lines.iter().enumerate() {
+                    let mut line = style_markdown_line(l, &self.vault, r);
+                    if focused {
+                        if i == self.read_cursor {
+                            line = line.style(Style::default().bg(Color::DarkGray));
+                        } else if self.read_matches.contains(&i) {
+                            line = line.style(Style::default().bg(Color::Indexed(58)));
+                        }
+                    }
+                    lines.push(line);
+                }
+                if let Some(h) = prop_header {
+                    lines.insert(1.min(lines.len()), h);
                 }
             }
         }
-        let skip = self.scroll_reading.min(lines.len().saturating_sub(1));
+        let inner = area.height.saturating_sub(2) as usize;
+        // keep the reading cursor visible
+        let skip = if focused && self.read_cursor >= inner && inner > 0 {
+            self.read_cursor + 1 - inner
+        } else {
+            self.scroll_reading.min(lines.len().saturating_sub(1))
+        };
         let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
         f.render_widget(Paragraph::new(lines).block(block), area);
     }
@@ -1564,6 +2067,30 @@ fn fuzzy_match(needle: &str, hay: &str) -> bool {
     n.peek().is_none()
 }
 
+/// First `[text](url)` or bare http(s) URL on a line (§4.6, §10.4 `o`).
+fn extract_url(line: &str) -> Option<String> {
+    // [text](url)
+    if let Some(open) = line.find("](") {
+        if let Some(close) = line[open + 2..].find(')') {
+            let url = &line[open + 2..open + 2 + close];
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+    // bare URL
+    for scheme in ["https://", "http://"] {
+        if let Some(i) = line.find(scheme) {
+            let rest = &line[i..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ')' || c == '"')
+                .unwrap_or(rest.len());
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
 struct PaletteAction {
     name: &'static str,
     key: Option<&'static str>,
@@ -1584,6 +2111,7 @@ fn palette_actions() -> Vec<PaletteAction> {
         PaletteAction { name: "canonicalize", key: None, desc: "rewrite the vault in canonical form" },
         PaletteAction { name: "check", key: None, desc: "diagnostics (same as canonicalize here)" },
         PaletteAction { name: "merge", key: None, desc: "process sync-conflict files" },
+        PaletteAction { name: "resolve conflicts", key: None, desc: "review and resolve conflict pairs" },
         PaletteAction { name: "go to", key: None, desc: "jump to a node by id, path or title" },
         PaletteAction { name: "refile", key: Some("r"), desc: "move the subtree under a new parent" },
         PaletteAction { name: "zoom out", key: Some("Backspace"), desc: "up one zoom level" },
@@ -1595,6 +2123,19 @@ fn palette_actions() -> Vec<PaletteAction> {
 
 pub fn run(dir: &Path) -> anyhow::Result<()> {
     let mut app = App::new(dir)?;
+    app.start_watcher();
+    // a sync-conflict file present at startup starts the merge flow (§12.2)
+    if let Ok(files) = app.vault.conflict_files() {
+        if !files.is_empty() {
+            match notes_core::merge::merge_sync_conflicts(&mut app.vault, false) {
+                Ok(o) => {
+                    app.say(format!("merged on startup: {}", o.join("; ")));
+                    app.enter_conflict_view();
+                }
+                Err(e) => app.say(format!("merge error: {}", e)),
+            }
+        }
+    }
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(std::io::stdout());
@@ -1626,6 +2167,10 @@ fn run_loop(
             && app.edit_last_key.elapsed() > Duration::from_millis(750)
         {
             app.save_editor("pause");
+        }
+        // external changes: debounced reload (§11.2)
+        if app.poll_watcher() {
+            app.reload_external();
         }
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
@@ -1689,7 +2234,7 @@ fn run_loop(
                         app.key_edit(key)
                     }
                     Mode::Props => app.key_props(key),
-                    Mode::Conflict => app.key_normal(key),
+                    Mode::Conflict => app.key_conflict(key),
                 }
             }
         }
