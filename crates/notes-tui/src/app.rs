@@ -37,18 +37,18 @@ enum Focus {
     Reading,
 }
 
-struct FlatRow {
-    nref: NRef,
-    depth: usize,
-    via_embed: bool,
+pub struct FlatRow {
+    pub nref: NRef,
+    pub depth: usize,
+    pub via_embed: bool,
 }
 
 pub struct App {
-    vault: Vault,
+    pub(crate) vault: Vault,
     mode: Mode,
     focus: Focus,
     zoom_root: Option<NRef>,
-    cursor: usize,
+    pub cursor: usize,
     folded: Vec<NodeKey>,
     hide_done: bool,
     raw_mode: bool,
@@ -62,6 +62,32 @@ pub struct App {
     palette: String,
     scroll_reading: usize,
     quit: bool,
+    // edit mode (§10.6)
+    edit_buf: Option<notes_core::edit::EditBuffer>,
+    edit_cursor: (usize, usize), // (line, col)
+    edit_last_key: Instant,
+    edit_saved_dot: bool,
+    // property editor (§10.6)
+    props_target: Option<NRef>,
+    props_rows: Vec<(String, String, bool)>,
+    props_sel: usize,
+    props_editing: Option<String>,
+    // text prompt (refile destination, capture text)
+    prompt: Option<Prompt>,
+}
+
+struct Prompt {
+    label: String,
+    text: String,
+    action: PromptAction,
+}
+
+enum PromptAction {
+    Refile,
+    GoTo,
+    CaptureText(bool),
+    PropSet(String),
+    PropNew,
 }
 
 impl App {
@@ -86,17 +112,30 @@ impl App {
             palette: String::new(),
             scroll_reading: 0,
             quit: false,
+            edit_buf: None,
+            edit_cursor: (0, 0),
+            edit_last_key: Instant::now(),
+            edit_saved_dot: false,
+            props_target: None,
+            props_rows: Vec::new(),
+            props_sel: 0,
+            props_editing: None,
+            prompt: None,
         })
     }
 
-    fn say(&mut self, msg: impl Into<String>) {
+    pub fn vault_dir(&self) -> std::path::PathBuf {
+        self.vault.dir.clone()
+    }
+
+    pub fn say(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
         self.status_time = Instant::now();
     }
 
     /// Visible outline rows: the zoom subtree, flattened, honouring folds
     /// and the hide-done toggle.
-    fn rows(&self) -> Vec<FlatRow> {
+    pub fn rows(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
         let root = self.zoom_root.unwrap_or(self.vault.tree.root);
         self.flatten(root, 0, false, &mut out);
@@ -130,7 +169,7 @@ impl App {
         }
     }
 
-    fn current(&self) -> Option<NRef> {
+    pub fn current(&self) -> Option<NRef> {
         let rows = self.rows();
         rows.get(self.cursor.min(rows.len().saturating_sub(1)))
             .map(|r| r.nref)
@@ -173,6 +212,7 @@ impl App {
     // -------------------------------------------------------- actions
 
     fn act_toggle_task(&mut self) {
+        self.push_undo("act_toggle_task");
         let Some(r) = self.current() else { return };
         let key = self.vault.key_of(r);
         match ops::toggle_task(&mut self.vault, r) {
@@ -187,6 +227,7 @@ impl App {
     }
 
     fn act_toggle_taskness(&mut self) {
+        self.push_undo("act_toggle_taskness");
         let Some(r) = self.current() else { return };
         let key = self.vault.key_of(r);
         match ops::toggle_taskness(&mut self.vault, r) {
@@ -201,6 +242,7 @@ impl App {
     }
 
     fn act_make_block(&mut self) {
+        self.push_undo("act_make_block");
         let Some(r) = self.current() else { return };
         let path = self.vault.tree.path(r);
         match ops::make_block(&mut self.vault, r) {
@@ -216,6 +258,7 @@ impl App {
     }
 
     fn act_delete(&mut self) {
+        self.push_undo("act_delete");
         let Some(r) = self.current() else { return };
         self.register = ops::yank(&self.vault, r);
         match ops::delete_subtree(&mut self.vault, r) {
@@ -225,12 +268,14 @@ impl App {
     }
 
     fn act_yank(&mut self) {
+        self.push_undo("act_yank");
         let Some(r) = self.current() else { return };
         self.register = ops::yank(&self.vault, r);
         self.say("yanked");
     }
 
     fn act_paste(&mut self, after: bool) {
+        self.push_undo("act_paste");
         if self.register.is_empty() {
             self.say("register empty");
             return;
@@ -244,6 +289,7 @@ impl App {
     }
 
     fn act_capture(&mut self, task: bool) {
+        self.push_undo("act_capture");
         match ops::capture(&mut self.vault, "", task) {
             Ok(r) => {
                 self.move_cursor_to(r);
@@ -254,6 +300,7 @@ impl App {
     }
 
     fn act_move(&mut self, down: bool) {
+        self.push_undo("act_move");
         let Some(r) = self.current() else { return };
         let key = self.vault.key_of(r);
         match ops::move_sibling(&mut self.vault, r, down) {
@@ -267,6 +314,7 @@ impl App {
     }
 
     fn act_spelling(&mut self) {
+        self.push_undo("act_spelling");
         let Some(r) = self.current() else { return };
         let key = self.vault.key_of(r);
         match ops::toggle_spelling(&mut self.vault, r) {
@@ -280,6 +328,7 @@ impl App {
     }
 
     fn act_demote(&mut self) {
+        self.push_undo("act_demote");
         let Some(r) = self.current() else { return };
         let key = self.vault.key_of(r);
         match ops::demote(&mut self.vault, r) {
@@ -293,6 +342,7 @@ impl App {
     }
 
     fn act_promote(&mut self) {
+        self.push_undo("act_promote");
         let Some(r) = self.current() else { return };
         let key = self.vault.key_of(r);
         match ops::promote(&mut self.vault, r) {
@@ -306,6 +356,7 @@ impl App {
     }
 
     fn act_archive(&mut self) {
+        self.push_undo("act_archive");
         let Some(r) = self.current() else { return };
         match ops::archive(&mut self.vault, r) {
             Ok(()) => self.refresh_after("archived"),
@@ -314,6 +365,7 @@ impl App {
     }
 
     fn act_clear_done(&mut self) {
+        self.push_undo("act_clear_done");
         let target = self.zoom_root.unwrap_or(self.vault.tree.root);
         match ops::clear_done(&mut self.vault, target) {
             Ok(n) => self.refresh_after(&format!("{} done item(s) trashed", n)),
@@ -322,6 +374,7 @@ impl App {
     }
 
     fn act_refile(&mut self, dest_text: &str) {
+        self.push_undo("act_refile");
         let Some(r) = self.current() else { return };
         match self.vault.resolve_target(dest_text) {
             Ok(dest) => match ops::refile(&mut self.vault, r, dest) {
@@ -334,31 +387,36 @@ impl App {
 
     fn act_new_node(&mut self, child: bool) {
         let Some(r) = self.current() else { return };
-        let title = "new node";
         let res = if child {
-            // append a new last child and land on it
-            let line_node = title;
-            match ops::append_child_public(&mut self.vault, r, line_node) {
+            match ops::append_child_public(&mut self.vault, r, "") {
                 Ok(nr) => {
                     self.move_cursor_to(nr);
-                    Ok(())
+                    self.act_edit();
+                    return;
                 }
                 Err(e) => Err(e),
             }
         } else {
-            let key = self.vault.key_of(r);
             let n = self.vault.tree.node(r);
             let line = match n.kind {
-                Kind::Section => format!(
-                    "{} {}",
-                    "#".repeat(self.vault.tree.level(r)),
-                    title
-                ),
-                _ => "- new node".to_string(),
+                Kind::Section => format!("{} ", "#".repeat(self.vault.tree.level(r))),
+                _ => "- ".to_string(),
             };
-            ops::paste(&mut self.vault, r, &format!("{}\n", line), true).map(|_| {
-                self.vault.find_by_key(&key);
-            })
+            match ops::paste(&mut self.vault, r, &format!("{}\n", line), true) {
+                Ok(()) => {
+                    // move to the new sibling (next row with an empty title)
+                    let rows = self.rows();
+                    if let Some(i) = rows
+                        .iter()
+                        .position(|row| self.vault.tree.node(row.nref).title.is_empty())
+                    {
+                        self.cursor = i;
+                    }
+                    self.act_edit();
+                    return;
+                }
+                Err(e) => Err(e),
+            }
         };
         match res {
             Ok(()) => self.refresh_after("node created"),
@@ -366,9 +424,306 @@ impl App {
         }
     }
 
+    // -------------------------------------------------------- editor (§10.6)
+
+    pub fn act_edit(&mut self) {
+        let Some(r) = self.current() else { return };
+        let target = if self.vault.tree.node(r).is_embed() {
+            self.vault.tree.resolved_child(r)
+        } else {
+            r
+        };
+        self.edit_buf = Some(notes_core::edit::open_editor(&self.vault, target));
+        self.edit_cursor = (0, 0);
+        self.edit_saved_dot = false;
+        self.mode = Mode::Edit;
+        self.focus = Focus::Reading;
+    }
+
+    fn save_editor(&mut self, why: &str) {
+        let Some(mut buf) = self.edit_buf.take() else { return };
+        match buf.save_all(&mut self.vault) {
+            Ok(n) => {
+                if n > 0 {
+                    self.say(format!("saved {} block(s) ({})", n, why));
+                }
+                self.edit_saved_dot = false;
+            }
+            Err(e) => self.say(format!("error: {}", e)),
+        }
+        self.edit_buf = Some(buf);
+        self.edit_last_key = Instant::now();
+    }
+
+    fn close_editor(&mut self) {
+        self.save_editor("exit");
+        self.edit_buf = None;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn key_edit(&mut self, key: KeyEvent) {
+        let Some(buf) = self.edit_buf.as_mut() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let (line, col) = self.edit_cursor;
+        let nlines = buf.lines.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.close_editor();
+                return;
+            }
+            KeyCode::Up => {
+                if line > 0 {
+                    self.edit_cursor.0 = line - 1;
+                }
+            }
+            KeyCode::Down => {
+                if line + 1 < nlines {
+                    self.edit_cursor.0 = line + 1;
+                }
+            }
+            KeyCode::Left => {
+                self.edit_cursor.1 = col.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let len = buf.lines.get(line).map(|l| l.text.chars().count()).unwrap_or(0);
+                if col < len {
+                    self.edit_cursor.1 = col + 1;
+                }
+            }
+            KeyCode::Enter => {
+                // split the line at the cursor
+                let cur = buf.lines.get(line).map(|l| l.text.clone()).unwrap_or_default();
+                let byte_col = cur
+                    .char_indices()
+                    .nth(col)
+                    .map(|(i, _)| i)
+                    .unwrap_or(cur.len());
+                let (a, b) = cur.split_at(byte_col);
+                buf.set_line(line, a.to_string());
+                buf.insert_line(line, b.to_string());
+                self.edit_cursor = (line + 1, 0);
+            }
+            KeyCode::Backspace => {
+                if col > 0 {
+                    if let Some(l) = buf.lines.get(line) {
+                        let byte_col = l
+                            .text
+                            .char_indices()
+                            .nth(col)
+                            .map(|(i, _)| i)
+                            .unwrap_or(l.text.len());
+                        let prev = l.text[..byte_col]
+                            .char_indices()
+                            .last()
+                            .map(|(i, c)| (i, c.len_utf8()))
+                            .unwrap_or((0, 0));
+                        let mut t = l.text.clone();
+                        t.replace_range(prev.0..byte_col, "");
+                        buf.set_line(line, t);
+                        self.edit_cursor.1 = col - 1;
+                    }
+                } else if line > 0 {
+                    // join with the previous line
+                    let cur = buf.lines.get(line).map(|l| l.text.clone()).unwrap_or_default();
+                    let prev_len = buf
+                        .lines
+                        .get(line - 1)
+                        .map(|l| l.text.chars().count())
+                        .unwrap_or(0);
+                    let prev = buf.lines.get(line - 1).map(|l| l.text.clone()).unwrap_or_default();
+                    buf.set_line(line - 1, format!("{}{}", prev, cur));
+                    buf.delete_line(line);
+                    self.edit_cursor = (line - 1, prev_len);
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(l) = buf.lines.get(line) {
+                    let byte_col = l
+                        .text
+                        .char_indices()
+                        .nth(col)
+                        .map(|(i, _)| i)
+                        .unwrap_or(l.text.len());
+                    let mut t = l.text.clone();
+                    t.insert(byte_col, c);
+                    buf.set_line(line, t);
+                    self.edit_cursor.1 = col + 1;
+                    self.edit_saved_dot = true;
+                }
+            }
+            _ => {}
+        }
+        self.edit_last_key = Instant::now();
+        // moving out of a dirty block saves it (§10.6)
+        let new_owner = self
+            .edit_buf
+            .as_ref()
+            .map(|b| b.owner_at(self.edit_cursor.0));
+        let old_owner = self.edit_buf.as_ref().map(|b| b.owner_at(line));
+        if new_owner != old_owner {
+            if let (Some(old), Some(buf2)) = (old_owner, self.edit_buf.as_mut()) {
+                if buf2.dirty.contains(&old) {
+                    let mut tmp = self.edit_buf.take().unwrap();
+                    let _ = tmp.splice(&mut self.vault, old);
+                    self.edit_buf = Some(tmp);
+                }
+            }
+        }
+        self.edit_saved_dot = self
+            .edit_buf
+            .as_ref()
+            .map(|b| !b.dirty.is_empty())
+            .unwrap_or(false);
+    }
+
+    // -------------------------------------------------------- props (§10.6)
+
+    fn act_props(&mut self) {
+        let Some(r) = self.current() else { return };
+        let target = if self.vault.tree.node(r).is_embed() {
+            self.vault.tree.resolved_child(r)
+        } else {
+            r
+        };
+        self.props_target = Some(target);
+        self.props_rows = if self.vault.tree.node(target).is_block() {
+            ops::frontmatter_lines(&self.vault, target.0)
+                .into_iter()
+                .filter(|(k, _, _)| k != "id")
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.props_sel = 0;
+        self.props_editing = None;
+        self.mode = Mode::Props;
+    }
+
+    pub fn key_props(&mut self, key: KeyEvent) {
+        if self.props_editing.is_some() {
+            // handled by the prompt path
+            self.mode = Mode::Normal;
+            self.props_editing = None;
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.props_sel + 1 < self.props_rows.len() {
+                    self.props_sel += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.props_sel = self.props_sel.saturating_sub(1);
+            }
+            KeyCode::Char('n') => {
+                self.prompt = Some(Prompt {
+                    label: "new key".into(),
+                    text: String::new(),
+                    action: PromptAction::PropNew,
+                });
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                if let Some((k, _, editable)) = self.props_rows.get(self.props_sel).cloned() {
+                    if editable {
+                        self.prompt = Some(Prompt {
+                            label: format!("{}", k),
+                            text: String::new(),
+                            action: PromptAction::PropSet(k),
+                        });
+                        self.mode = Mode::Normal;
+                    } else {
+                        self.say("read-only line (preserved verbatim)");
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some((k, _, editable)) = self.props_rows.get(self.props_sel).cloned() {
+                    if editable {
+                        if let Some(t) = self.props_target {
+                            let _ = ops::set_frontmatter_key(&mut self.vault, t.0, &k, None);
+                            self.props_rows.remove(self.props_sel);
+                            self.props_sel = self.props_sel.saturating_sub(1);
+                            self.say(format!("{} removed", k));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn key_prompt(&mut self, key: KeyEvent) {
+        let Some(mut p) = self.prompt.take() else { return };
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Enter => {
+                match p.action {
+                    PromptAction::Refile => self.act_refile(&p.text),
+                    PromptAction::GoTo => match self.vault.resolve_target(&p.text) {
+                        Ok(r) => self.move_cursor_to(r),
+                        Err(e) => self.say(e),
+                    },
+                    PromptAction::CaptureText(task) => {
+                        match ops::capture(&mut self.vault, &p.text, task) {
+                            Ok(r) => {
+                                self.move_cursor_to(r);
+                                self.say("captured");
+                            }
+                            Err(e) => self.say(format!("error: {}", e)),
+                        }
+                    }
+                    PromptAction::PropSet(k) => {
+                        if let Some(t) = self.props_target {
+                            // validate dates (§8.4)
+                            if (k == "due" || k == "done")
+                                && !notes_core::check::is_iso_date(&p.text)
+                            {
+                                self.say(format!("{}: must be YYYY-MM-DD", k));
+                                return;
+                            }
+                            match ops::set_property(&mut self.vault, t, &k, &p.text) {
+                                Ok(()) => self.say(format!("{} set", k)),
+                                Err(e) => self.say(format!("error: {}", e)),
+                            }
+                        }
+                    }
+                    PromptAction::PropNew => {
+                        if let Some(t) = self.props_target {
+                            let key_name = p.text.trim().to_string();
+                            if notes_core::parse::is_valid_key(&key_name) {
+                                self.prompt = Some(Prompt {
+                                    label: format!("{}", key_name),
+                                    text: String::new(),
+                                    action: PromptAction::PropSet(key_name),
+                                });
+                                return;
+                            }
+                            self.say("invalid key");
+                        }
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                p.text.pop();
+                self.prompt = Some(p);
+            }
+            KeyCode::Char(c) => {
+                p.text.push(c);
+                self.prompt = Some(p);
+            }
+            _ => {}
+        }
+    }
+
     // -------------------------------------------------------- input
 
-    fn key_normal(&mut self, key: KeyEvent) {
+    pub fn key_normal(&mut self, key: KeyEvent) {
         let rows = self.rows();
         match self.focus {
             Focus::Outline => self.key_outline(key, rows),
@@ -376,7 +731,7 @@ impl App {
         }
     }
 
-    fn key_outline(&mut self, key: KeyEvent, rows: Vec<FlatRow>) {
+    pub fn key_outline(&mut self, key: KeyEvent, rows: Vec<FlatRow>) {
         let len = rows.len();
         match key.code {
             KeyCode::Char('q') => self.quit = true,
@@ -515,12 +870,68 @@ impl App {
                 self.mode = Mode::Picker;
                 self.palette.clear();
             }
-            KeyCode::Char('u') => self.say("undo: not available in this build"),
-            KeyCode::Char('U') => self.say("redo: not available in this build"),
-            KeyCode::Char('e') => self.say("e: editor opens in the reading pane (Enter to zoom first)"),
-            KeyCode::Char('a') => self.say("a: property editor (not implemented)"),
-            KeyCode::Char('r') => self.say("r: refile — use :refile"),
+            KeyCode::Char('u') => self.act_undo(),
+            KeyCode::Char('U') => self.act_redo(),
+            KeyCode::Char('e') => self.act_edit(),
+            KeyCode::Char('a') => self.act_props(),
+            KeyCode::Char('r') => {
+                self.prompt = Some(Prompt {
+                    label: "refile to".into(),
+                    text: String::new(),
+                    action: PromptAction::Refile,
+                });
+            }
             _ => {}
+        }
+    }
+
+    fn act_undo(&mut self) {
+        if let Some(inv) = self.undo.pop() {
+            let redo_snapshot = self.snapshot("redo point");
+            match inv.apply(&mut self.vault) {
+                Ok(()) => {
+                    self.redo.push(redo_snapshot);
+                    self.clamp_cursor();
+                    self.say("undone");
+                }
+                Err(e) => self.say(format!("undo failed: {}", e)),
+            }
+        } else {
+            self.say("nothing to undo");
+        }
+    }
+
+    fn act_redo(&mut self) {
+        if let Some(inv) = self.redo.pop() {
+            let undo_snapshot = self.snapshot("undo point");
+            match inv.apply(&mut self.vault) {
+                Ok(()) => {
+                    self.undo.push(undo_snapshot);
+                    self.clamp_cursor();
+                    self.say("redone");
+                }
+                Err(e) => self.say(format!("redo failed: {}", e)),
+            }
+        } else {
+            self.say("nothing to redo");
+        }
+    }
+
+    fn push_undo(&mut self, desc: &str) {
+        self.undo.push(self.snapshot(desc));
+        self.redo.clear();
+    }
+
+    fn snapshot(&self, desc: &str) -> ops::Inverse {
+        ops::Inverse {
+            files: self
+                .vault
+                .tree
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), Some(f.text.clone())))
+                .collect(),
+            description: desc.into(),
         }
     }
 
@@ -552,7 +963,7 @@ impl App {
         }
     }
 
-    fn key_filter(&mut self, key: KeyEvent) {
+    pub fn key_filter(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -609,7 +1020,7 @@ impl App {
         self.filter_rows = hits;
     }
 
-    fn key_palette(&mut self, key: KeyEvent) {
+    pub fn key_palette(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -674,7 +1085,7 @@ impl App {
 
     // -------------------------------------------------------- render
 
-    fn draw(&mut self, f: &mut ratatui::Frame) {
+    pub fn draw(&mut self, f: &mut ratatui::Frame) {
         let size = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -693,12 +1104,30 @@ impl App {
                 .split(chunks[0])
         };
         self.draw_outline(f, panes[0]);
-        self.draw_reading(f, panes[1]);
+        match self.mode {
+            Mode::Edit => self.draw_editor(f, panes[1]),
+            _ => self.draw_reading(f, panes[1]),
+        }
         self.draw_status(f, chunks[1]);
         match self.mode {
             Mode::Filter => self.draw_filter(f, size),
             Mode::Picker => self.draw_palette(f, size),
+            Mode::Props => self.draw_props(f, size),
             _ => {}
+        }
+        if let Some(p) = self.prompt.as_ref() {
+            let p = Prompt {
+                label: p.label.clone(),
+                text: p.text.clone(),
+                action: match &p.action {
+                    PromptAction::Refile => PromptAction::Refile,
+                    PromptAction::GoTo => PromptAction::GoTo,
+                    PromptAction::CaptureText(t) => PromptAction::CaptureText(*t),
+                    PromptAction::PropSet(k) => PromptAction::PropSet(k.clone()),
+                    PromptAction::PropNew => PromptAction::PropNew,
+                },
+            };
+            self.draw_prompt(f, size, &p);
         }
     }
 
@@ -835,11 +1264,133 @@ impl App {
         f.render_widget(Paragraph::new(lines).block(block), area);
     }
 
+    fn draw_editor(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let block = WBlock::default()
+            .borders(Borders::ALL)
+            .title(" editing ")
+            .border_style(Style::default().fg(Color::White));
+        let Some(buf) = &self.edit_buf else {
+            f.render_widget(block, area);
+            return;
+        };
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let (cl, _cc) = self.edit_cursor;
+        let scroll = if cl >= inner_height {
+            cl + 1 - inner_height
+        } else {
+            0
+        };
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, l) in buf.lines.iter().enumerate().skip(scroll).take(inner_height) {
+            let style = if i == cl {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            let mut line = Line::from(TSpan::styled(l.text.clone(), style));
+            if i == cl {
+                // place a visible cursor by styling the cell
+                line = Line::from(TSpan::styled(l.text.clone(), style));
+            }
+            lines.push(line);
+        }
+        f.render_widget(Paragraph::new(lines).block(block), area);
+        // terminal cursor
+        let x = area.x + 1 + self.edit_cursor.1 as u16;
+        let y = area.y + 1 + (cl - scroll) as u16;
+        if x < area.x + area.width && y < area.y + area.height {
+            f.set_cursor_position((x, y));
+        }
+    }
+
+    fn draw_props(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let h = (self.props_rows.len() as u16 + 4).min(area.height - 4).max(4);
+        let rect = Rect {
+            x: area.x + 6,
+            y: area.y + 3,
+            width: area.width.saturating_sub(12).min(60),
+            height: h,
+        };
+        f.render_widget(Clear, rect);
+        let mut lines: Vec<Line> = Vec::new();
+        let title = self
+            .props_target
+            .map(|t| self.vault.tree.node(t).title.clone())
+            .unwrap_or_default();
+        lines.push(Line::from(TSpan::styled(
+            format!("properties of {}", title),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if self.props_rows.is_empty() {
+            lines.push(Line::from(TSpan::styled(
+                "  (none — n adds one; the first makes this node a block)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for (i, (k, v, editable)) in self.props_rows.iter().enumerate() {
+            let style = if i == self.props_sel {
+                Style::default().bg(Color::DarkGray)
+            } else if !editable {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(TSpan::styled(
+                format!("  {}: {}", k, v),
+                style,
+            )));
+        }
+        lines.push(Line::from(TSpan::styled(
+            "  n new · Enter/e edit · d delete · Esc close",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let block = WBlock::default().borders(Borders::ALL).title(" properties ");
+        f.render_widget(Paragraph::new(lines).block(block), rect);
+    }
+
+    fn draw_prompt(&mut self, f: &mut ratatui::Frame, area: Rect, p: &Prompt) {
+        let rect = Rect {
+            x: area.x + 4,
+            y: area.y + area.height.saturating_sub(3),
+            width: area.width.saturating_sub(8),
+            height: 3,
+        };
+        f.render_widget(Clear, rect);
+        let line = Line::from(vec![
+            TSpan::styled(format!("{}: ", p.label), Style::default().add_modifier(Modifier::BOLD)),
+            TSpan::raw(p.text.clone()),
+        ]);
+        let block = WBlock::default().borders(Borders::ALL);
+        f.render_widget(Paragraph::new(line).block(block), rect);
+    }
+
     fn draw_status(&mut self, f: &mut ratatui::Frame, area: Rect) {
         let file = self
             .current()
             .map(|r| self.vault.tree.files[r.0].path.clone())
             .unwrap_or_else(|| "root.md".into());
+        // in edit mode the status names the block the cursor is in (§10.6)
+        let edit_part = if self.mode == Mode::Edit {
+            match &self.edit_buf {
+                Some(buf) => {
+                    let owner = buf.owner_at(self.edit_cursor.0);
+                    let title = buf
+                        .owners
+                        .get(&owner)
+                        .map(|o| o.title.clone())
+                        .unwrap_or_default();
+                    let dot = if self.edit_saved_dot || !buf.dirty.is_empty() {
+                        " ●"
+                    } else {
+                        ""
+                    };
+                    format!(" {}· {}", title, dot)
+                }
+                None => String::new(),
+            }
+        } else {
+            String::new()
+        };
         let mode = match self.mode {
             Mode::Normal => "",
             Mode::Edit => " EDIT",
@@ -858,8 +1409,8 @@ impl App {
         let line = Line::from(vec![
             TSpan::styled(mode, Style::default().add_modifier(Modifier::BOLD)),
             TSpan::raw(format!(
-                "  {} · {} · saved{}{}",
-                self.status, file, cpart, ""
+                "  {} · {}{} · saved{}{}",
+                self.status, file, edit_part, cpart, ""
             )),
             TSpan::styled(format!("  {}", time), Style::default().fg(Color::DarkGray)),
         ]);
@@ -1035,9 +1586,20 @@ fn run_loop(
     loop {
         terminal.draw(|f| app.draw(f))?;
         if app.quit {
+            // save any open editor on quit (§10.6)
+            if app.edit_buf.is_some() {
+                app.close_editor();
+            }
             return Ok(());
         }
-        if event::poll(Duration::from_millis(250))? {
+        // autosave after 750 ms without a keystroke (§10.6)
+        if app.mode == Mode::Edit
+            && app.edit_buf.as_ref().map(|b| !b.dirty.is_empty()).unwrap_or(false)
+            && app.edit_last_key.elapsed() > Duration::from_millis(750)
+        {
+            app.save_editor("pause");
+        }
+        if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
                 {
@@ -1069,6 +1631,10 @@ fn run_loop(
                 }
                 match app.mode {
                     Mode::Normal => {
+                        if app.prompt.is_some() {
+                            app.key_prompt(key);
+                            continue;
+                        }
                         if key.code == KeyCode::Char('z') {
                             pending_z = true;
                             continue;
@@ -1081,7 +1647,21 @@ fn run_loop(
                     }
                     Mode::Filter => app.key_filter(key),
                     Mode::Picker => app.key_palette(key),
-                    _ => app.key_normal(key),
+                    Mode::Edit => {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('c')
+                        {
+                            // discard changes since last save (§10.6)
+                            app.edit_buf = None;
+                            app.mode = Mode::Normal;
+                            app.vault.reload().ok();
+                            app.say("changes discarded");
+                            continue;
+                        }
+                        app.key_edit(key)
+                    }
+                    Mode::Props => app.key_props(key),
+                    Mode::Conflict => app.key_normal(key),
                 }
             }
         }
