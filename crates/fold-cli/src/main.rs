@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "fold", version, about = "tree-shaped plain-text notes and tasks")]
+#[command(name = "fold", version, about = "tree-shaped plain-text notes and tasks", disable_help_subcommand = true)]
 struct Cli {
     /// Vault directory (default: $FOLD_VAULT, else nearest ancestor of $PWD
     /// containing root.md, else ~/fold).
@@ -45,6 +45,8 @@ enum Command {
         #[command(subcommand)]
         action: TrashAction,
     },
+    /// How to use fold: keys, concepts, workflow.
+    Help,
 }
 
 #[derive(Subcommand)]
@@ -179,6 +181,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Some(Command::Help) => {
+            for line in fold_tui::app::help_text() {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                println!("{}", text);
+            }
+        }
     }
     Ok(())
 }

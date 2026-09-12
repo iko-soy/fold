@@ -120,3 +120,14 @@ fn trash_list_and_restore() {
         .to_string_lossy()
         .contains("doomed")));
 }
+
+#[test]
+fn help_prints_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    notes(dir.path())
+        .args(["help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("command palette"))
+        .stdout(predicate::str::contains("make block"));
+}

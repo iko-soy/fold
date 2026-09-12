@@ -29,6 +29,7 @@ pub enum Mode {
     Picker,
     Conflict,
     Props,
+    Help,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -175,6 +176,7 @@ impl App {
             Mode::Picker => "picker",
             Mode::Conflict => "conflict",
             Mode::Props => "props",
+            Mode::Help => "help",
         }
     }
     pub fn title_of(&self, r: NRef) -> String { self.vault.tree.node(r).title.clone() }
@@ -1150,9 +1152,12 @@ impl App {
                 self.filter.clear();
                 self.filter_rows.clear();
             }
-            KeyCode::Char(':') | KeyCode::Char('?') => {
+            KeyCode::Char(':') => {
                 self.mode = Mode::Picker;
                 self.palette.clear();
+            }
+            KeyCode::Char('?') => {
+                self.mode = Mode::Help;
             }
             KeyCode::Char('u') => self.act_undo(),
             KeyCode::Char('U') => self.act_redo(),
@@ -1585,6 +1590,7 @@ impl App {
                 self.zoom_root = None;
                 self.cursor = 0;
             }
+            "help" => self.mode = Mode::Help,
             "quit" => self.quit = true,
             _ => self.say(format!("{}: no handler", name)),
         }
@@ -1625,6 +1631,7 @@ impl App {
             Mode::Filter => self.draw_filter(f, size),
             Mode::Picker => self.draw_palette(f, size),
             Mode::Props => self.draw_props(f, size),
+            Mode::Help => self.draw_help(f, size),
             _ => {}
         }
         if let Some(p) = self.prompt.as_ref() {
@@ -1927,6 +1934,7 @@ impl App {
             Mode::Picker => " :",
             Mode::Conflict => " CONFLICT",
             Mode::Props => " PROPS",
+            Mode::Help => " HELP",
         };
         let conflicts = fold_core::merge::conflict_pairs(&self.vault).len();
         let cpart = if conflicts > 0 {
@@ -1965,6 +1973,23 @@ impl App {
         }
         let block = WBlock::default().borders(Borders::ALL).title(" filter ");
         f.render_widget(Paragraph::new(lines).block(block), rect);
+    }
+
+    fn draw_help(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let w = area.width.saturating_sub(8).min(76);
+        let h = area.height.saturating_sub(4);
+        let rect = Rect {
+            x: (area.width.saturating_sub(w)) / 2,
+            y: (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, rect);
+        let block = WBlock::default()
+            .borders(Borders::ALL)
+            .title(" fold — help (?/Esc closes) ")
+            .border_style(Style::default().fg(Color::Cyan));
+        f.render_widget(Paragraph::new(help_text()).block(block), rect);
     }
 
     fn draw_palette(&mut self, f: &mut ratatui::Frame, area: Rect) {
@@ -2054,6 +2079,73 @@ fn style_markdown_line(l: &str, vault: &Vault, _ctx: NRef) -> Line<'static> {
     Line::from(TSpan::raw(l.to_string()))
 }
 
+/// The help text, shared by `?` in the TUI and `fold help` (§10.9).
+pub fn help_text() -> Vec<Line<'static>> {
+    let entries: &[(&str, &str)] = &[
+        ("", "fold — a tree of notes and tasks in plain Markdown."),
+        ("", "One outline; zoom is the unit of reading and editing."),
+        ("", ""),
+        ("MOVING", ""),
+        ("j/k ←/→", "move · h/l fold & unfold · gg/G first/last"),
+        ("Enter", "zoom into the node (reading pane takes focus)"),
+        ("Backspace", "zoom out · - parent · {/} prev/next sibling"),
+        ("Tab", "switch outline ↔ reading pane · Ctrl-d/u scroll"),
+        ("", ""),
+        ("NODES", ""),
+        ("n / N", "new sibling / new child (opens the editor)"),
+        ("e", "edit the subtree's Markdown (saves as you type)"),
+        ("a", "properties form — the first property makes a block"),
+        ("x / t", "toggle done / toggle task-ness"),
+        ("s", "make block: give the node its own file + id"),
+        ("~", "spelling: heading ↔ bullet · >/< demote/promote"),
+        ("J / K", "move among siblings · r refile (id, path or title)"),
+        ("y / d", "yank / trash subtree · p/P paste after/before"),
+        ("u / U", "undo / redo"),
+        ("", ""),
+        ("FINDING", ""),
+        ("/", "filter box: fuzzy titles + full text, Enter zooms"),
+        (":", "command palette — every action by name"),
+        ("?", "this help"),
+        ("", ""),
+        ("TASKS & CAPTURE", ""),
+        ("c / C", "capture a note / a task into today's inbox day"),
+        ("za", "archive subtree under # Archive · zd hide done"),
+        ("zr", "raw mode: exact source, frontmatter included"),
+        (":clear done", "trash done items under the zoom root"),
+        ("", ""),
+        ("READING PANE", ""),
+        ("Enter", "toggle task / zoom heading / follow embed"),
+        ("x e a o", "toggle · edit · properties · open link"),
+        ("[[ / ]]", "previous / next heading · / search, n/N next"),
+        ("", ""),
+        ("CONFLICTS & QUIT", ""),
+        (":merge", "fold sync-conflict files in, then resolve:"),
+        ("o t b", "keep ours / theirs / both · n/N pairs · Enter done"),
+        ("q", "quit — everything is always saved"),
+    ];
+    entries
+        .iter()
+        .map(|(k, v)| {
+            if v.is_empty() && !k.is_empty() {
+                Line::from(TSpan::styled(
+                    k.to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(vec![
+                    TSpan::styled(
+                        format!("{:<11}", k),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    TSpan::raw(v.to_string()),
+                ])
+            }
+        })
+        .collect()
+}
+
 fn fuzzy_match(needle: &str, hay: &str) -> bool {
     // simple subsequence match (nucleo would weight; this is the picker path)
     let mut n = needle.chars().peekable();
@@ -2115,6 +2207,7 @@ fn palette_actions() -> Vec<PaletteAction> {
         PaletteAction { name: "go to", key: None, desc: "jump to a node by id, path or title" },
         PaletteAction { name: "refile", key: Some("r"), desc: "move the subtree under a new parent" },
         PaletteAction { name: "zoom out", key: Some("Backspace"), desc: "up one zoom level" },
+        PaletteAction { name: "help", key: Some("?"), desc: "how to use fold" },
         PaletteAction { name: "quit", key: Some("q"), desc: "save and exit" },
     ]
 }
@@ -2234,6 +2327,11 @@ fn run_loop(
                         app.key_edit(key)
                     }
                     Mode::Props => app.key_props(key),
+                    Mode::Help => {
+                        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')) {
+                            app.mode = Mode::Normal;
+                        }
+                    }
                     Mode::Conflict => app.key_conflict(key),
                 }
             }

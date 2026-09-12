@@ -86,3 +86,9 @@
 
 # 2026-09-12 08:02:08.035115456 +0000 UTC
 +rename the application to "fold"
+
+# 2026-09-12 11:32:45.555652593 +0000 UTC
++Are you done?
+
+# 2026-09-12 12:51:59.768963915 +0000 UTC
++Add a brief "help" command describing how to use it. ? should also bring it up

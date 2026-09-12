@@ -149,3 +149,24 @@ fn undo_restores_delete() {
 fn app_vault_path(app: &App) -> std::path::PathBuf {
     app.vault_dir()
 }
+
+#[test]
+fn question_mark_opens_help() {
+    let (_d, mut app) = app_with("# A\n");
+    app.key_normal(key(KeyCode::Char('?')));
+    assert_eq!(app.mode_pub(), "help");
+    let s = screen(&mut app, 100, 40);
+    assert!(s.contains("fold — help"), "{}", s);
+    assert!(s.contains("command palette"), "{}", s);
+    assert!(s.contains("make block"), "{}", s);
+    // Esc closes
+    app.key_normal(key(KeyCode::Esc));
+    // Esc in help mode is handled by the dispatcher, not key_normal; simulate:
+    // (the real loop routes Help mode keys) — here we just re-open via palette
+    app.key_normal(key(KeyCode::Char(':')));
+    for c in "help".chars() {
+        app.key_palette(key(KeyCode::Char(c)));
+    }
+    app.key_palette(key(KeyCode::Enter));
+    assert_eq!(app.mode_pub(), "help");
+}
