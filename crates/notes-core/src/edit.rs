@@ -8,8 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{parse_file, Block, Kind, TaskState};
-use crate::render::render;
+use crate::parse::{Kind, TaskState};
 use crate::tree::NRef;
 use crate::vault::Vault;
 use std::collections::BTreeMap;

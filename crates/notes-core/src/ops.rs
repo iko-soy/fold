@@ -182,10 +182,12 @@ fn append_child_line(
     let parent_key = vault.key_of(parent);
     let node = vault.tree.node(parent);
     let file = parent.0;
-    let indent = if node.kind == Kind::Root {
-        0
-    } else {
+    // Items under a section sit at the section's own indent; items under an
+    // item nest one level deeper (§3.1, §4.10).
+    let indent = if node.kind == Kind::Item {
         vault.tree.indent(parent) + 2
+    } else {
+        vault.tree.indent(parent)
     };
     let line_indented = format!("{}{}", " ".repeat(indent), line);
     let text = vault.tree.files[file].text.clone();
@@ -193,14 +195,15 @@ fn append_child_line(
     while pos > node.span.start && text.as_bytes()[pos - 1] == b'\n' {
         pos -= 1;
     }
-    // blank line before unless the previous sibling is also an item
+    // blank line before unless the previous sibling is also an item (tight
+    // list) — the previous child is the last in document order
     let prev_is_item = vault
         .tree
         .resolved_children(parent)
         .last()
         .map(|&c| vault.tree.node(c).kind == Kind::Item)
         .unwrap_or(false);
-    let insertion = if prev_is_item || node.kind == Kind::Item {
+    let insertion = if prev_is_item {
         format!("\n{}\n", line_indented)
     } else {
         format!("\n\n{}\n", line_indented)
@@ -677,10 +680,10 @@ pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<()> {
             let text = vault.tree.files[src_file].text.clone();
             let dest_span = vault.tree.node(dest).span;
             let level = vault.tree.level(dest) + 1;
-            let indent = if vault.tree.node(dest).kind == Kind::Root {
-                0
-            } else {
+            let indent = if vault.tree.node(dest).kind == Kind::Item {
                 vault.tree.indent(dest) + 2
+            } else {
+                vault.tree.indent(dest)
             };
             let shifted = shift_document(&rendered, level, indent);
             // remove r's span plus a preceding blank separator
@@ -731,10 +734,12 @@ fn insert_child_text(
 ) -> std::io::Result<()> {
     let node = vault.tree.node(parent);
     let file = parent.0;
-    let indent = if node.kind == Kind::Root {
-        0
-    } else {
+    // Items nest under items; everything under a section stays at the
+    // section's own indent (§3.1, §4.10).
+    let indent = if node.kind == Kind::Item {
         vault.tree.indent(parent) + 2
+    } else {
+        vault.tree.indent(parent)
     };
     let level = vault.tree.level(parent) + 1;
     let shifted = if is_embed {

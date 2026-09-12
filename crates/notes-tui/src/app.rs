@@ -694,7 +694,7 @@ impl App {
                         }
                     }
                     PromptAction::PropNew => {
-                        if let Some(t) = self.props_target {
+                        if self.props_target.is_some() {
                             let key_name = p.text.trim().to_string();
                             if notes_core::parse::is_valid_key(&key_name) {
                                 self.prompt = Some(Prompt {
@@ -859,8 +859,20 @@ impl App {
             KeyCode::Char('d') => self.act_delete(),
             KeyCode::Char('p') => self.act_paste(true),
             KeyCode::Char('P') => self.act_paste(false),
-            KeyCode::Char('c') => self.act_capture(false),
-            KeyCode::Char('C') => self.act_capture(true),
+            KeyCode::Char('c') => {
+                self.prompt = Some(Prompt {
+                    label: "capture".into(),
+                    text: String::new(),
+                    action: PromptAction::CaptureText(false),
+                });
+            }
+            KeyCode::Char('C') => {
+                self.prompt = Some(Prompt {
+                    label: "capture task".into(),
+                    text: String::new(),
+                    action: PromptAction::CaptureText(true),
+                });
+            }
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
                 self.filter.clear();
@@ -1074,6 +1086,20 @@ impl App {
             "yank" => self.act_yank(),
             "capture" => self.act_capture(false),
             "capture task" => self.act_capture(true),
+            "go to" => {
+                self.prompt = Some(Prompt {
+                    label: "go to".into(),
+                    text: String::new(),
+                    action: PromptAction::GoTo,
+                });
+            }
+            "refile" => {
+                self.prompt = Some(Prompt {
+                    label: "refile to".into(),
+                    text: String::new(),
+                    action: PromptAction::Refile,
+                });
+            }
             "zoom out" => {
                 self.zoom_root = None;
                 self.cursor = 0;
@@ -1558,6 +1584,8 @@ fn palette_actions() -> Vec<PaletteAction> {
         PaletteAction { name: "canonicalize", key: None, desc: "rewrite the vault in canonical form" },
         PaletteAction { name: "check", key: None, desc: "diagnostics (same as canonicalize here)" },
         PaletteAction { name: "merge", key: None, desc: "process sync-conflict files" },
+        PaletteAction { name: "go to", key: None, desc: "jump to a node by id, path or title" },
+        PaletteAction { name: "refile", key: Some("r"), desc: "move the subtree under a new parent" },
         PaletteAction { name: "zoom out", key: Some("Backspace"), desc: "up one zoom level" },
         PaletteAction { name: "quit", key: Some("q"), desc: "save and exit" },
     ]
