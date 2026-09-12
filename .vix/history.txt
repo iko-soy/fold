@@ -92,3 +92,9 @@
 
 # 2026-09-12 12:51:59.768963915 +0000 UTC
 +Add a brief "help" command describing how to use it. ? should also bring it up
+
+# 2026-09-12 15:49:54.710180529 +0000 UTC
++Did you implement mouse support?
+
+# 2026-09-12 15:50:33.36588831 +0000 UTC
++Implement mouse support

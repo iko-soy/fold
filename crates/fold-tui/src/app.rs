@@ -1,9 +1,12 @@
 //! The TUI application (§10).
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::ExecutableCommand;
 use fold_core::ops;
 use fold_core::parse::{Kind, TaskState};
@@ -88,6 +91,12 @@ pub struct App {
     last_watch_event: Instant,
     self_write_until: Instant,
     pending_reload: bool,
+    // mouse support
+    mouse_enabled: bool,
+    pane_outline: Rect,
+    pane_reading: Rect,
+    outline_scroll: usize,
+    last_click: Option<(u16, u16, Instant)>,
 }
 
 struct Prompt {
@@ -146,7 +155,20 @@ impl App {
             last_watch_event: Instant::now(),
             self_write_until: Instant::now() - Duration::from_secs(1),
             pending_reload: false,
+            mouse_enabled: false,
+            pane_outline: Rect::default(),
+            pane_reading: Rect::default(),
+            outline_scroll: 0,
+            last_click: None,
         })
+    }
+
+    pub fn pane_outline_pub(&self) -> Rect { self.pane_outline }
+    pub fn pane_reading_pub(&self) -> Rect { self.pane_reading }
+
+    /// Turn mouse support on (called by run(); off in tests).
+    pub fn enable_mouse(&mut self) {
+        self.mouse_enabled = true;
     }
 
     /// Start the vault watcher (§11.2): recursive, events on a channel.
@@ -997,6 +1019,162 @@ impl App {
         let _ = block;
     }
 
+    // -------------------------------------------------------- mouse
+
+    /// Handle a mouse event. Layout: outline clicks select/fold/zoom, wheel
+    /// scrolls the pane under the pointer, reading clicks move its cursor,
+    /// editor clicks place the text cursor. Double-click zooms/follows.
+    pub fn handle_mouse(&mut self, m: MouseEvent) {
+        if !self.mouse_enabled {
+            return;
+        }
+        let (x, y) = (m.column, m.row);
+        match m.kind {
+            MouseEventKind::ScrollDown => self.mouse_scroll(x, y, 3),
+            MouseEventKind::ScrollUp => self.mouse_scroll(x, y, -3),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_click(x, y),
+            _ => {}
+        }
+    }
+
+    fn mouse_scroll(&mut self, x: u16, y: u16, delta: i32) {
+        if self.point_in(self.pane_outline, x, y) {
+            let len = self.rows().len() as i32;
+            let mut c = self.cursor as i32 + delta;
+            c = c.clamp(0, (len - 1).max(0));
+            self.cursor = c as usize;
+            self.focus = Focus::Outline;
+        } else if self.point_in(self.pane_reading, x, y) {
+            let doc = self.reading_doc();
+            let max = doc.lines.len().saturating_sub(1) as i32;
+            let mut c = self.read_cursor as i32 + delta;
+            c = c.clamp(0, max.max(0));
+            self.read_cursor = c as usize;
+            self.scroll_reading = self.read_cursor;
+            if self.mode != Mode::Edit {
+                self.focus = Focus::Reading;
+            } else {
+                // scroll the editor buffer instead
+                let el = self.edit_cursor.0 as i32 + delta;
+                self.edit_cursor.0 = el.clamp(
+                    0,
+                    self.edit_buf
+                        .as_ref()
+                        .map(|b| b.lines.len().saturating_sub(1))
+                        .unwrap_or(0) as i32,
+                ) as usize;
+            }
+        }
+    }
+
+    fn mouse_click(&mut self, x: u16, y: u16) {
+        let double = self
+            .last_click
+            .map(|(lx, ly, t)| lx == x && ly == y && t.elapsed() < Duration::from_millis(500))
+            .unwrap_or(false);
+        self.last_click = Some((x, y, Instant::now()));
+
+        if self.mode == Mode::Edit && self.point_in(self.pane_reading, x, y) {
+            // place the text cursor
+            let inner_top = self.pane_reading.y + 1;
+            let inner_left = self.pane_reading.x + 1;
+            if y >= inner_top && x >= inner_left {
+                let inner_height = self.pane_reading.height.saturating_sub(2) as usize;
+                let scroll = if self.edit_cursor.0 >= inner_height {
+                    self.edit_cursor.0 + 1 - inner_height
+                } else {
+                    0
+                };
+                let line = scroll + (y - inner_top) as usize;
+                if let Some(buf) = self.edit_buf.as_mut() {
+                    if line < buf.lines.len() {
+                        self.edit_cursor.0 = line;
+                        let col_target = (x - inner_left) as usize;
+                        let len = buf.lines[line].text.chars().count();
+                        self.edit_cursor.1 = col_target.min(len);
+                        self.edit_last_key = Instant::now();
+                    }
+                }
+            }
+            return;
+        }
+        if self.point_in(self.pane_outline, x, y) {
+            self.focus = Focus::Outline;
+            let inner_top = self.pane_outline.y + 1;
+            if y < inner_top {
+                return;
+            }
+            let idx = self.outline_scroll + (y - inner_top) as usize;
+            let rows = self.rows();
+            let Some(row) = rows.get(idx) else { return };
+            self.cursor = idx;
+            // click on the fold marker toggles the fold
+            let inner_left = self.pane_outline.x + 1;
+            let marker_x = inner_left + (row.depth * 2) as u16;
+            if x >= marker_x && x <= marker_x + 1 && !self.vault.tree.resolved_children(row.nref).is_empty()
+            {
+                self.toggle_fold(row.nref);
+                return;
+            }
+            if double {
+                // double-click: zoom into the node (like Enter)
+                if self.vault.tree.node(row.nref).kind != Kind::Root {
+                    self.zoom_root = Some(row.nref);
+                    self.cursor = 0;
+                    self.read_cursor = 0;
+                    self.scroll_reading = 0;
+                    self.focus = Focus::Reading;
+                }
+            }
+        } else if self.point_in(self.pane_reading, x, y) {
+            self.focus = Focus::Reading;
+            let inner_top = self.pane_reading.y + 1;
+            if y < inner_top {
+                return;
+            }
+            let doc = self.reading_doc();
+            let inner_height = self.pane_reading.height.saturating_sub(2) as usize;
+            let skip = if self.read_cursor >= inner_height && inner_height > 0 {
+                self.read_cursor + 1 - inner_height
+            } else {
+                self.scroll_reading.min(doc.lines.len().saturating_sub(1))
+            };
+            let line = skip + (y - inner_top) as usize;
+            if line < doc.lines.len() {
+                self.read_cursor = line;
+                self.scroll_reading = self.scroll_reading.min(self.read_cursor);
+                if double {
+                    use fold_core::reading::LineRef;
+                    match fold_core::reading::node_at(&doc, line) {
+                        Some(LineRef::Title(r)) => {
+                            let n = self.vault.tree.node(r);
+                            if n.task.is_some() {
+                                let _ = fold_core::ops::toggle_task(&mut self.vault, r);
+                            } else if n.kind == Kind::Section {
+                                self.zoom_root = Some(r);
+                                self.read_cursor = 0;
+                                self.scroll_reading = 0;
+                            }
+                        }
+                        Some(LineRef::Embed(e)) => {
+                            let t = self.vault.tree.resolved_child(e);
+                            if t != e {
+                                self.zoom_root = Some(t);
+                                self.read_cursor = 0;
+                                self.scroll_reading = 0;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn point_in(&self, r: Rect, x: u16, y: u16) -> bool {
+        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+    }
+
     pub fn key_normal(&mut self, key: KeyEvent) {
         let rows = self.rows();
         match self.focus {
@@ -1621,6 +1799,8 @@ impl App {
             self.draw_status(f, chunks[1]);
             return;
         }
+        self.pane_outline = panes[0];
+        self.pane_reading = panes[1];
         self.draw_outline(f, panes[0]);
         match self.mode {
             Mode::Edit => self.draw_editor(f, panes[1]),
@@ -1677,6 +1857,7 @@ impl App {
         } else {
             0
         };
+        self.outline_scroll = scroll;
         let mut lines: Vec<Line> = Vec::new();
         for (i, row) in rows.iter().enumerate().skip(scroll).take(inner_height) {
             let n = self.vault.tree.node(row.nref);
@@ -2118,6 +2299,10 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("x e a o", "toggle · edit · properties · open link"),
         ("[[ / ]]", "previous / next heading · / search, n/N next"),
         ("", ""),
+        ("MOUSE", ""),
+        ("click", "select a node · click ▾/▸ to fold · double-click zooms"),
+        ("wheel", "scroll the pane under the pointer"),
+        ("", ""),
         ("CONFLICTS & QUIT", ""),
         (":merge", "fold sync-conflict files in, then resolve:"),
         ("o t b", "keep ours / theirs / both · n/N pairs · Enter done"),
@@ -2216,6 +2401,7 @@ fn palette_actions() -> Vec<PaletteAction> {
 
 pub fn run(dir: &Path) -> anyhow::Result<()> {
     let mut app = App::new(dir)?;
+    app.enable_mouse();
     app.start_watcher();
     // a sync-conflict file present at startup starts the merge flow (§12.2)
     if let Ok(files) = app.vault.conflict_files() {
@@ -2231,10 +2417,12 @@ pub fn run(dir: &Path) -> anyhow::Result<()> {
     }
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
+    std::io::stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let res = run_loop(&mut terminal, &mut app);
     disable_raw_mode()?;
+    std::io::stdout().execute(DisableMouseCapture)?;
     std::io::stdout().execute(LeaveAlternateScreen)?;
     res
 }
@@ -2266,7 +2454,9 @@ fn run_loop(
             app.reload_external();
         }
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
+                Event::Mouse(m) => app.handle_mouse(m),
+                Event::Key(key) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
                 {
                     return Ok(());
@@ -2334,6 +2524,8 @@ fn run_loop(
                     }
                     Mode::Conflict => app.key_conflict(key),
                 }
+                }
+                _ => {}
             }
         }
     }
