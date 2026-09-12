@@ -1,0 +1,18 @@
+[package]
+name = "notes-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+notes-core = { path = "../notes-core" }
+ratatui.workspace = true
+crossterm.workspace = true
+tui-textarea.workspace = true
+notify.workspace = true
+jiff.workspace = true
+nucleo.workspace = true
+unicode-width.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+insta = "1"

@@ -1,0 +1,79 @@
+
+# 2026-09-10 10:31:43.201822463 +0000 UTC
++I want to make a TUI notes application. It is structured as one big tree. nesting ansd folding is the note organization primitive. Help me design a spec for how it should work
+
+# 2026-09-10 10:43:55.561317047 +0000 UTC
++1 -- I want it stored as multiple markdown files
+|2 -- elaborate
+
+# 2026-09-10 10:51:57.940262665 +0000 UTC
++Can we use Tree CRDT (https://martin.kleppmann.com/papers/move-op.pdf)?
+
+# 2026-09-10 10:54:34.912496533 +0000 UTC
++syncing is not in scope of the project. The folder will be synced by something like syncthing
+
+# 2026-09-10 10:56:48.271951857 +0000 UTC
++can you make the spec more terse without losing the ideas
+
+# 2026-09-10 11:20:28.434848277 +0000 UTC
++Remove the one-line/multi-line distimction. Everything can have more than one line
+
+# 2026-09-10 11:29:09.144681711 +0000 UTC
++Use Miller columns to display the tree
+
+# 2026-09-10 16:35:28.934103914 +0000 UTC
++is the spec for a notes TUI. Please summarize the important/non-obvious/non-trivial parts of the spec? The parts where I might disagree
+
+# 2026-09-10 16:41:31.28784472 +0000 UTC
++remove cut suggestions completely
+
+# 2026-09-10 16:43:36.095288906 +0000 UTC
++remove all reliance on SVC
+
+# 2026-09-10 16:44:19.232116161 +0000 UTC
++remove all reliance on source control
+
+# 2026-09-10 16:46:09.149882793 +0000 UTC
++Please summarize the important/non-obvious/non-trivial parts of the spec? The parts where I might disagree
+
+# 2026-09-10 16:49:03.153963768 +0000 UTC
++what is ` aliases:`?
+
+# 2026-09-10 16:49:58.344485529 +0000 UTC
++remove aliases
+
+# 2026-09-10 16:58:28.040227337 +0000 UTC
++Please summarize the important/non-obvious/non-trivial parts of the spec? The parts where I might disagree
+
+# 2026-09-10 17:00:24.02568141 +0000 UTC
++what are fronzen filenames?
+
+# 2026-09-10 17:04:21.460230648 +0000 UTC
++Can we implement automatic conflict resolution?
+
+# 2026-09-10 17:06:09.717049323 +0000 UTC
++Allow moving a subtree to `archive`. The path to the archived subtree should be created in archive if it doesn't exist
+
+# 2026-09-10 17:08:04.6402978 +0000 UTC
++Please summarize the important/non-obvious/non-trivial parts of the spec? The parts where I might disagree
+
+# 2026-09-10 17:13:38.138149354 +0000 UTC
++Can we iterate on the UI?
+
+# 2026-09-10 18:57:16.434706401 +0000 UTC
++Since it is a TUI can you draw actual examples?
+
+# 2026-09-10 18:57:57.960774784 +0000 UTC
++It is getting a little corrupted
+
+# 2026-09-10 19:00:42.42199869 +0000 UTC
++3
+
+# 2026-09-10 19:01:05.831002961 +0000 UTC
++The right side of lines goes wonky
+
+# 2026-09-10 19:06:52.403634629 +0000 UTC
++Can we iterate on the UI?
+
+# 2026-09-12 03:52:10.342354143 +0000 UTC
++Implement a TUI notes app from /home/iko/projects/fold/SPEC.md

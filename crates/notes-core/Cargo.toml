@@ -1,0 +1,18 @@
+[package]
+name = "notes-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+indexmap.workspace = true
+jiff.workspace = true
+similar.workspace = true
+blake3.workspace = true
+unicode-normalization.workspace = true
+directories.workspace = true
+getrandom.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"

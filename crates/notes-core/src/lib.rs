@@ -1,0 +1,12 @@
+//! notes-core: parsing, tree, render/splice, index, store, merge — no TUI deps.
+
+pub mod ident;
+pub mod parse;
+pub mod render;
+pub mod syllables;
+pub mod tree;
+
+pub use ident::{slug, Id};
+pub use parse::{Block, Diag, Kind, Node, ParsedFile, Span, TaskState};
+pub use render::render;
+pub use tree::{NRef, Tree};
