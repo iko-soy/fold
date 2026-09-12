@@ -1,6 +1,6 @@
-use notes_core::edit::{open_editor, title_of_first_line, Owner};
-use notes_core::ops;
-use notes_core::vault::Vault;
+use fold_core::edit::{open_editor, title_of_first_line, Owner};
+use fold_core::ops;
+use fold_core::vault::Vault;
 
 fn vault_with(root: &str) -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();

@@ -466,6 +466,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fold-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "fold-core",
+ "fold-tui",
+ "jiff",
+ "predicates",
+ "tempfile",
+]
+
+[[package]]
+name = "fold-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "directories",
+ "getrandom 0.3.4",
+ "indexmap",
+ "jiff",
+ "proptest",
+ "similar",
+ "tempfile",
+ "thiserror",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "fold-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "fold-core",
+ "insta",
+ "jiff",
+ "notify",
+ "nucleo",
+ "ratatui",
+ "tempfile",
+ "tui-textarea",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -775,54 +823,6 @@ name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
-
-[[package]]
-name = "notes-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "jiff",
- "notes-core",
- "notes-tui",
- "predicates",
- "tempfile",
-]
-
-[[package]]
-name = "notes-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "directories",
- "getrandom 0.3.4",
- "indexmap",
- "jiff",
- "proptest",
- "similar",
- "tempfile",
- "thiserror",
- "unicode-normalization",
-]
-
-[[package]]
-name = "notes-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "insta",
- "jiff",
- "notes-core",
- "notify",
- "nucleo",
- "ratatui",
- "tempfile",
- "tui-textarea",
- "unicode-width 0.2.0",
-]
 
 [[package]]
 name = "notify"

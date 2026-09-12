@@ -1,6 +1,6 @@
-use notes_core::ops;
-use notes_core::vault::Vault;
-use notes_core::TaskState;
+use fold_core::ops;
+use fold_core::vault::Vault;
+use fold_core::TaskState;
 
 fn vault_with(root: &str) -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
@@ -166,7 +166,7 @@ fn delete_goes_to_trash() {
     assert!(!v.tree.files[0].text.contains("delete me"));
     let _ = d;
     // trash dir has a copy
-    let trash = notes_core::vault::trash_dir();
+    let trash = fold_core::vault::trash_dir();
     let entries: Vec<_> = std::fs::read_dir(&trash)
         .map(|rd| rd.filter_map(|e| e.ok()).collect())
         .unwrap_or_default();
@@ -235,8 +235,8 @@ fn rename_block_title_renames_file() {
 fn prefix_collision_grows_prefix() {
     let (d, _v) = vault_with("# A\n");
     // two ids sharing the first word
-    let id1 = notes_core::Id::parse("racfer-hattes-mislup-nodrys").unwrap();
-    let id2 = notes_core::Id::parse("racfer-wolsun-dozzod-binwes").unwrap();
+    let id1 = fold_core::Id::parse("racfer-hattes-mislup-nodrys").unwrap();
+    let id2 = fold_core::Id::parse("racfer-wolsun-dozzod-binwes").unwrap();
     std::fs::write(
         d.path().join("racfer~notes.md"),
         format!("---\nid: {}\n---\n\n# Notes\n", id1),

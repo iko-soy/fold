@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/notes-core", "crates/notes-tui", "crates/notes-cli"]
+members = ["crates/fold-core", "crates/fold-tui", "crates/fold-cli"]
 
 [workspace.dependencies]
 ratatui = "0.29"

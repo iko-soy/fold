@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use notes_tui::app::App;
+use fold_tui::app::App;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 

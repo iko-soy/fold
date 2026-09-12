@@ -1,10 +1,10 @@
 [package]
-name = "notes-tui"
+name = "fold-tui"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-notes-core = { path = "../notes-core" }
+fold-core = { path = "../fold-core" }
 ratatui.workspace = true
 crossterm.workspace = true
 tui-textarea.workspace = true

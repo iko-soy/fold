@@ -1,4 +1,4 @@
-//! notes-core: parsing, tree, render/splice, index, store, merge — no TUI deps.
+//! fold-core: parsing, tree, render/splice, index, store, merge — no TUI deps.
 
 pub mod check;
 pub mod edit;

@@ -5,11 +5,11 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use notes_core::ops;
-use notes_core::parse::{Kind, TaskState};
-use notes_core::render::render;
-use notes_core::tree::NRef;
-use notes_core::vault::{NodeKey, Vault};
+use fold_core::ops;
+use fold_core::parse::{Kind, TaskState};
+use fold_core::render::render;
+use fold_core::tree::NRef;
+use fold_core::vault::{NodeKey, Vault};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -63,7 +63,7 @@ pub struct App {
     scroll_reading: usize,
     quit: bool,
     // edit mode (§10.6)
-    edit_buf: Option<notes_core::edit::EditBuffer>,
+    edit_buf: Option<fold_core::edit::EditBuffer>,
     edit_cursor: (usize, usize), // (line, col)
     edit_last_key: Instant,
     edit_saved_dot: bool,
@@ -201,7 +201,7 @@ impl App {
                     let relevant = event.paths.iter().any(|p| {
                         let name = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
                         !name.starts_with('.')
-                            && !name.ends_with(".notes-tmp")
+                            && !name.ends_with(".fold-tmp")
                             && !name.ends_with(".tmp")
                     });
                     if relevant {
@@ -245,7 +245,7 @@ impl App {
         // sync-conflict files start the merge flow (§11.2)
         match self.vault.conflict_files() {
             Ok(files) if !files.is_empty() => {
-                match notes_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+                match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
                     Ok(outcomes) => {
                         self.say(format!("merged: {}", outcomes.join("; ")));
                         self.mode = Mode::Conflict;
@@ -575,7 +575,7 @@ impl App {
         } else {
             r
         };
-        self.edit_buf = Some(notes_core::edit::open_editor(&self.vault, target));
+        self.edit_buf = Some(fold_core::edit::open_editor(&self.vault, target));
         self.edit_cursor = (0, 0);
         self.edit_saved_dot = false;
         self.mode = Mode::Edit;
@@ -825,7 +825,7 @@ impl App {
                         if let Some(t) = self.props_target {
                             // validate dates (§8.4)
                             if (k == "due" || k == "done")
-                                && !notes_core::check::is_iso_date(&p.text)
+                                && !fold_core::check::is_iso_date(&p.text)
                             {
                                 self.say(format!("{}: must be YYYY-MM-DD", k));
                                 return;
@@ -839,7 +839,7 @@ impl App {
                     PromptAction::PropNew => {
                         if self.props_target.is_some() {
                             let key_name = p.text.trim().to_string();
-                            if notes_core::parse::is_valid_key(&key_name) {
+                            if fold_core::parse::is_valid_key(&key_name) {
                                 self.prompt = Some(Prompt {
                                     label: format!("{}", key_name),
                                     text: String::new(),
@@ -872,7 +872,7 @@ impl App {
     // -------------------------------------------------------- input
 
     pub fn enter_conflict_view(&mut self) {
-        if notes_core::merge::conflict_pairs(&self.vault).is_empty() {
+        if fold_core::merge::conflict_pairs(&self.vault).is_empty() {
             self.say("no conflicts");
             return;
         }
@@ -882,7 +882,7 @@ impl App {
 
     pub fn key_conflict_pub(&mut self, key: KeyEvent) { self.key_conflict(key) }
     fn key_conflict(&mut self, key: KeyEvent) {
-        let pairs = notes_core::merge::conflict_pairs(&self.vault);
+        let pairs = fold_core::merge::conflict_pairs(&self.vault);
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -903,12 +903,12 @@ impl App {
             KeyCode::Char('o') => {
                 if let Some(&(_, theirs)) = pairs.get(self.conflict_idx) {
                     self.push_undo("keep ours");
-                    match notes_core::merge::resolve_keep_ours(&mut self.vault, theirs) {
+                    match fold_core::merge::resolve_keep_ours(&mut self.vault, theirs) {
                         Ok(()) => self.say("kept ours"),
                         Err(e) => self.say(format!("error: {}", e)),
                     }
                     self.conflict_idx = self.conflict_idx.saturating_sub(0).min(
-                        notes_core::merge::conflict_pairs(&self.vault)
+                        fold_core::merge::conflict_pairs(&self.vault)
                             .len()
                             .saturating_sub(1),
                     );
@@ -917,7 +917,7 @@ impl App {
             KeyCode::Char('t') => {
                 if let Some(&(ours, theirs)) = pairs.get(self.conflict_idx) {
                     self.push_undo("keep theirs");
-                    match notes_core::merge::resolve_keep_theirs(&mut self.vault, ours, theirs) {
+                    match fold_core::merge::resolve_keep_theirs(&mut self.vault, ours, theirs) {
                         Ok(()) => self.say("kept theirs"),
                         Err(e) => self.say(format!("error: {}", e)),
                     }
@@ -926,7 +926,7 @@ impl App {
             KeyCode::Char('b') => {
                 if let Some(&(_, theirs)) = pairs.get(self.conflict_idx) {
                     self.push_undo("keep both");
-                    match notes_core::merge::resolve_keep_both(&mut self.vault, theirs) {
+                    match fold_core::merge::resolve_keep_both(&mut self.vault, theirs) {
                         Ok(()) => self.say("kept both"),
                         Err(e) => self.say(format!("error: {}", e)),
                     }
@@ -934,7 +934,7 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(&(ours, _)) = pairs.get(self.conflict_idx) {
-                    self.edit_buf = Some(notes_core::edit::open_editor(&self.vault, ours));
+                    self.edit_buf = Some(fold_core::edit::open_editor(&self.vault, ours));
                     self.edit_cursor = (0, 0);
                     self.edit_saved_dot = false;
                     self.mode = Mode::Edit;
@@ -945,7 +945,7 @@ impl App {
     }
 
     fn draw_conflict(&mut self, f: &mut ratatui::Frame, area: Rect) {
-        let pairs = notes_core::merge::conflict_pairs(&self.vault);
+        let pairs = fold_core::merge::conflict_pairs(&self.vault);
         let block = WBlock::default()
             .borders(Borders::ALL)
             .title(format!(
@@ -1262,8 +1262,8 @@ impl App {
             }
             KeyCode::Char('g') => {} // gg via pending
             KeyCode::Enter => {
-                use notes_core::reading::LineRef;
-                match notes_core::reading::node_at(&doc, self.read_cursor) {
+                use fold_core::reading::LineRef;
+                match fold_core::reading::node_at(&doc, self.read_cursor) {
                     Some(LineRef::Title(r)) => {
                         let n = self.vault.tree.node(r);
                         if n.task.is_some() {
@@ -1319,7 +1319,7 @@ impl App {
                     } else {
                         r
                     };
-                    self.edit_buf = Some(notes_core::edit::open_editor(&self.vault, target));
+                    self.edit_buf = Some(fold_core::edit::open_editor(&self.vault, target));
                     self.edit_cursor = (0, 0);
                     self.edit_saved_dot = false;
                     self.mode = Mode::Edit;
@@ -1362,12 +1362,12 @@ impl App {
         }
     }
 
-    pub fn reading_doc_pub(&self) -> notes_core::reading::ReadingDoc { self.reading_doc() }
-    fn reading_doc(&self) -> notes_core::reading::ReadingDoc {
+    pub fn reading_doc_pub(&self) -> fold_core::reading::ReadingDoc { self.reading_doc() }
+    fn reading_doc(&self) -> fold_core::reading::ReadingDoc {
         let target = self.zoom_root.or_else(|| self.current());
         match target {
-            Some(r) => notes_core::reading::build(&self.vault, r),
-            None => notes_core::reading::ReadingDoc {
+            Some(r) => fold_core::reading::build(&self.vault, r),
+            None => fold_core::reading::ReadingDoc {
                 lines: Vec::new(),
                 refs: Vec::new(),
             },
@@ -1377,8 +1377,8 @@ impl App {
     /// The node under the reading cursor (title/body/embed lines only).
     fn read_node(&self) -> Option<NRef> {
         let doc = self.reading_doc();
-        use notes_core::reading::LineRef;
-        match notes_core::reading::node_at(&doc, self.read_cursor) {
+        use fold_core::reading::LineRef;
+        match fold_core::reading::node_at(&doc, self.read_cursor) {
             Some(LineRef::Title(r)) | Some(LineRef::Body(r)) | Some(LineRef::Embed(r)) => Some(r),
             _ => None,
         }
@@ -1391,8 +1391,8 @@ impl App {
         let _ = key;
     }
 
-    fn jump_heading(&mut self, doc: &notes_core::reading::ReadingDoc, dir: i32) {
-        use notes_core::reading::LineRef;
+    fn jump_heading(&mut self, doc: &fold_core::reading::ReadingDoc, dir: i32) {
+        use fold_core::reading::LineRef;
         let mut i = self.read_cursor as i32 + dir;
         while i >= 0 && (i as usize) < doc.lines.len() {
             if matches!(doc.refs[i as usize], LineRef::Title(_)) {
@@ -1407,7 +1407,7 @@ impl App {
         }
     }
 
-    fn update_read_matches(&mut self, doc: &notes_core::reading::ReadingDoc) {
+    fn update_read_matches(&mut self, doc: &fold_core::reading::ReadingDoc) {
         let q = self.read_search.to_lowercase();
         self.read_matches = doc
             .lines
@@ -1424,7 +1424,7 @@ impl App {
         self.say(format!("{} match(es)", self.read_matches.len()));
     }
 
-    fn next_match(&mut self, doc: &notes_core::reading::ReadingDoc, dir: i32) {
+    fn next_match(&mut self, doc: &fold_core::reading::ReadingDoc, dir: i32) {
         if self.read_matches.is_empty() {
             self.say("no search (use /)");
             return;
@@ -1437,7 +1437,7 @@ impl App {
         self.scroll_reading = m;
     }
 
-    fn open_link_under_cursor(&mut self, doc: &notes_core::reading::ReadingDoc) {
+    fn open_link_under_cursor(&mut self, doc: &fold_core::reading::ReadingDoc) {
         let Some(line) = doc.lines.get(self.read_cursor) else { return };
         if let Some(url) = extract_url(line) {
             let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
@@ -1545,14 +1545,14 @@ impl App {
     fn run_palette(&mut self, name: &str) {
         match name {
             "clear done" => self.act_clear_done(),
-            "canonicalize" | "check" => match notes_core::check::fix(&mut self.vault) {
+            "canonicalize" | "check" => match fold_core::check::fix(&mut self.vault) {
                 Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
                 Err(e) => self.say(format!("error: {}", e)),
             },
-            "merge" => match notes_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+            "merge" => match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
                 Ok(o) => {
                     self.say(format!("{} merge(s)", o.len()));
-                    if !notes_core::merge::conflict_pairs(&self.vault).is_empty() {
+                    if !fold_core::merge::conflict_pairs(&self.vault).is_empty() {
                         self.enter_conflict_view();
                     }
                 }
@@ -1749,7 +1749,7 @@ impl App {
                     lines.push(style_markdown_line(l, &self.vault, r));
                 }
             } else {
-                let doc = notes_core::reading::build(&self.vault, r);
+                let doc = fold_core::reading::build(&self.vault, r);
                 // block properties as a dimmed header (§4.4, §10.1)
                 let mut prop_header: Option<Line> = None;
                 if let Some(b) = &self.vault.tree.node(r).block {
@@ -1928,7 +1928,7 @@ impl App {
             Mode::Conflict => " CONFLICT",
             Mode::Props => " PROPS",
         };
-        let conflicts = notes_core::merge::conflict_pairs(&self.vault).len();
+        let conflicts = fold_core::merge::conflict_pairs(&self.vault).len();
         let cpart = if conflicts > 0 {
             format!(" · {} conflicts", conflicts)
         } else {
@@ -2127,7 +2127,7 @@ pub fn run(dir: &Path) -> anyhow::Result<()> {
     // a sync-conflict file present at startup starts the merge flow (§12.2)
     if let Ok(files) = app.vault.conflict_files() {
         if !files.is_empty() {
-            match notes_core::merge::merge_sync_conflicts(&mut app.vault, false) {
+            match fold_core::merge::merge_sync_conflicts(&mut app.vault, false) {
                 Ok(o) => {
                     app.say(format!("merged on startup: {}", o.join("; ")));
                     app.enter_conflict_view();

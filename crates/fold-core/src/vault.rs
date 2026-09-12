@@ -382,16 +382,16 @@ impl Vault {
 }
 
 pub fn trash_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "notes")
+    directories::ProjectDirs::from("", "", "fold")
         .map(|p| p.state_dir().unwrap_or(p.data_dir()).join("trash"))
         .unwrap_or_else(|| PathBuf::from(".notes-trash"))
 }
 
-/// Write to `.<name>.notes-tmp`, fsync, rename (§11.1).
+/// Write to `.<name>.fold-tmp`, fsync, rename (§11.1).
 pub fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path.file_name().unwrap().to_string_lossy();
-    let tmp = dir.join(format!(".{}.notes-tmp", name));
+    let tmp = dir.join(format!(".{}.fold-tmp", name));
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;

@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use notes_tui::app::App;
+use fold_tui::app::App;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -20,8 +20,8 @@ fn conflict_app() -> (tempfile::TempDir, App) {
         "# A\n\n- [x] task\n",
     )
     .unwrap();
-    let mut v = notes_core::vault::Vault::open(dir.path()).unwrap();
-    notes_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
     drop(v);
     let app = App::new(dir.path()).unwrap();
     (dir, app)
@@ -163,7 +163,7 @@ fn startup_merge_enters_conflict_view() {
     // simulate the run() startup path
     if let Ok(files) = app.vault_conflict_files() {
         if !files.is_empty() {
-            notes_core::merge::merge_sync_conflicts(app.vault_mut(), false).unwrap();
+            fold_core::merge::merge_sync_conflicts(app.vault_mut(), false).unwrap();
             app.enter_conflict_view();
         }
     }

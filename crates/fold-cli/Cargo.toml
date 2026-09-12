@@ -1,15 +1,15 @@
 [package]
-name = "notes-cli"
+name = "fold-cli"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "notes"
+name = "fold"
 path = "src/main.rs"
 
 [dependencies]
-notes-core = { path = "../notes-core" }
-notes-tui = { path = "../notes-tui" }
+fold-core = { path = "../fold-core" }
+fold-tui = { path = "../fold-tui" }
 clap.workspace = true
 jiff.workspace = true
 anyhow.workspace = true

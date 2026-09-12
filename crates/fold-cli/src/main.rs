@@ -1,15 +1,15 @@
-//! `notes` — a tree-shaped plain-text notes and task manager (§13).
+//! `fold` — a tree-shaped plain-text notes and task manager (§13).
 
 use clap::{Parser, Subcommand};
-use notes_core::vault::{trash_dir, Vault};
+use fold_core::vault::{trash_dir, Vault};
 use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "notes", version, about = "tree-shaped plain-text notes and tasks")]
+#[command(name = "fold", version, about = "tree-shaped plain-text notes and tasks")]
 struct Cli {
-    /// Vault directory (default: $NOTES_VAULT, else nearest ancestor of $PWD
-    /// containing root.md, else ~/notes).
+    /// Vault directory (default: $FOLD_VAULT, else nearest ancestor of $PWD
+    /// containing root.md, else ~/fold).
     #[arg(long, global = true)]
     vault: Option<PathBuf>,
 
@@ -57,7 +57,7 @@ fn vault_dir(cli_vault: &Option<PathBuf>) -> PathBuf {
     if let Some(v) = cli_vault {
         return v.clone();
     }
-    if let Ok(v) = std::env::var("NOTES_VAULT") {
+    if let Ok(v) = std::env::var("FOLD_VAULT") {
         if !v.is_empty() {
             return PathBuf::from(v);
         }
@@ -72,7 +72,7 @@ fn vault_dir(cli_vault: &Option<PathBuf>) -> PathBuf {
             break;
         }
     }
-    directories_home().join("notes")
+    directories_home().join("fold")
 }
 
 fn directories_home() -> PathBuf {
@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         None => {
             // open the TUI (§13)
-            notes_tui::run(&dir)?;
+            fold_tui::run(&dir)?;
         }
         Some(Command::Capture { text, to, task }) => {
             let mut text = match text {
@@ -107,10 +107,10 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Check { fix }) => {
             let mut v = Vault::open(&dir)?;
             if fix {
-                let n = notes_core::check::fix(&mut v)?;
+                let n = fold_core::check::fix(&mut v)?;
                 println!("{} file(s) rewritten or renamed", n);
             }
-            let diags = notes_core::check::check(&v);
+            let diags = fold_core::check::check(&v);
             for d in &diags {
                 println!("{}", d);
             }
@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Merge { dry_run }) => {
             let mut v = Vault::open(&dir)?;
-            let outcomes = notes_core::merge::merge_sync_conflicts(&mut v, dry_run)?;
+            let outcomes = fold_core::merge::merge_sync_conflicts(&mut v, dry_run)?;
             if outcomes.is_empty() {
                 println!("no sync-conflict files");
             }
@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", o);
             }
             // list leftovers: unresolved conflict blocks (§13)
-            let pairs = notes_core::merge::conflict_pairs(&v);
+            let pairs = fold_core::merge::conflict_pairs(&v);
             if !pairs.is_empty() {
                 println!("{} unresolved conflict pair(s)", pairs.len());
             }
@@ -190,10 +190,10 @@ fn capture(dir: &PathBuf, text: &str, task: bool, to: Option<String>) -> anyhow:
             let r = v
                 .resolve_target(&target)
                 .map_err(|e| anyhow::anyhow!(e))?;
-            notes_core::ops::capture_to(&mut v, text, task, r)?;
+            fold_core::ops::capture_to(&mut v, text, task, r)?;
         }
         None => {
-            notes_core::ops::capture(&mut v, text, task)?;
+            fold_core::ops::capture(&mut v, text, task)?;
         }
     }
     Ok(())

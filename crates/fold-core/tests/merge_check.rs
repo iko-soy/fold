@@ -1,5 +1,5 @@
-use notes_core::merge;
-use notes_core::vault::Vault;
+use fold_core::merge;
+use fold_core::vault::Vault;
 
 #[test]
 fn merge_identical_is_identity() {
@@ -79,8 +79,8 @@ fn sync_conflict_files_merge() {
 #[test]
 fn prefix_collision_renames_instead_of_merging() {
     let dir = tempfile::tempdir().unwrap();
-    let id1 = notes_core::Id::parse("racfer-hattes-mislup-nodrys").unwrap();
-    let id2 = notes_core::Id::parse("racfer-wolsun-dozzod-binwes").unwrap();
+    let id1 = fold_core::Id::parse("racfer-hattes-mislup-nodrys").unwrap();
+    let id2 = fold_core::Id::parse("racfer-wolsun-dozzod-binwes").unwrap();
     std::fs::write(
         dir.path().join("root.md"),
         "# A\n",
@@ -121,10 +121,10 @@ fn check_reports_broken_embed_and_fix_canonicalizes() {
     )
     .unwrap();
     let mut v = Vault::open(dir.path()).unwrap();
-    let diags = notes_core::check::check(&v);
+    let diags = fold_core::check::check(&v);
     assert!(diags.iter().any(|d| d.message.contains("broken embed")), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
     assert!(diags.iter().any(|d| d.message.contains("non-canonical")), "");
-    let n = notes_core::check::fix(&mut v).unwrap();
+    let n = fold_core::check::fix(&mut v).unwrap();
     assert!(n > 0);
     let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
     assert!(text.contains("- [x] old style"), "{}", text);
@@ -136,14 +136,14 @@ fn check_reports_ignored_md_files() {
     std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
     std::fs::write(dir.path().join("foreign.md"), "# no id here\n").unwrap();
     let v = Vault::open(dir.path()).unwrap();
-    let diags = notes_core::check::check(&v);
+    let diags = fold_core::check::check(&v);
     assert!(diags.iter().any(|d| d.file == "foreign.md" && d.message.contains("ignored")));
 }
 
 #[test]
 fn check_reports_bad_dates() {
     let dir = tempfile::tempdir().unwrap();
-    let id = notes_core::Id::parse("racfer-hattes-mislup-nodrys").unwrap();
+    let id = fold_core::Id::parse("racfer-hattes-mislup-nodrys").unwrap();
     std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
     std::fs::write(
         dir.path().join("racfer~task.md"),
@@ -151,6 +151,6 @@ fn check_reports_bad_dates() {
     )
     .unwrap();
     let v = Vault::open(dir.path()).unwrap();
-    let diags = notes_core::check::check(&v);
+    let diags = fold_core::check::check(&v);
     assert!(diags.iter().any(|d| d.message.contains("not an ISO date")), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
 }

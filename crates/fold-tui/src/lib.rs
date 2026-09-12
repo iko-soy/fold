@@ -1,4 +1,4 @@
-//! notes-tui: the ratatui application.
+//! fold-tui: the ratatui application.
 
 use std::path::Path;
 

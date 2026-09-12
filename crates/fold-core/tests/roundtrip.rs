@@ -1,7 +1,7 @@
-use notes_core::parse::{parse_file, Block, Kind, TaskState};
-use notes_core::render::render;
-use notes_core::tree::{NRef, Tree};
-use notes_core::Id;
+use fold_core::parse::{parse_file, Block, Kind, TaskState};
+use fold_core::render::render;
+use fold_core::tree::{NRef, Tree};
+use fold_core::Id;
 
 fn tree_of(text: &str) -> Tree {
     let block = Block {
@@ -179,7 +179,7 @@ fn block_file_tree() -> Tree {
     let root = parse_file("root.md", root_text, 0, Some(root_block));
 
     let block_text = "---\nid: dozzod-binwes-talsun-worbec\nsince: 2024-03\ntags: [storage, homelab]   # user comment\n---\n\n# ZFS layout\n\nMirrored pairs, no raidz. Snapshots hourly via sanoid.\n\n## [ ] Snapshot policy\n\n- hourly, keep 24\n- [x] Move scratch to its own dataset\n";
-    let fm = notes_core::parse::parse_frontmatter(block_text).unwrap();
+    let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
     let id = Id::parse("dozzod-binwes-talsun-worbec").unwrap();
     let block = Block {
         id: Some(id.clone()),
@@ -237,7 +237,7 @@ fn resolved_render_has_no_boundaries() {
 fn bullet_root_block_file() {
     // A block whose root is an item: the file starts with a bullet (§4.9).
     let text = "---\nid: racfer-hattes-mislup-nodrys\ntodo: open\ndue: 2026-09-20\n---\n\n- Order new switch\n  Two options, noted under Networking.\n";
-    let fm = notes_core::parse::parse_frontmatter(text).unwrap();
+    let fm = fold_core::parse::parse_frontmatter(text).unwrap();
     let id = Id::parse("racfer-hattes-mislup-nodrys").unwrap();
     let block = Block {
         id: Some(id),

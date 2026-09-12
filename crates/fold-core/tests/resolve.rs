@@ -1,5 +1,5 @@
-use notes_core::merge;
-use notes_core::vault::Vault;
+use fold_core::merge;
+use fold_core::vault::Vault;
 
 fn make_conflict_vault() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
@@ -37,7 +37,7 @@ fn keep_ours_removes_conflict_block() {
     assert!(root.contains("- [ ] task"), "{}", root);
     assert_eq!(v.tree.files.len(), 1, "conflict block file trashed");
     // the trash has a copy
-    let trash = notes_core::vault::trash_dir();
+    let trash = fold_core::vault::trash_dir();
     let entries: Vec<_> = std::fs::read_dir(&trash)
         .map(|rd| rd.filter_map(|e| e.ok()).collect())
         .unwrap_or_default();

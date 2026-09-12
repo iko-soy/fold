@@ -83,3 +83,6 @@
 
 # 2026-09-12 07:44:30.030380062 +0000 UTC
 +implement all of them
+
+# 2026-09-12 08:02:08.035115456 +0000 UTC
++rename the application to "fold"

@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn notes(dir: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("notes").unwrap();
+    let mut c = Command::cargo_bin("fold").unwrap();
     c.arg("--vault").arg(dir);
     c
 }
@@ -99,10 +99,10 @@ fn trash_list_and_restore() {
     // put something in the trash via a delete through the core
     std::fs::write(dir.path().join("root.md"), "# A\n\n- doomed\n").unwrap();
     {
-        let mut v = notes_core::vault::Vault::open(dir.path()).unwrap();
+        let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
         let a = v.tree.resolved_children(v.tree.root)[0];
         let node = v.tree.resolved_children(a)[0];
-        notes_core::ops::delete_subtree(&mut v, node).unwrap();
+        fold_core::ops::delete_subtree(&mut v, node).unwrap();
     }
     notes(dir.path())
         .args(["trash", "list"])
