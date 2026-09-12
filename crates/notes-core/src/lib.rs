@@ -1,6 +1,8 @@
 //! notes-core: parsing, tree, render/splice, index, store, merge — no TUI deps.
 
+pub mod check;
 pub mod ident;
+pub mod merge;
 pub mod ops;
 pub mod parse;
 pub mod render;

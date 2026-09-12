@@ -1092,6 +1092,16 @@ pub fn rename_title(vault: &mut Vault, r: NRef, new_title: &str) -> std::io::Res
     Ok(())
 }
 
+/// Append a plain item child titled `title` under `parent`; returns the new
+/// node. Used by `N` in the TUI (§10.3).
+pub fn append_child_public(
+    vault: &mut Vault,
+    parent: NRef,
+    title: &str,
+) -> std::io::Result<NRef> {
+    append_child_line(vault, parent, &format!("- {}", title), false)
+}
+
 fn io_err(msg: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, msg.to_string())
 }

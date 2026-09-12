@@ -412,7 +412,7 @@ fn read_if_exists(path: &Path) -> std::io::Result<Option<String>> {
 
 /// A node reference that survives reloads: block id if the node is a block,
 /// else its path of titles (§11.2).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKey {
     Root,
     Id(Id),
