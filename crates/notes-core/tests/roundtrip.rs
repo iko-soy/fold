@@ -116,12 +116,34 @@ fn render_item_subtree() {
 
 #[test]
 fn render_section_relevels() {
+    // In the on-disk spelling, written levels are preserved verbatim.
     let text = "# A\n\n## B\n\n### C\n\nbody\n";
     let t = tree_of(text);
     let b = t.resolved_children(t.resolved_children(t.root)[0])[0];
     let r = render(&t, b, 1, false);
-    // base − level(node): B re-levels from 2 to 1, C from 3 to 2 (§5.1.4)
+    assert_eq!(r, "# B\n\n### C\n\nbody\n");
+}
+
+#[test]
+fn resolved_render_relevels() {
+    // The resolved (user-facing) spelling re-levels by base − level(node)
+    // (§5.1.4).
+    let text = "# A\n\n## B\n\n### C\n\nbody\n";
+    let t = tree_of(text);
+    let b = t.resolved_children(t.resolved_children(t.root)[0])[0];
+    let r = render(&t, b, 1, true);
     assert_eq!(r, "# B\n\n## C\n\nbody\n");
+}
+
+#[test]
+fn written_levels_are_honoured() {
+    // A heading under a bullet keeps its written level in the on-disk
+    // spelling (§3.1): the app never re-levels a node it didn't touch.
+    let text = "- item\n  ### deep section\n";
+    let t = tree_of(text);
+    let item = t.resolved_children(t.root)[0];
+    let r = render(&t, item, 1, false);
+    assert!(r.contains("### deep section"), "{}", r);
 }
 
 #[test]

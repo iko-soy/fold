@@ -802,6 +802,7 @@ dependencies = [
  "jiff",
  "proptest",
  "similar",
+ "tempfile",
  "thiserror",
  "unicode-normalization",
 ]

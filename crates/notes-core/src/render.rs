@@ -22,7 +22,9 @@ pub fn render(tree: &Tree, node: NRef, base: usize, resolve_blocks: bool) -> Str
             }
         }
     }
-    let base_level = tree.level(node);
+    // The render root prints at level `base`, indent 0; descendants follow
+    // their position relative to it.
+    let base_level = tree.level(node).min(base);
     let base_indent = tree.indent(node);
     render_at(
         tree,
@@ -97,15 +99,30 @@ fn render_at(
     // unresolved the body's leading blank line is kept (it is the file's
     // separator after the frontmatter/title); otherwise bodies are separated
     // from the title by one canonical blank line.
-    let body = trimmed_body_keep(tree, r, is_block_root && !resolve);
+    let keep_file_spacing = is_block_root && !resolve;
+    let body = if keep_file_spacing {
+        // verbatim: the body region as found, minus trailing blank lines
+        let mut lines = tree.node(r).body_lines(tree.text_of(r));
+        while lines.last().map(|l| l.trim().is_empty()) == Some(true) {
+            lines.pop();
+        }
+        lines
+    } else {
+        trimmed_body_keep(tree, r, false)
+    };
     let has_trailing_sep = body_sep_blank(tree, r);
     if !body.is_empty() && n.kind != Kind::Root && !is_block_root {
         out.push('\n');
     }
     let body_dedent = tree.indent(r);
     for l in &body {
-        push_indent(out, dindent);
-        out.push_str(dedent(l, body_dedent));
+        if keep_file_spacing {
+            // verbatim: the file's own spacing is reproduced exactly
+            out.push_str(dedent_keep_blanks(l, body_dedent));
+        } else {
+            push_indent(out, dindent);
+            out.push_str(dedent(l, body_dedent));
+        }
         out.push('\n');
     }
     // Children in document order.
@@ -114,6 +131,7 @@ fn render_at(
         && children
             .iter()
             .all(|&k| tree.node(k).kind == Kind::Item);
+    let blank_rule = if keep_file_spacing { has_trailing_sep } else { !all_item_children };
     let mut prev: Option<NRef> = None;
     for c in children {
         let cn = tree.node(c);
@@ -125,17 +143,25 @@ fn render_at(
             .map(|p| tree.node(p).kind == Kind::Section)
             .unwrap_or(false);
         if is_first {
-            if !body.is_empty() || has_trailing_sep || (n.kind != Kind::Root && !all_item_children)
-            {
+            if !body.is_empty() || has_trailing_sep || (n.kind != Kind::Root && blank_rule) {
                 out.push('\n');
             }
         } else if cn.kind == Kind::Section || prev_was_section {
             out.push('\n');
         }
-        // Display position of the child: relative to this node.
+        // Display position of the child: relative to this node. Written
+        // levels are honoured (§3.1): a section's display level never moves
+        // down from what is written in the file.
         let cindent = dindent + tree.indent(c).saturating_sub(tree.indent(r));
         let clevel = match cn.kind {
-            Kind::Section => dlevel + section_steps(tree, r, c),
+            Kind::Section => {
+                let rel = dlevel + section_steps(tree, r, c);
+                if resolve {
+                    rel // zoom-out: re-level by base − level(root) (§5.1.4)
+                } else {
+                    rel.max(tree.level(c)) // on-disk spelling: written levels honoured
+                }
+            }
             _ => dlevel,
         };
         if cn.is_embed() {
@@ -202,9 +228,21 @@ fn trimmed_body_keep<'a>(tree: &'a Tree, r: NRef, keep_leading: bool) -> Vec<&'a
             lines.remove(0);
         }
     } else {
-        // keep at most one leading blank (the file's separator)
-        while lines.len() > 1 && lines[0].trim().is_empty() && lines[1].trim().is_empty() {
-            lines.remove(0);
+        // keep the file's own separator before the body: a leading blank
+        // line, or — for an item-rooted block — the 2-space body indent,
+        // which reads as a blank after the title in a standalone file.
+        if lines.len() > 1 && lines[0].trim().is_empty() {
+            while lines.len() > 1 && lines[0].trim().is_empty() && lines[1].trim().is_empty() {
+                lines.remove(0);
+            }
+        } else if !lines.is_empty()
+            && lines[0].starts_with("  ")
+            && !lines[0].trim_start().starts_with("- ")
+            && !lines[0].trim_start().starts_with('#')
+            && lines[0].trim_start().len() == lines[0].trim().len()
+            && !lines[0].trim().is_empty()
+        {
+            lines.insert(0, "");
         }
     }
     while lines.last().map(|l| l.trim().is_empty()) == Some(true) {
@@ -243,4 +281,13 @@ fn dedent(line: &str, cols: usize) -> &str {
         }
     }
     ""
+}
+
+/// Dedent only lines that carry content; blank lines stay empty.
+fn dedent_keep_blanks(line: &str, cols: usize) -> &str {
+    if line.trim().is_empty() {
+        ""
+    } else {
+        dedent(line, cols)
+    }
 }

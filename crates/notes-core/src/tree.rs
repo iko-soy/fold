@@ -27,22 +27,35 @@ impl Tree {
         &self.files[r.0].text
     }
 
-    /// level(n) = 1 + number of section ancestors (§3.1). Items contribute
-    /// nothing; a section under items keeps its own level.
+    /// level(n) = 1 + number of section ancestors (§3.1). When a section's
+    /// written level is deeper than its ancestry implies (headings under
+    /// bullets, skipped levels), the written level is honoured: the app never
+    /// re-levels a node it didn't touch.
     pub fn level(&self, r: NRef) -> usize {
         let node = self.node(r);
         match node.kind {
-            Kind::Section => node.level.unwrap_or(1),
+            Kind::Section => {
+                let written = node.level.unwrap_or(1);
+                let mut derived = 1usize;
+                let mut cur = node.parent;
+                while let Some(p) = cur {
+                    let pr = (r.0, p);
+                    if self.node(pr).kind == Kind::Section {
+                        derived += 1;
+                    }
+                    cur = self.node(pr).parent;
+                }
+                written.max(derived)
+            }
             Kind::Item => {
                 // An item displays at the level of its enclosing section.
                 let mut cur = node.parent;
                 while let Some(p) = cur {
                     let pr = (r.0, p);
-                    let pn = self.node(pr);
-                    if pn.kind == Kind::Section {
-                        return pn.level.unwrap_or(1);
+                    if self.node(pr).kind == Kind::Section {
+                        return self.level(pr);
                     }
-                    cur = pn.parent;
+                    cur = self.node(pr).parent;
                 }
                 1
             }
