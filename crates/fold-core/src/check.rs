@@ -187,50 +187,93 @@ pub fn is_iso_date(v: &str) -> bool {
 
 /// Canonicalize every file and repair filenames (§4.2, §6.4, §13 `--fix`).
 /// Returns the number of files rewritten or renamed.
+///
+/// Nothing is dropped: root.md keeps its frontmatter and any text before its
+/// first node verbatim, embeds stay embeds, and a block file that is
+/// malformed (§4.9: read-only until fixed by hand) is left alone.
 pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
     let mut count = 0;
-    // rewrite each block file from its canonical render
     for i in 0..vault.tree.files.len() {
         let f = &vault.tree.files[i];
+        let top: Vec<usize> = f.nodes[f.root_node].children.clone();
         let canonical = if i == 0 {
-            // root.md: re-emit the whole file's top-level nodes
-            let mut s = String::new();
-            let kids = vault.tree.resolved_children(vault.tree.root);
-            for (idx, k) in kids.iter().enumerate() {
-                if idx > 0 && vault.tree.node(*k).kind == Kind::Section {
+            let Some(&first) = top.first() else { continue };
+            // frontmatter and intro text, exactly as found
+            let mut s = f.text[..f.nodes[first].span.start].to_string();
+            for (idx, &k) in top.iter().enumerate() {
+                let kr = (i, k);
+                let kn = vault.tree.node(kr);
+                if idx > 0 && (kn.kind == Kind::Section || vault.tree.node((i, top[idx - 1])).kind == Kind::Section) {
                     s.push('\n');
                 }
-                s.push_str(&render(&vault.tree, *k, 1, false));
+                match &kn.embed {
+                    Some(id) => {
+                        s.push_str("![[");
+                        s.push_str(id.as_str());
+                        s.push_str("]]\n");
+                    }
+                    None => s.push_str(&render(&vault.tree, kr, 1, false)),
+                }
             }
             s
         } else {
-            let root_node = f.nodes[f.root_node].children[0];
-            render(&vault.tree, (i, root_node), 1, false)
+            let malformed = top.len() != 1
+                || f.diagnostics.iter().any(|d| {
+                    d.message.contains("more than one node") || d.message.contains("before the block")
+                });
+            if malformed {
+                continue;
+            }
+            render(&vault.tree, (i, top[0]), 1, false)
         };
         if canonical != f.text {
             vault.write_file_text(i, &canonical)?;
             count += 1;
         }
     }
-    // repair filenames (§6.4)
-    let renames: Vec<(usize, String)> = vault
+    // repair filenames (§6.4): an existing prefix that is a leading run of
+    // the id is kept — prefixes are never lengthened — unless a file decided
+    // earlier already holds it (a collision: the later file moves)
+    let current: Vec<(usize, String)> = vault
         .tree
         .blocks
         .iter()
-        .filter_map(|(r, id)| {
-            let b = vault.tree.node(*r).block.as_ref().unwrap();
-            let prefix = vault.unique_prefix(id);
-            let want = filename(&prefix, &slug(&vault.tree.node(*r).title));
-            if want != b.path {
-                Some((r.0, want))
-            } else {
-                None
-            }
+        .map(|(r, _)| {
+            let path = &vault.tree.node(*r).block.as_ref().unwrap().path;
+            (r.0, split_filename(path).map(|(p, _)| p.to_string()).unwrap_or_default())
         })
         .collect();
+    let mut decided: Vec<String> = Vec::new();
+    let mut renames: Vec<(usize, String)> = Vec::new();
+    for (i, (r, id)) in vault.tree.blocks.iter().enumerate() {
+        let b = vault.tree.node(*r).block.as_ref().unwrap();
+        let words = id.words();
+        let keep = split_filename(&b.path).and_then(|(p, _)| {
+            let n = p.split('-').count();
+            (n <= 4 && words[..n].join("-") == p && !decided.iter().any(|d| d == p))
+                .then(|| p.to_string())
+        });
+        let prefix = keep.unwrap_or_else(|| {
+            let others: Vec<&str> = decided
+                .iter()
+                .map(String::as_str)
+                .chain(current[i + 1..].iter().map(|(_, p)| p.as_str()))
+                .collect();
+            id.shortest_prefix(&|cand| others.contains(&cand))
+        });
+        let want = filename(&prefix, &slug(&vault.tree.node(*r).title));
+        if want != b.path {
+            renames.push((r.0, want));
+        }
+        decided.push(prefix);
+    }
     for (file, want) in renames {
         let old = vault.tree.files[file].path.clone();
-        std::fs::rename(vault.dir.join(&old), vault.dir.join(&want))?;
+        let target = vault.dir.join(&want);
+        if target.exists() {
+            continue; // never overwrite; check keeps reporting it
+        }
+        std::fs::rename(vault.dir.join(&old), target)?;
         count += 1;
     }
     if count > 0 {

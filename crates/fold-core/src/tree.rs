@@ -203,6 +203,7 @@ impl Node {
         let mut lines: Vec<&'a str> = file_text[self.body_span.start..self.body_span.end]
             .split_inclusive('\n')
             .map(|l| l.strip_suffix('\n').unwrap_or(l))
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
             .collect();
         // A blank line produced only by the separator before a child node is
         // not body content, but it is remembered: the renderer uses it to

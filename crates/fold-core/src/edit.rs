@@ -8,10 +8,11 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{Kind, TaskState};
+use crate::parse::Kind;
+use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// One buffer line and its owner.
 #[derive(Debug, Clone)]
@@ -38,8 +39,9 @@ pub struct EditBuffer {
     pub owners: BTreeMap<Owner, OwnerInfo>,
     /// Owners whose lines changed since last save.
     pub dirty: Vec<Owner>,
-    /// blake3 of each file as read when the buffer was built (§5.2.5).
-    base_hashes: Vec<String>,
+    /// blake3 of each file (by path) as last read or written through this
+    /// buffer (§5.2.5).
+    base_hashes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,35 +50,99 @@ pub struct OwnerInfo {
     pub id: Option<Id>,
     /// The block-root node in the tree at buffer-build time.
     pub nref: NRef,
-    /// The level/indent the block's text was shifted by when inlined into
-    /// the buffer (inverse applied on splice, §5.2.3).
+    /// Display level/indent of the block's top node in the buffer.
     pub level: usize,
     pub indent: usize,
+    /// Level/indent of that node in its own file; splice shifts by
+    /// `target − display` (§5.2.3).
+    pub target_level: usize,
+    pub target_indent: usize,
+    /// The owner whose text holds this block's embed (None for the owner
+    /// of the render root).
+    pub parent: Option<Owner>,
+    /// The file the block is written to, and where its span starts (for a
+    /// render root that is not a block: found again by position after
+    /// reloads).
+    pub path: String,
+    pub start: usize,
+    pub is_root: bool,
 }
 
 impl EditBuffer {
     /// Build the editing buffer for `render(node, 1, true)` (§5.2): every
     /// line tagged with its owning block.
     pub fn build(vault: &Vault, root: NRef) -> EditBuffer {
+        let tree = &vault.tree;
         let mut lines = Vec::new();
         let mut owners: BTreeMap<Owner, OwnerInfo> = BTreeMap::new();
-        let mut block_ord = 0usize;
-        build_node(
-            vault,
-            root,
-            1,
-            0,
-            &mut block_ord,
-            &mut lines,
-            &mut owners,
-            &mut Vec::new(),
-        );
-        let base_hashes = vault
-            .tree
+        let mut by_node: Vec<(NRef, Owner)> = Vec::new();
+        let rlines = render_lines(tree, root, 1, true);
+        let new_owner = |nref: NRef,
+                             outer: NRef,
+                             level: usize,
+                             indent: usize,
+                             owners: &mut BTreeMap<Owner, OwnerInfo>,
+                             by_node: &mut Vec<(NRef, Owner)>|
+         -> Owner {
+            if let Some((_, o)) = by_node.iter().find(|(r, _)| *r == nref) {
+                return *o;
+            }
+            let o = Owner {
+                file: nref.0,
+                block_ord: by_node.len(),
+            };
+            let n = tree.node(nref);
+            let is_root = n.kind == Kind::Root;
+            let (level, indent, target_level, target_indent) = if is_root {
+                (0, 0, 0, 0)
+            } else if n.is_block() {
+                (level, indent, tree.level(nref), 0)
+            } else {
+                (level, indent, tree.level(nref), tree.indent(nref))
+            };
+            let parent = if outer == nref {
+                None
+            } else {
+                by_node.iter().find(|(r, _)| *r == outer).map(|(_, o)| *o)
+            };
+            owners.insert(
+                o,
+                OwnerInfo {
+                    title: if is_root { "root".into() } else { n.title.clone() },
+                    id: n.block.as_ref().and_then(|b| b.id.clone()),
+                    nref,
+                    level,
+                    indent,
+                    target_level,
+                    target_indent,
+                    parent,
+                    path: tree.files[nref.0].path.clone(),
+                    start: n.span.start,
+                    is_root,
+                },
+            );
+            by_node.push((nref, o));
+            o
+        };
+        for l in rlines {
+            let owner = new_owner(l.owner, l.outer, l.level, l.indent, &mut owners, &mut by_node);
+            lines.push(EditLine {
+                text: l.text,
+                owner,
+            });
+        }
+        if lines.is_empty() {
+            // an empty document still has one line to type into
+            let owner = new_owner(root, root, 1, 0, &mut owners, &mut by_node);
+            lines.push(EditLine {
+                text: String::new(),
+                owner,
+            });
+        }
+        let base_hashes = tree
             .files
             .iter()
-            .enumerate()
-            .map(|(i, _)| vault.hash_of(i).to_string())
+            .map(|f| (f.path.clone(), hash(&f.text)))
             .collect();
         EditBuffer {
             lines,
@@ -128,6 +194,34 @@ impl EditBuffer {
         }
     }
 
+    /// The block's node in the current tree (it may have been re-parsed
+    /// since the buffer was built).
+    fn locate(&self, vault: &Vault, info: &OwnerInfo) -> Option<NRef> {
+        if let Some(id) = &info.id {
+            return vault.tree.block_by_id(id);
+        }
+        let file = vault.file_index(&info.path)?;
+        let f = &vault.tree.files[file];
+        if info.is_root {
+            return Some((file, f.root_node));
+        }
+        f.nodes
+            .iter()
+            .position(|n| n.kind != Kind::Root && n.span.start == info.start)
+            .map(|i| (file, i))
+    }
+
+    /// The owner directly nested in `owner` that `o` belongs to, if any.
+    fn nested_in(&self, mut o: Owner, owner: Owner) -> Option<Owner> {
+        while let Some(p) = self.owners.get(&o).and_then(|i| i.parent) {
+            if p == owner {
+                return Some(o);
+            }
+            o = p;
+        }
+        None
+    }
+
     /// Splice one dirty block (§5.2): collect its lines, put nested blocks
     /// back as embeds, shift back, write the one file atomically.
     pub fn splice(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<()> {
@@ -135,104 +229,111 @@ impl EditBuffer {
             Some(i) => i.clone(),
             None => return Ok(()),
         };
-        // Collect the block's owned lines in buffer order; where a nested
-        // block's title line sits, emit an embed instead (§5.2.1).
-        let mut text_lines: Vec<String> = Vec::new();
-        let mut skip_blocks: Vec<usize> = Vec::new();
+        // Collect the block's owned lines in buffer order; where a block
+        // nested in it starts — whatever file it lives in — emit its embed
+        // (§5.2.1).
+        let mut text_lines: Vec<Line> = Vec::new();
+        let mut emitted: Vec<Owner> = Vec::new();
         for l in &self.lines {
             if l.owner == owner {
-                text_lines.push(l.text.clone());
-            } else if l.owner.file == owner.file && l.owner.block_ord != owner.block_ord {
-                // a line owned by a nested block in the same file: at the
-                // position of that nested block's *title* line, emit an embed
-                let nested_ord = l.owner.block_ord;
-                if !skip_blocks.contains(&nested_ord) {
-                    skip_blocks.push(nested_ord);
-                    let nested_owner = Owner { file: owner.file, block_ord: nested_ord };
-                    if let Some(ninfo) = self.owners.get(&nested_owner) {
-                        if let Some(id) = &ninfo.id {
-                            text_lines.push(format!("EMBED:{}", id));
-                        }
+                text_lines.push(Line::Text(l.text.clone()));
+            } else if let Some(nested) = self.nested_in(l.owner, owner) {
+                if !emitted.contains(&nested) {
+                    emitted.push(nested);
+                    if let Some(id) = self.owners.get(&nested).and_then(|i| i.id.clone()) {
+                        let indent = l.text.len() - l.text.trim_start_matches(' ').len();
+                        text_lines.push(Line::Embed(indent, id));
                     }
                 }
             }
         }
-        // The first line is the block's title line.
         if text_lines.is_empty() {
             return Ok(());
         }
-        // Shift back: re-level sections by +(level(block) − 1), re-indent by
-        // +indent(block) (§5.2.3).
-        let level_delta = info.level as isize - 1;
-        let indent_delta = info.indent as isize;
+        // Shift back from the display position to the block's position in
+        // its file (§5.2.3).
+        let level_delta = info.target_level as isize - info.level as isize;
+        let indent_delta = info.target_indent as isize - info.indent as isize;
+        let shift = |cols: usize| (cols as isize + indent_delta).max(0) as usize;
         let mut out = String::new();
         let mut fence: Option<(char, usize)> = None;
         for l in &text_lines {
-            if let Some(id) = l.strip_prefix("EMBED:") {
-                out.push_str(&" ".repeat(indent_delta.max(0) as usize));
-                out.push_str("![[");
-                out.push_str(id);
-                out.push_str("]]\n");
-                continue;
-            }
-            let trimmed = l.trim_start();
-            if fence_transition(l, &mut fence) || fence.is_some() {
-                out.push_str(l);
+            let l = match l {
+                Line::Embed(indent, id) => {
+                    out.push_str(&" ".repeat(shift(*indent)));
+                    out.push_str("![[");
+                    out.push_str(id.as_str());
+                    out.push_str("]]\n");
+                    continue;
+                }
+                Line::Text(t) => t,
+            };
+            if l.trim().is_empty() {
                 out.push('\n');
                 continue;
             }
-            let cur_indent = l.len() - trimmed.len();
-            let new_indent = (cur_indent as isize + indent_delta).max(0) as usize;
-            if trimmed.starts_with('#') {
-                let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+            let trimmed = l.trim_start_matches(' ');
+            let new_indent = shift(l.len() - trimmed.len());
+            out.push_str(&" ".repeat(new_indent));
+            let in_code = fence_transition(l, &mut fence) || fence.is_some();
+            let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+            let after = &trimmed[hashes..];
+            if !in_code && hashes > 0 && (after.is_empty() || after.starts_with(' ')) {
                 let nl = (hashes as isize + level_delta).max(1) as usize;
-                out.push_str(&" ".repeat(new_indent));
                 out.push_str(&"#".repeat(nl));
-                out.push_str(&trimmed[hashes..]);
-                out.push('\n');
+                out.push_str(after);
             } else {
-                out.push_str(&" ".repeat(new_indent));
                 out.push_str(trimmed);
-                out.push('\n');
             }
+            out.push('\n');
         }
-        // External-change check (§5.2.5).
-        let file = owner.file;
-        let current_hash = blake3::hash(vault.tree.files[file].text.as_bytes())
-            .to_hex()
-            .to_string();
-        if current_hash != self.base_hashes[file]
-            && current_hash != vault.hash_of(file)
-        {
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        let nref = self.locate(vault, &info).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{}: edited node no longer found", info.path),
+            )
+        })?;
+        let file = nref.0;
+        let path = vault.tree.files[file].path.clone();
+        // External-change check (§5.2.5): what is on disk now must be what
+        // was read (or last written) through this buffer.
+        let on_disk = std::fs::read_to_string(vault.dir.join(&path)).unwrap_or_default();
+        if self.base_hashes.get(&path).map(|h| *h != hash(&on_disk)).unwrap_or(false) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("{} changed on disk; not overwriting", vault.tree.files[file].path),
+                format!("{} changed on disk; not overwriting", path),
             ));
         }
-        // Replace the block's span (or the whole file for its own block).
-        let nref = info.nref;
-        let n = vault.tree.node(nref);
+        let f = &vault.tree.files[file];
+        let n = &f.nodes[nref.1];
         if n.is_block() || n.kind == Kind::Root {
-            // the block IS the file (minus frontmatter): replace everything
-            // after the frontmatter
-            let f = &vault.tree.files[file];
-            let fm_end = f.nodes[f.root_node]
-                .children
-                .first()
-                .and_then(|&rn| f.nodes[rn].block.as_ref())
+            // the block IS the file: keep its frontmatter, replace the rest
+            let fm_end = n
+                .block
+                .as_ref()
                 .and_then(|b| b.frontmatter_span)
                 .map(|s| s.end)
-                .unwrap_or(0);
+                .unwrap_or(0)
+                .min(f.text.len());
             let mut new_text = String::new();
             new_text.push_str(&f.text[..fm_end]);
             new_text.push_str(&out);
             vault.write_file_text(file, &new_text)?;
         } else {
-            vault.write_span(file, n.span, &out)?;
+            // a span inside a file: keep the blank lines that separate it
+            // from what follows
+            let old = n.span.text(&f.text);
+            let content_end = old.trim_end_matches([' ', '\t', '\r', '\n']).len();
+            let rest = &old[content_end..];
+            let sep = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
+            let replacement = format!("{}{}", out, sep);
+            vault.write_span(file, n.span, &replacement)?;
         }
-        self.base_hashes[file] = blake3::hash(vault.tree.files[file].text.as_bytes())
-            .to_hex()
-            .to_string();
+        self.base_hashes
+            .insert(path, hash(&vault.tree.files[file].text));
         self.dirty.retain(|o| *o != owner);
         Ok(())
     }
@@ -248,6 +349,17 @@ impl EditBuffer {
         }
         Ok(n)
     }
+}
+
+/// A line collected for splice: owned text, or a nested block's embed at
+/// the display indent of its first line.
+enum Line {
+    Text(String),
+    Embed(usize, Id),
+}
+
+fn hash(text: &str) -> String {
+    blake3::hash(text.as_bytes()).to_hex().to_string()
 }
 
 fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
@@ -274,166 +386,6 @@ fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
             }
         }
     }
-}
-
-/// Recursive buffer construction: emit a node's title/body at the display
-/// position, tag lines with the owning block, descend (§5.2).
-#[allow(clippy::too_many_arguments)]
-fn build_node(
-    vault: &Vault,
-    r: NRef,
-    dlevel: usize,
-    dindent: usize,
-    block_ord: &mut usize,
-    lines: &mut Vec<EditLine>,
-    owners: &mut BTreeMap<Owner, OwnerInfo>,
-    seen: &mut Vec<NRef>,
-) {
-    if seen.contains(&r) {
-        return;
-    }
-    seen.push(r);
-    let n = vault.tree.node(r);
-    // The owning block: nearest ancestor-or-self that is one. The render
-    // root owns until a nested block starts.
-    let is_block_start = n.is_block() && n.kind != Kind::Root;
-    let owner = if is_block_start {
-        *block_ord += 1;
-        let o = Owner { file: r.0, block_ord: *block_ord };
-        owners.insert(
-            o,
-            OwnerInfo {
-                title: n.title.clone(),
-                id: n.block.as_ref().and_then(|b| b.id.clone()),
-                nref: r,
-                level: dlevel,
-                indent: dindent,
-            },
-        );
-        o
-    } else if n.kind == Kind::Root || owners.is_empty() {
-        let o = Owner { file: r.0, block_ord: 0 };
-        owners.entry(o).or_insert_with(|| OwnerInfo {
-            title: if n.kind == Kind::Root {
-                "root".into()
-            } else {
-                n.title.clone()
-            },
-            id: n.block.as_ref().and_then(|b| b.id.clone()),
-            nref: r,
-            level: dlevel,
-            indent: dindent,
-        });
-        o
-    } else {
-        // owned by the enclosing block: the last opened owner
-        *owners.keys().last().unwrap()
-    };
-    // Title line.
-    match n.kind {
-        Kind::Root => {}
-        Kind::Section => {
-            let mut s = " ".repeat(dindent);
-            s.push_str(&"#".repeat(dlevel.max(1)));
-            s.push(' ');
-            if !n.is_block() {
-                push_checkbox(n.task, &mut s);
-            }
-            s.push_str(n.title.trim_end());
-            lines.push(EditLine { text: s, owner });
-        }
-        Kind::Item => {
-            let mut s = " ".repeat(dindent);
-            s.push_str("- ");
-            if !n.is_block() {
-                push_checkbox(n.task, &mut s);
-            }
-            s.push_str(n.title.trim_end());
-            lines.push(EditLine { text: s, owner });
-        }
-    }
-    // Body.
-    let body = n.body_lines(vault.tree.text_of(r));
-    let mut body: Vec<&str> = body;
-    while body.first().map(|l| l.trim().is_empty()) == Some(true) {
-        body.remove(0);
-    }
-    while body.last().map(|l| l.trim().is_empty()) == Some(true) {
-        body.pop();
-    }
-    if !body.is_empty() && n.kind != Kind::Root {
-        lines.push(EditLine { text: String::new(), owner });
-    }
-    let dedent_by = vault.tree.indent(r);
-    for l in &body {
-        lines.push(EditLine {
-            text: format!("{}{}", " ".repeat(dindent), dedent(l, dedent_by)),
-            owner,
-        });
-    }
-    // Children.
-    let children = vault.tree.resolved_children(r);
-    let mut first = true;
-    for c in children {
-        let cn = vault.tree.node(c);
-        if cn.kind == Kind::Root {
-            continue;
-        }
-        if first {
-            if !body.is_empty() || n.kind != Kind::Root {
-                lines.push(EditLine { text: String::new(), owner });
-            }
-            first = false;
-        } else if cn.kind == Kind::Section {
-            lines.push(EditLine { text: String::new(), owner });
-        }
-        let cindent = dindent + vault.tree.indent(c).saturating_sub(vault.tree.indent(r));
-        let clevel = match cn.kind {
-            Kind::Section => dlevel + 1,
-            _ => dlevel,
-        };
-        // embeds resolve in the editing buffer (§10.6): the nested block's
-        // lines carry its own tag.
-        let target = vault.tree.resolved_child(c);
-        if target != c {
-            build_node(vault, target, clevel, cindent, block_ord, lines, owners, seen);
-        } else if cn.is_embed() {
-            // broken embed: shown as text, owned here
-            lines.push(EditLine {
-                text: format!("{}![[{}]]", " ".repeat(cindent), cn.embed.as_ref().unwrap()),
-                owner,
-            });
-        } else {
-            build_node(vault, c, clevel, cindent, block_ord, lines, owners, seen);
-        }
-    }
-    seen.pop();
-}
-
-fn push_checkbox(task: Option<TaskState>, out: &mut String) {
-    match task {
-        Some(TaskState::Open) => out.push_str("[ ] "),
-        Some(TaskState::Done) => out.push_str("[x] "),
-        None => {}
-    }
-}
-
-fn dedent(line: &str, cols: usize) -> &str {
-    if cols == 0 {
-        return line;
-    }
-    let mut removed = 0;
-    for (i, ch) in line.char_indices() {
-        if removed >= cols {
-            return &line[i..];
-        }
-        match ch {
-            ' ' => removed += 1,
-            '\t' => removed += 4,
-            _ => return &line[i..],
-        }
-    }
-    ""
 }
 
 /// What the editor needs to know when it opens: the buffer plus a render of

@@ -3,6 +3,7 @@ use fold_tui::app::App;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
+#[allow(dead_code)]
 fn toolbar_labels(app: &mut App) -> Vec<String> {
     draw_once(app, 160, 30);
     app.toolbar_labels()

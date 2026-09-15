@@ -104,14 +104,21 @@ fn reading_search_jumps_to_match() {
 fn reading_heading_jump() {
     let (_d, mut app) = app_with("# A\n\ntext\n\n## B\n\nmore\n\n## C\n");
     app.key_normal(key(KeyCode::Enter));
+    // a single `]` does nothing (§10.4: `]]`)
+    app.handle_key(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.read_cursor_pub(), 0);
     let doc = app.reading_doc_pub();
     let b_line = doc.lines.iter().position(|l| l.contains("## B")).unwrap();
     let c_line = doc.lines.iter().position(|l| l.contains("## C")).unwrap();
-    app.key_reading_pub(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char(']')));
     assert_eq!(app.read_cursor_pub(), b_line);
-    app.key_reading_pub(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char(']')));
     assert_eq!(app.read_cursor_pub(), c_line);
-    app.key_reading_pub(key(KeyCode::Char('[')));
+    app.handle_key(key(KeyCode::Char('[')));
+    app.handle_key(key(KeyCode::Char('[')));
     assert_eq!(app.read_cursor_pub(), b_line);
 }
 

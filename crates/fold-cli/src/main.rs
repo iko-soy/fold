@@ -86,6 +86,12 @@ fn directories_home() -> PathBuf {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let dir = vault_dir(&cli.vault);
+    // only the TUI sets a vault up (§13); a mistyped --vault is an error
+    // for every other command rather than a new directory
+    let needs_vault = !matches!(cli.command, None | Some(Command::Help) | Some(Command::Trash { .. }));
+    if needs_vault && !dir.is_dir() {
+        anyhow::bail!("no vault at {}", dir.display());
+    }
     match cli.command {
         None => {
             // open the TUI (§13)
@@ -173,9 +179,21 @@ fn main() -> anyhow::Result<()> {
                         } else {
                             restored
                         };
-                        std::fs::create_dir_all(&dir)?;
-                        std::fs::rename(e.path(), dir.join(&restored))?;
-                        println!("restored {}", restored);
+                        if !dir.is_dir() {
+                            anyhow::bail!("no vault at {}", dir.display());
+                        }
+                        // never restore over an existing file, root.md least of all
+                        let target = if restored != "root.md" && !dir.join(&restored).exists() {
+                            restored.clone()
+                        } else {
+                            let stem = restored.strip_suffix(".md").unwrap_or(&restored);
+                            (2..)
+                                .map(|i| format!("{}-restored-{}.md", stem, i))
+                                .find(|n| !dir.join(n).exists())
+                                .unwrap()
+                        };
+                        fold_core::vault::move_file(&e.path(), &dir.join(&target))?;
+                        println!("restored {}", target);
                     }
                     _ => anyhow::bail!("{:?} matches {} trash entries", id, matches.len()),
                 }

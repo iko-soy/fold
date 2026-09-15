@@ -73,14 +73,16 @@ impl Vault {
         let mut entries: Vec<String> = std::fs::read_dir(&self.dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.ends_with(".md") && n != "root.md")
+            .filter(|n| n.ends_with(".md") && n != "root.md" && !n.starts_with('.'))
             .collect();
         entries.sort();
         for name in entries {
             if name.contains(".sync-conflict-") {
                 continue; // merge engine only (§11.4)
             }
-            let text = match read_if_exists(&self.dir.join(&name))? {
+            // anything unreadable — a directory named `x.md`, non-UTF-8
+            // text — is simply ignored (§4.1), never fatal
+            let text = match read_md_file(&self.dir.join(&name)) {
                 Some(t) => t,
                 None => continue,
             };
@@ -176,7 +178,13 @@ impl Vault {
             }
             let known = self.tree.files.iter().any(|f| f.path == name);
             if !known {
-                let text = read_if_exists(&e.path())?.unwrap_or_default();
+                let Some(text) = read_md_file(&e.path()) else {
+                    out.push(IgnoredFile {
+                        path: name,
+                        reason: "not a readable UTF-8 file".into(),
+                    });
+                    continue;
+                };
                 let reason = match parse_frontmatter(&text).and_then(|f| f.props.get("id").cloned())
                 {
                     Some(v) if Id::parse(&v).is_none() => {
@@ -203,10 +211,13 @@ impl Vault {
     /// Replace a byte span in a file atomically (§11.1), then re-parse.
     pub fn write_span(&mut self, file: usize, span: Span, replacement: &str) -> std::io::Result<()> {
         let f = &self.tree.files[file];
+        // a node's span may run one byte past a file without a final newline
+        let end = span.end.min(f.text.len());
+        let start = span.start.min(end);
         let mut new_text = String::with_capacity(f.text.len() + replacement.len());
-        new_text.push_str(&f.text[..span.start]);
+        new_text.push_str(&f.text[..start]);
         new_text.push_str(replacement);
-        new_text.push_str(&f.text[span.end..]);
+        new_text.push_str(&f.text[end..]);
         self.write_file_text(file, &new_text)
     }
 
@@ -315,14 +326,25 @@ impl Vault {
 
     /// Shortest prefix of `id` not already used by another file (§6.4).
     pub fn unique_prefix(&self, id: &Id) -> String {
-        let taken: Vec<String> = self
-            .tree
+        self.unique_prefix_except(id, None)
+    }
+
+    /// Like `unique_prefix`, but ignoring the file at `own` — a block's own
+    /// file never counts against it.
+    pub fn unique_prefix_except(&self, id: &Id, own: Option<&str>) -> String {
+        let taken = self.taken_prefixes(own);
+        id.shortest_prefix(&|cand| taken.iter().any(|t| t == cand))
+    }
+
+    /// Prefixes used by block files other than `own` (§6.4).
+    pub fn taken_prefixes(&self, own: Option<&str>) -> Vec<String> {
+        self.tree
             .files
             .iter()
             .skip(1)
+            .filter(|f| Some(f.path.as_str()) != own)
             .filter_map(|f| split_filename(&f.path).map(|(p, _)| p.to_string()))
-            .collect();
-        id.shortest_prefix(&|cand| taken.iter().any(|t| t == cand))
+            .collect()
     }
 
     /// Rename a block's file after a title change (§6.4).
@@ -336,7 +358,7 @@ impl Vault {
         };
         let prefix = split_filename(&old_path)
             .map(|(p, _)| p.to_string())
-            .unwrap_or_else(|| self.unique_prefix(&id));
+            .unwrap_or_else(|| self.unique_prefix_except(&id, Some(&old_path)));
         let new_name = filename(&prefix, &slug(new_title));
         if new_name == old_path {
             return Ok(());
@@ -351,9 +373,8 @@ impl Vault {
         let path = self.tree.files[file].path.clone();
         let trash = trash_dir();
         std::fs::create_dir_all(&trash)?;
-        let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
-        let target = trash.join(format!("{}-{}", stamp, path.to_lowercase()));
-        std::fs::rename(self.dir.join(&path), &target)?;
+        let target = trash_target(&trash, &path);
+        move_file(&self.dir.join(&path), &target)?;
         self.reload()?;
         Ok(())
     }
@@ -362,8 +383,7 @@ impl Vault {
     pub fn trash_text(&self, name: &str, text: &str) -> std::io::Result<PathBuf> {
         let trash = trash_dir();
         std::fs::create_dir_all(&trash)?;
-        let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
-        let target = trash.join(format!("{}-{}", stamp, name.to_lowercase()));
+        let target = trash_target(&trash, name);
         atomic_write(&target, text)?;
         Ok(target)
     }
@@ -379,6 +399,22 @@ impl Vault {
         out.sort();
         Ok(out)
     }
+}
+
+/// A fresh trash path `<timestamp>-<name>`; a second entry in the same
+/// second gets a numeric suffix instead of overwriting the first (§11.5).
+fn trash_target(trash: &Path, name: &str) -> PathBuf {
+    let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
+    let name = name.to_lowercase();
+    let first = trash.join(format!("{}-{}", stamp, name));
+    if !first.exists() {
+        return first;
+    }
+    let stem = name.strip_suffix(".md").unwrap_or(&name);
+    (2..)
+        .map(|i| trash.join(format!("{}-{}-{}.md", stamp, stem, i)))
+        .find(|p| !p.exists())
+        .unwrap()
 }
 
 pub fn trash_dir() -> PathBuf {
@@ -400,6 +436,27 @@ pub fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Rename, falling back to copy-and-remove when the trash and the vault
+/// are on different filesystems.
+pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(from, to)?;
+            std::fs::remove_file(from)
+        }
+    }
+}
+
+/// Read a vault `.md` file as text; `None` for anything that is not a
+/// readable UTF-8 regular file.
+fn read_md_file(path: &Path) -> Option<String> {
+    if !std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 fn read_if_exists(path: &Path) -> std::io::Result<Option<String>> {
@@ -455,7 +512,7 @@ impl Vault {
         let mut cur = self.tree.root;
         'seg: for seg in segs {
             for c in self.tree.resolved_children(cur) {
-                if self.tree.node(c).title.eq_ignore_ascii_case(seg) {
+                if title_eq(&self.tree.node(c).title, seg) {
                     cur = c;
                     continue 'seg;
                 }
@@ -484,7 +541,8 @@ impl Vault {
                 .collect();
             match matches.len() {
                 1 => return Ok(matches[0]),
-                0 => return Err(format!("no block with id prefix {:?}", text)),
+                // a word that merely looks like an id may still be a title
+                0 => {}
                 _ => return Err(format!("id prefix {:?} is ambiguous", text)),
             }
         }
@@ -505,7 +563,7 @@ impl Vault {
         // 3. unique title
         let mut found: Vec<NRef> = Vec::new();
         self.tree.walk(self.tree.root, &mut |t, r| {
-            if t.node(r).title.eq_ignore_ascii_case(text) {
+            if title_eq(&t.node(r).title, text) {
                 found.push(r);
             }
         });
@@ -522,6 +580,11 @@ impl Vault {
         self.tree.walk(self.tree.root, &mut |_, r| out.push(r));
         out
     }
+}
+
+/// Case-insensitive title comparison, Unicode-aware (§3.4).
+pub fn title_eq(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
 }
 
 /// Map from id string to NRef, for embed resolution in the TUI.

@@ -14,46 +14,91 @@ pub struct MergeOutcome {
     pub conflict_blocks: Vec<(String, String)>,
     /// Number of conflict pairs raised.
     pub conflicts: usize,
+    /// Conflict blocks raised against the file's own block root. Their embeds
+    /// cannot go inside a block file (a second column-0 node, §4.9); they
+    /// belong right after this file's embed in its parent file (§12.4).
+    pub sibling_embeds: Vec<Id>,
+}
+
+/// Merge state shared across the recursion.
+struct Ctx<'a> {
+    conflicts: usize,
+    conflict_blocks: Vec<(String, String)>,
+    sibling_embeds: Vec<Id>,
+    /// Nodes inserted from `T` only; with no conflicts and no insertions the
+    /// merge is `O` itself, byte for byte (§15.6).
+    insertions: usize,
+    device: &'a str,
+    timestamp: &'a str,
+    /// `O`'s and `T`'s block-file frontmatter (block files only).
+    o_fm: Option<crate::parse::Frontmatter>,
+    t_fm: Option<crate::parse::Frontmatter>,
 }
 
 /// Merge two versions of one file. `device`/`timestamp` stamp the conflict
 /// blocks (§12.4).
 pub fn merge_texts(ours: &str, theirs: &str, device: &str, timestamp: &str) -> MergeOutcome {
+    use crate::parse::parse_frontmatter;
     let o = standalone_tree(ours);
     let t = standalone_tree(theirs);
     // If both are block files, ids must match (§12.2); the caller handles
     // the prefix-collision case before calling us.
-    let mut conflicts = 0usize;
-    let mut conflict_blocks = Vec::new();
-    let merged_root = merge_children(
-        &o,
-        &t,
-        o.root,
-        t.root,
-        &mut conflicts,
-        &mut conflict_blocks,
+    let is_block = |fm: &Option<crate::parse::Frontmatter>| {
+        fm.as_ref().map(|f| f.props.contains_key("id")).unwrap_or(false)
+    };
+    let o_fm = parse_frontmatter(ours);
+    let t_fm = parse_frontmatter(theirs);
+    let block_file = is_block(&o_fm) && is_block(&t_fm);
+    let mut ctx = Ctx {
+        conflicts: 0,
+        conflict_blocks: Vec::new(),
+        sibling_embeds: Vec::new(),
+        insertions: 0,
         device,
         timestamp,
-        1,
-        0,
-    );
-    let mut text = merged_root;
-    // frontmatter merge for block files: key by key (§12.4)
-    text = merge_frontmatter(ours, theirs, &text, &mut conflicts, &mut conflict_blocks, device, timestamp);
+        o_fm: if block_file { parse_frontmatter(ours) } else { None },
+        t_fm: if block_file { t_fm } else { None },
+    };
+    let merged = merge_children(&o, &t, o.root, t.root, &mut ctx, 1, 0);
+    let text = if ctx.conflicts == 0 && ctx.insertions == 0 {
+        // T adds nothing: the merge is O, formatting included
+        ours.to_string()
+    } else {
+        // O's frontmatter stays verbatim; differing keys were raised as a
+        // conflict on the block root (§12.4)
+        match &o_fm {
+            Some(fm) => {
+                let mut head = ours[..fm.span.end].to_string();
+                if !head.ends_with("\n\n") {
+                    head.push('\n');
+                }
+                head + &merged
+            }
+            None => merged,
+        }
+    };
     MergeOutcome {
         text,
-        conflict_blocks,
-        conflicts,
+        conflict_blocks: ctx.conflict_blocks,
+        conflicts: ctx.conflicts,
+        sibling_embeds: ctx.sibling_embeds,
     }
 }
 
+/// Parse one version on its own, frontmatter included, so a block file's
+/// frontmatter is never mistaken for body text (§12.4).
 fn standalone_tree(text: &str) -> Tree {
+    let fm = crate::parse::parse_frontmatter(text);
+    let id = fm
+        .as_ref()
+        .and_then(|f| f.props.get("id"))
+        .and_then(|v| Id::parse(v));
     let block = Block {
-        id: None,
+        id,
         path: "m.md".into(),
-        props: Default::default(),
-        frontmatter_raw: String::new(),
-        frontmatter_span: None,
+        props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
+        frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
+        frontmatter_span: fm.as_ref().map(|f| f.span),
         edge_span: None,
     };
     let pf = parse_file("m.md", text, 0, Some(block));
@@ -78,10 +123,7 @@ fn merge_children(
     t: &Tree,
     op: NRef,
     tp: NRef,
-    conflicts: &mut usize,
-    conflict_blocks: &mut Vec<(String, String)>,
-    device: &str,
-    timestamp: &str,
+    ctx: &mut Ctx,
     level: usize,
     indent: usize,
 ) -> String {
@@ -90,8 +132,24 @@ fn merge_children(
     // match: embed by id, else by exact title among unmatched siblings
     let mut t_used = vec![false; t_kids.len()];
     let mut pairs: Vec<(Option<NRef>, Option<NRef>)> = Vec::new();
+    // a block file's root is the same node on both sides, whatever its
+    // title: match it by the file's id (§12.4 rule 1)
+    let file_id = |tr: &Tree, r: NRef| tr.node(r).block.as_ref().and_then(|b| b.id.clone());
+    let root_pair = match (o_kids.first(), t_kids.first()) {
+        (Some(&ok), Some(&tk)) if file_id(o, ok).is_some() && file_id(o, ok) == file_id(t, tk) => {
+            Some((ok, tk))
+        }
+        _ => None,
+    };
     for &ok in &o_kids {
         let on = o.node(ok);
+        if let Some((rok, rtk)) = root_pair {
+            if ok == rok {
+                t_used[0] = true;
+                pairs.push((Some(ok), Some(rtk)));
+                continue;
+            }
+        }
         let mut found = None;
         for (i, &tk) in t_kids.iter().enumerate() {
             if t_used[i] {
@@ -126,16 +184,22 @@ fn merge_children(
     // insertions; differing fields raise conflict pairs (§12.4).
     let mut out = String::new();
     for (ok, tk) in pairs {
+        let first_is_section = ok
+            .map(|a| o.node(a).kind == Kind::Section)
+            .or_else(|| tk.map(|b| t.node(b).kind == Kind::Section))
+            .unwrap_or(false);
+        if !out.is_empty() && first_is_section && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
         match (ok, tk) {
             (Some(a), Some(b)) => {
-                out.push_str(&merge_pair(
-                    o, t, a, b, conflicts, conflict_blocks, device, timestamp, level, indent,
-                ));
+                out.push_str(&merge_pair(o, t, a, b, ctx, level, indent));
             }
             (Some(a), None) => {
                 out.push_str(&emit_subtree(o, a, level, indent));
             }
             (None, Some(b)) => {
+                ctx.insertions += 1;
                 out.push_str(&emit_subtree(t, b, level, indent));
             }
             (None, None) => {}
@@ -144,16 +208,12 @@ fn merge_children(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn merge_pair(
     o: &Tree,
     t: &Tree,
     a: NRef,
     b: NRef,
-    conflicts: &mut usize,
-    conflict_blocks: &mut Vec<(String, String)>,
-    device: &str,
-    timestamp: &str,
+    ctx: &mut Ctx,
     level: usize,
     indent: usize,
 ) -> String {
@@ -163,9 +223,16 @@ fn merge_pair(
     if on.embed.is_some() {
         return emit_subtree(o, a, level, indent);
     }
+    // the file's own block root: its frontmatter keys are fields too (§12.4)
+    let is_file_block = on.block.as_ref().map(|bl| bl.id.is_some()).unwrap_or(false);
     let (otitle, otask, obody) = node_sig(o, a);
     let (_ttitle, ttask, tbody) = node_sig(t, b);
-    let differ = otitle != tn.title || otask != ttask || obody != tbody;
+    let mut differ = otitle != tn.title || otask != ttask || obody != tbody;
+    if is_file_block {
+        if let (Some(ofm), Some(tfm)) = (&ctx.o_fm, &ctx.t_fm) {
+            differ |= ofm.props != tfm.props;
+        }
+    }
     // children merge
     let child_level = match on.kind {
         Kind::Section => level + 1,
@@ -175,34 +242,72 @@ fn merge_pair(
         Kind::Item => indent + 2,
         _ => indent,
     };
-    let merged_kids = merge_children(
-        o, t, a, b, conflicts, conflict_blocks, device, timestamp, child_level, child_indent,
-    );
-    let mut out = emit_node_with(o, a, level, indent, &merged_kids);
-    if differ {
-        *conflicts += 1;
-        // theirs becomes a conflict block stitched in next to ours (§12.4)
-        let name = slug(&otitle);
-        let id = Id::generate();
-        let prefix = id.words()[0].to_string();
-        let fname = filename(&prefix, &name);
-        let mut block_text = format!("---\nid: {}\nconflict: \"{} {}\"\n", id, device, timestamp);
-        if let Some(ts) = ttask {
-            block_text.push_str(&format!(
-                "todo: {}\n",
-                match ts {
-                    TaskState::Open => "open",
-                    TaskState::Done => "done",
-                }
-            ));
-        }
-        block_text.push_str("---\n\n");
-        block_text.push_str(&emit_subtree_with_state(t, b, 1, 0));
-        conflict_blocks.push((fname, block_text));
-        // the embed goes right after ours
-        out.push_str(&format!("{}![[{}]]\n", " ".repeat(indent), id));
+    let merged_kids = merge_children(o, t, a, b, ctx, child_level, child_indent);
+    if !differ {
+        return emit_node_with(o, a, level, indent, &merged_kids);
     }
-    out
+    ctx.conflicts += 1;
+    // theirs becomes a conflict block stitched in next to ours (§12.4)
+    let name = slug(&otitle);
+    let id = Id::generate();
+    let prefix = id.words()[0].to_string();
+    let fname = filename(&prefix, &name);
+    let mut block_text = format!(
+        "---\nid: {}\nconflict: \"{} {}\"\n",
+        id, ctx.device, ctx.timestamp
+    );
+    let t_props = if is_file_block {
+        ctx.t_fm.as_ref().map(|f| f.props.clone())
+    } else {
+        None
+    };
+    match t_props {
+        // a block conflict carries T's own properties (§12.4)
+        Some(props) => {
+            for (k, v) in props.iter().filter(|(k, _)| *k != "id" && *k != "conflict") {
+                block_text.push_str(&format!("{}: {}\n", k, v));
+            }
+        }
+        None => {
+            if let Some(ts) = ttask {
+                block_text.push_str(&format!(
+                    "todo: {}\n",
+                    match ts {
+                        TaskState::Open => "open",
+                        TaskState::Done => "done",
+                    }
+                ));
+            }
+        }
+    }
+    block_text.push_str("---\n\n");
+    block_text.push_str(&emit_subtree_with_state(t, b, 1, 0));
+    ctx.conflict_blocks.push((fname, block_text));
+    let embed = format!("{}![[{}]]\n", " ".repeat(indent), id);
+    if is_file_block {
+        // a block file has one column-0 node: the embed goes after this
+        // file's own embed in the parent file (the caller places it)
+        ctx.sibling_embeds.push(id);
+        emit_node_with(o, a, level, indent, &merged_kids)
+    } else if on.kind == Kind::Section {
+        // An embed after a section's children would parse as its last
+        // child; one right after its title and body, as its first child,
+        // is the closest a section's "next" position can be. The conflict
+        // view pairs a first-child conflict with its parent (§10.8).
+        let mut kids = embed;
+        if !merged_kids.trim().is_empty() {
+            if merged_kids.trim_start().starts_with('#') {
+                kids.push('\n');
+            }
+            kids.push_str(&merged_kids);
+        }
+        emit_node_with(o, a, level, indent, &kids)
+    } else {
+        // the embed goes right after ours, as its next sibling
+        let mut out = emit_node_with(o, a, level, indent, &merged_kids);
+        out.push_str(&embed);
+        out
+    }
 }
 
 /// Render a node at (level, indent) with given already-rendered children.
@@ -329,49 +434,6 @@ fn dedent(line: &str, cols: usize) -> &str {
     ""
 }
 
-/// Merge the frontmatter of two block files key by key (§12.4). Ours wins
-/// equal values; differing values keep ours in place and the whole "theirs"
-/// document becomes a conflict block (already handled at the node level for
-/// title/body; here we only fold in keys).
-fn merge_frontmatter(
-    ours: &str,
-    theirs: &str,
-    merged: &str,
-    conflicts: &mut usize,
-    _conflict_blocks: &mut Vec<(String, String)>,
-    _device: &str,
-    _timestamp: &str,
-) -> String {
-    use crate::parse::parse_frontmatter;
-    let ofm = parse_frontmatter(ours);
-    let tfm = parse_frontmatter(theirs);
-    let (Some(ofm), Some(tfm)) = (ofm, tfm) else {
-        return merged.to_string();
-    };
-    // key-level: every key that differs counts as a conflict; value from O
-    // stays. We re-emit frontmatter with O's raw text plus T-only keys dropped
-    // (they live in the conflict block's own frontmatter).
-    let raw = ofm.raw.clone();
-    for (k, v) in &tfm.props {
-        match ofm.props.get(k) {
-            Some(ov) if ov == v => {}
-            Some(_) => *conflicts += 1,
-            None => *conflicts += 1,
-        }
-    }
-    // Rebuild the file: merged frontmatter + merged body (strip merged's
-    // frontmatter if any).
-    let body = match crate::parse::parse_frontmatter(merged) {
-        Some(mfm) => merged[mfm.span.end..].to_string(),
-        None => merged.to_string(),
-    };
-    if raw.trim().is_empty() {
-        body
-    } else {
-        format!("---\n{}---\n\n{}", raw, body)
-    }
-}
-
 // ------------------------------------------------------------ vault-level
 
 /// Process every `*.sync-conflict-*.md` in the vault (§12.2, §13 `notes merge`).
@@ -421,7 +483,12 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
         if !dry_run {
             crate::vault::atomic_write(&bpath, &outcome.text)?;
             for (fname, text) in &outcome.conflict_blocks {
-                crate::vault::atomic_write(&vault.dir.join(fname), text)?;
+                let fname = fresh_block_name(vault, fname, text);
+                crate::vault::atomic_write(&vault.dir.join(&fname), text)?;
+            }
+            if !outcome.sibling_embeds.is_empty() {
+                vault.reload()?;
+                place_sibling_embeds(vault, oid.as_ref(), &outcome.sibling_embeds)?;
             }
             // the conflict file goes to trash (§12.4)
             let trash = crate::vault::trash_dir();
@@ -434,6 +501,63 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
         vault.reload()?;
     }
     Ok(outcomes)
+}
+
+/// A conflict block's filename that does not clobber an existing file:
+/// lengthen the prefix of its id until the name is free (§6.4).
+fn fresh_block_name(vault: &Vault, fname: &str, text: &str) -> String {
+    let id = crate::parse::parse_frontmatter(text)
+        .and_then(|f| f.props.get("id").cloned())
+        .and_then(|v| Id::parse(&v));
+    let (Some(id), Some((_, name))) = (id, crate::ident::split_filename(fname)) else {
+        return fname.to_string();
+    };
+    let words = id.words();
+    for n in 1..=words.len() {
+        let cand = filename(&words[..n].join("-"), name);
+        if !vault.dir.join(&cand).exists() {
+            return cand;
+        }
+    }
+    fname.to_string()
+}
+
+/// Insert embeds right after the embed of block `owner` in its parent file,
+/// at its indent, so each conflict block is the next sibling of the block it
+/// conflicts with (§12.4). Without an embed to follow (an orphan block),
+/// they go at the end of `root.md` so they are still reachable.
+fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> std::io::Result<()> {
+    let found = owner.and_then(|oid| {
+        vault.tree.files.iter().enumerate().find_map(|(fi, f)| {
+            f.nodes
+                .iter()
+                .find(|nd| nd.embed.as_ref() == Some(oid))
+                .map(|nd| (fi, nd.span.end.min(f.text.len()), nd.indent))
+        })
+    });
+    let mut insert = String::new();
+    match found {
+        Some((fi, end, indent)) => {
+            for id in ids {
+                insert.push_str(&format!("\n{}![[{}]]", " ".repeat(indent), id));
+            }
+            // the embed line's span may or may not include its newline
+            let text = &vault.tree.files[fi].text;
+            let at = if end > 0 && text.as_bytes()[end - 1] == b'\n' { end - 1 } else { end };
+            vault.write_span(fi, crate::parse::Span { start: at, end: at }, &insert)
+        }
+        None => {
+            let text = vault.tree.files[0].text.clone();
+            let mut new_text = text.clone();
+            if !new_text.is_empty() && !new_text.ends_with("\n\n") {
+                new_text.push_str(if new_text.ends_with('\n') { "\n" } else { "\n\n" });
+            }
+            for id in ids {
+                new_text.push_str(&format!("![[{}]]\n", id));
+            }
+            vault.write_file_text(0, &new_text)
+        }
+    }
 }
 
 fn parse_conflict_name(name: &str) -> (String, String) {
@@ -472,8 +596,16 @@ pub fn conflict_pairs_tree(tree: &Tree) -> Vec<(NRef, NRef)> {
                             let p = nd.parent.map(|pp| (fi, pp)).unwrap();
                             let sibs = tree.raw_children(p);
                             if let Some(pos) = sibs.iter().position(|&s| s == (fi, ni)) {
-                                if pos > 0 {
-                                    let ours = sibs[pos - 1];
+                                // a section's conflict is its first child
+                                // (see merge_pair); anything else follows ours
+                                let ours = if pos > 0 {
+                                    Some(sibs[pos - 1])
+                                } else if tree.node(p).kind == Kind::Section {
+                                    Some(p)
+                                } else {
+                                    None
+                                };
+                                if let Some(ours) = ours {
                                     let ours = {
                                         let rc = tree.resolved_child(ours);
                                         if rc != ours { rc } else { ours }
@@ -508,24 +640,36 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
     let mut theirs_body = crate::render::render(&vault.tree, theirs, 1, true);
     // The conflict block's state lives in its frontmatter (§4.9); surface it
     // as a checkbox so the receiving side parses it back as task state.
-    if let Some(state) = vault.tree.node(theirs).task {
+    // A block's state is `todo:`, never a checkbox in its file (§4.9).
+    let ours_is_block = vault.tree.node(ours).is_block();
+    let ours_block_id = vault.tree.node(ours).block.as_ref().and_then(|b| b.id.clone());
+    let state = if ours_is_block { None } else { vault.tree.node(theirs).task };
+    if let Some(state) = state {
         let marker = match state {
             TaskState::Open => "[ ] ",
             TaskState::Done => "[x] ",
         };
         let mut lines = theirs_body.lines();
         if let Some(first) = lines.next() {
-            let inserted = if let Some(pos) = first.find("- ") {
-                let mut s = first.to_string();
-                s.insert_str(pos + 2, marker);
-                s
-            } else if let Some(pos) = first.find('#') {
-                let h = first[pos..].find(' ').map(|i| pos + i + 1).unwrap_or(first.len());
-                let mut s = first.to_string();
-                s.insert_str(h, marker);
-                s
+            // the title line is `#… ` or `- ` after its indent; the checkbox
+            // goes right after that marker, never inside the title
+            let lead = first.len() - first.trim_start().len();
+            let rest = &first[lead..];
+            let marker_end = if rest.starts_with('#') {
+                let hashes = rest.len() - rest.trim_start_matches('#').len();
+                rest[hashes..].starts_with(' ').then_some(lead + hashes + 1)
+            } else if rest.starts_with("- ") {
+                Some(lead + 2)
             } else {
-                first.to_string()
+                None
+            };
+            let inserted = match marker_end {
+                Some(m) if !is_checkbox(&first[m..]) => {
+                    let mut s = first.to_string();
+                    s.insert_str(m, marker);
+                    s
+                }
+                _ => first.to_string(),
             };
             let rest: Vec<&str> = lines.collect();
             theirs_body = if rest.is_empty() {
@@ -578,9 +722,14 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
             crate::ops::set_frontmatter_key(vault, file, &k, Some(&v))?;
         }
         // rename the file if the title changed (§6.4)
-        let new_title = vault.tree.node(ours).title.clone();
-        let _ = new_title;
         vault.reload()?;
+        let file = ours_block_id
+            .as_ref()
+            .and_then(|id| vault.tree.block_by_id(id))
+            .map(|r| (r.0, vault.tree.node(r).title.clone()));
+        if let Some((file, title)) = file {
+            vault.rename_block_file(file, &title)?;
+        }
     } else {
         // plain node: replace its span with theirs' re-levelled text
         let level = vault.tree.level(ours);
@@ -596,6 +745,11 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
         delete_embed_and_block(vault, &tb, t)?;
     }
     Ok(())
+}
+
+fn is_checkbox(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0] == b'[' && b[2] == b']' && (b.len() == 3 || b[3] == b' ')
 }
 
 /// keep both: drop the `conflict` key; the block stays as an ordinary
@@ -618,7 +772,7 @@ fn delete_embed_and_block(
                 let text = vault.tree.files[fi].text.clone();
                 let mut start = span.start;
                 let mut end = span.end;
-                if start >= 2 && &text[start - 2..start] == "\n\n" {
+                if start >= 2 && &text.as_bytes()[start - 2..start] == b"\n\n" {
                     start -= 1;
                 } else if end < text.len() && text.as_bytes()[end] == b'\n' {
                     end += 1;

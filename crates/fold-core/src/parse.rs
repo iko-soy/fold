@@ -61,6 +61,9 @@ pub struct Node {
     pub title_span: Span,
     /// Byte span of the body region (after the title line, before children).
     pub body_span: Span,
+    /// Body lines that follow children (text after a list, between child
+    /// items): `(number of children before the segment, span)`, in order.
+    pub tail: Vec<(usize, Span)>,
     /// Byte span: title line through the whole subtree.
     pub span: Span,
     pub children: Vec<usize>,
@@ -113,7 +116,8 @@ pub struct Diag {
 #[derive(Clone)]
 struct Line {
     start: usize,
-    end: usize, // excluding '\n'
+    end: usize,  // excluding the line ending (`\n` or `\r\n`)
+    next: usize, // start of the next line (past the line ending, or EOF)
     raw: String,
 }
 
@@ -126,6 +130,7 @@ fn split_lines(text: &str) -> Vec<Line> {
         lines.push(Line {
             start: off,
             end: off + raw.len(),
+            next: off + l.len(),
             raw: raw.to_string(),
         });
         off += l.len();
@@ -142,7 +147,7 @@ pub struct Frontmatter {
 
 /// Scan frontmatter at byte 0 of a file. Returns None if absent.
 pub fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
-    if !text.starts_with("---\n") {
+    if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         return None;
     }
     let lines = split_lines(text);
@@ -157,11 +162,10 @@ pub fn parse_frontmatter(text: &str) -> Option<Frontmatter> {
     let raw_start = lines[1].start;
     let raw_end = lines[close].start;
     let raw = text[raw_start..raw_end].to_string();
-    let mut span_end = lines[close].end + 1;
+    let mut span_end = lines[close].next;
     if close + 1 < lines.len() && lines[close + 1].raw.is_empty() {
-        span_end = lines[close + 1].end + 1;
+        span_end = lines[close + 1].next;
     }
-    span_end = span_end.min(text.len());
     let mut props = IndexMap::new();
     for l in &lines[1..close] {
         let raw_line = &l.raw;
@@ -338,15 +342,13 @@ fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
     }
 }
 
+/// A setext underline. Only `=` underlines count: a line of dashes is a
+/// thematic break and body text (§4.4, §5.2 step 2), and a lone `-` is an
+/// empty bullet.
 fn setext_level(raw: &str) -> Option<usize> {
     let t = raw.trim();
-    if t.is_empty() {
-        return None;
-    }
-    if t.chars().all(|c| c == '=') {
+    if !t.is_empty() && t.chars().all(|c| c == '=') {
         Some(1)
-    } else if t.chars().all(|c| c == '-') {
-        Some(2)
     } else {
         None
     }
@@ -375,6 +377,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         task: None,
         title_span: Span::default(),
         body_span: Span::default(),
+        tail: Vec::new(),
         span: Span {
             start: 0,
             end: text.len(),
@@ -416,6 +419,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         let raw = lines[i].raw.clone();
         let lstart = lines[i].start;
         let lend = lines[i].end;
+        let lnext = lines[i].next;
 
         if fence_transition(&raw, &mut fence) {
             pending_setext = None;
@@ -471,6 +475,12 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                             }
                             true
                         }
+                        Kind::Section if indent < top.indent => {
+                            // a section nested under an item holds only
+                            // what reaches its indent
+                            stack.pop();
+                            continue;
+                        }
                         Kind::Section => {
                             // A section is contained by the nearest section
                             // with a smaller level — not by its lexical
@@ -509,12 +519,13 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                         end: lend,
                     },
                     body_span: Span {
-                        start: lend + 1,
-                        end: lend + 1,
+                        start: lnext,
+                        end: lnext,
                     },
+                    tail: Vec::new(),
                     span: Span {
                         start: lstart,
-                        end: lend + 1,
+                        end: lnext,
                     },
                     children: Vec::new(),
                     parent: Some(parent),
@@ -560,7 +571,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                 let idx = nodes.len();
                 nodes[parent].children.push(idx);
                 nodes.push(node);
-                extend_spans(&mut nodes, idx, lend + 1);
+                extend_spans(&mut nodes, idx, lnext);
                 stack.push(Frame {
                     node: idx,
                     indent,
@@ -674,7 +685,14 @@ fn push_body(
                         continue; // look through to the item's parent
                     }
                 }
-                Kind::Section => true,
+                Kind::Section => {
+                    let mut t = false;
+                    if indent_cols(&line.raw, &mut t) < top.indent {
+                        stack.pop();
+                        continue; // outdented past a section under an item
+                    }
+                    true
+                }
                 Kind::Root => true,
             }
         };
@@ -685,13 +703,29 @@ fn push_body(
     }
     let top = stack.last().unwrap().node;
     let n = &mut nodes[top];
-    // body_span starts empty (start == end, right after the title line); the
-    // first body line sets its start.
-    if n.body_span.start == n.body_span.end {
-        n.body_span.start = line.start;
+    if !n.children.is_empty() {
+        // body text after children goes to a tail segment, so the body span
+        // never stretches over the children (§3.3)
+        let after = n.children.len();
+        match n.tail.last_mut() {
+            Some((k, sp)) if *k == after && sp.end == line.start => sp.end = line.next,
+            _ => n.tail.push((
+                after,
+                Span {
+                    start: line.start,
+                    end: line.next,
+                },
+            )),
+        }
+    } else {
+        // body_span starts empty (start == end, right after the title line);
+        // the first body line sets its start.
+        if n.body_span.start == n.body_span.end {
+            n.body_span.start = line.start;
+        }
+        n.body_span.end = line.next;
     }
-    n.body_span.end = line.end + 1;
-    extend_spans(nodes, top, line.end + 1);
+    extend_spans(nodes, top, line.next);
 }
 
 fn make_setext_section(
@@ -703,32 +737,29 @@ fn make_setext_section(
     underline_li: usize,
     level: usize,
 ) {
-    // The title line is the last body line of whichever node owns it; find it
-    // by scanning down from the top frame whose body span covers it.
+    // The title line is the last body line pushed, so it ends the top
+    // frame's body or its last tail segment; take it back out.
     let title = lines[title_li].raw.trim().to_string();
     let underline = &lines[underline_li];
-    // Owner: deepest frame whose body span includes the title line.
-    let mut owner = 0usize;
-    for f in stack.iter() {
-        let nd = &nodes[f.node];
-        if nd.body_span.start <= lines[title_li].start && lines[title_li].start < nd.body_span.end
-        {
-            owner = f.node;
-        }
-    }
-    // Shrink owner's body span to exclude the title line.
+    let tl = &lines[title_li];
     {
+        let owner = stack.last().unwrap().node;
         let nd = &mut nodes[owner];
-        if nd.body_span.start == lines[title_li].start {
-            nd.body_span.start = lines[title_li].end + 1;
-            if nd.body_span.start > nd.body_span.end {
-                nd.body_span.start = nd.body_span.end;
+        match nd.tail.last_mut() {
+            Some((_, sp)) if sp.end == tl.next => {
+                sp.end = tl.start;
+                if sp.start >= sp.end {
+                    nd.tail.pop();
+                }
             }
-        } else {
-            nd.body_span.end = lines[title_li].start;
-            // trim trailing blank lines of the remaining body
-            let text_start = nd.body_span.start;
-            let _ = text_start;
+            _ => {
+                if nd.body_span.end == tl.next {
+                    nd.body_span.end = tl.start;
+                    if nd.body_span.start >= nd.body_span.end {
+                        nd.body_span.start = nd.body_span.end;
+                    }
+                }
+            }
         }
     }
     // Pop frames that can't contain a section at this position.
@@ -756,12 +787,13 @@ fn make_setext_section(
             end: lines[title_li].end,
         },
         body_span: Span {
-            start: underline.end + 1,
-            end: underline.end + 1,
+            start: underline.next,
+            end: underline.next,
         },
+        tail: Vec::new(),
         span: Span {
             start: lines[title_li].start,
-            end: underline.end + 1,
+            end: underline.next,
         },
         children: Vec::new(),
         parent: Some(parent),
@@ -773,7 +805,7 @@ fn make_setext_section(
         noncanonical: vec!["setext heading".into()],
     });
     nodes[parent].children.push(idx);
-    extend_spans(nodes, idx, underline.end + 1);
+    extend_spans(nodes, idx, underline.next);
     stack.push(Frame {
         node: idx,
         indent: title_indent,

@@ -242,7 +242,7 @@ fn prefix_collision_grows_prefix() {
         format!("---\nid: {}\n---\n\n# Notes\n", id1),
     )
     .unwrap();
-    let mut v = Vault::open(d.path()).unwrap();
+    let v = Vault::open(d.path()).unwrap();
     let prefix = v.unique_prefix(&id2);
     assert_eq!(prefix, "racfer-wolsun");
 }
@@ -285,4 +285,265 @@ fn paste_inserts_siblings() {
     let two_pos = text.find("- two").unwrap();
     let three_pos = text.find("- three").unwrap();
     assert!(one_pos < two_pos && two_pos < three_pos, "{}", text);
+}
+
+// ------------------------------------------------------------ regressions
+
+const ID_A: &str = "racfer-hattes-dozzod-binwes";
+const ID_B: &str = "dozzod-binwes-talsun-worbec";
+
+fn vault_files(root: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, Vault) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), root).unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.path().join(name), text).unwrap();
+    }
+    let v = Vault::open(dir.path()).unwrap();
+    (dir, v)
+}
+
+fn at(v: &Vault, path: &[&str]) -> fold_core::tree::NRef {
+    let segs: Vec<String> = path.iter().map(|s| s.to_string()).collect();
+    v.find_by_path(&segs).unwrap()
+}
+
+fn read(d: &tempfile::TempDir, name: &str) -> String {
+    std::fs::read_to_string(d.path().join(name)).unwrap()
+}
+
+#[test]
+fn non_ascii_id_does_not_panic() {
+    let (_d, v) = vault_files(
+        "# A\n\n![[ééaa-racfer-hattes-dozzod]]\n",
+        &[("x.md", "---\nid: ééé-ééé-ééé-ééé\n---\n\n# X\n")],
+    );
+    assert_eq!(v.tree.files.len(), 1);
+    assert!(v.resolve_target("ééé").is_err());
+}
+
+#[test]
+fn unreadable_and_dot_md_files_are_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    std::fs::create_dir(dir.path().join("attachments.md")).unwrap();
+    std::fs::write(dir.path().join("latin1.md"), [0x63u8, 0x61, 0x66, 0xe9, b'\n']).unwrap();
+    std::fs::write(
+        dir.path().join(".hidden.md"),
+        format!("---\nid: {}\n---\n\n# Hidden\n", ID_A),
+    )
+    .unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    assert_eq!(v.tree.files.len(), 1);
+    assert!(v.ignored_files().unwrap().iter().any(|i| i.path == "latin1.md"));
+}
+
+#[test]
+fn trash_copies_in_the_same_second_do_not_collide() {
+    let (_d, v) = vault_with("# A\n");
+    let a = v.trash_text("same.md", "one").unwrap();
+    let b = v.trash_text("same.md", "two").unwrap();
+    assert_ne!(a, b);
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "one");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "two");
+}
+
+#[test]
+fn clear_done_with_duplicate_titles_keeps_the_open_one() {
+    let (_d, mut v) = vault_with("# P\n\n- [ ] Water plants\n- [x] Water plants\n");
+    let root = v.tree.root;
+    assert_eq!(ops::clear_done(&mut v, root).unwrap(), 1);
+    assert_eq!(v.tree.files[0].text, "# P\n\n- [ ] Water plants\n");
+}
+
+#[test]
+fn delete_after_multibyte_text_does_not_panic() {
+    let (_d, mut v) = vault_with("- café\n- other\n");
+    let other = at(&v, &["other"]);
+    ops::delete_subtree(&mut v, other).unwrap();
+    assert_eq!(v.tree.files[0].text, "- café\n");
+}
+
+#[test]
+fn delete_first_child_keeps_the_separator_after_the_title() {
+    let (_d, mut v) = vault_with("# A\n\n- x\n- y\n");
+    let x = at(&v, &["A", "x"]);
+    ops::delete_subtree(&mut v, x).unwrap();
+    assert_eq!(v.tree.files[0].text, "# A\n\n- y\n");
+}
+
+#[test]
+fn refile_into_own_subtree_through_an_embed_is_refused() {
+    let (d, mut v) = vault_files(
+        &format!("# A\n\nbody of A\n\n![[{}]]\n\n# B\n", ID_A),
+        &[("racfer~blk.md", &format!("---\nid: {}\n---\n\n- blk\n  - inner\n", ID_A))],
+    );
+    let a = at(&v, &["A"]);
+    let inner = at(&v, &["A", "blk", "inner"]);
+    assert!(ops::refile(&mut v, a, inner).is_err());
+    assert!(read(&d, "root.md").contains("body of A"));
+}
+
+#[test]
+fn set_property_inside_a_block_file_that_sorts_late() {
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n", ID_A),
+        &[(
+            "zzzz~notes.md",
+            &format!("---\nid: {}\n---\n\n- notes\n  - one\n  - three\n", ID_A),
+        )],
+    );
+    let three = at(&v, &["A", "notes", "three"]);
+    ops::set_property(&mut v, three, "due", "2026-10-01").unwrap();
+    let three = at(&v, &["A", "notes", "three"]);
+    let b = v.tree.node(three).block.as_ref().unwrap();
+    assert_eq!(b.prop("due"), Some("2026-10-01"));
+    assert!(!read(&d, "zzzz~notes.md").contains("three"));
+}
+
+#[test]
+fn promote_out_of_a_block_root_goes_beside_the_embed() {
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n- x\n![[{}]]\n- y\n", ID_A),
+        &[("racfer~blk.md", &format!("---\nid: {}\n---\n\n- blk\n  - child\n", ID_A))],
+    );
+    let child = at(&v, &["A", "blk", "child"]);
+    ops::promote(&mut v, child).unwrap();
+    assert_eq!(read(&d, "racfer~blk.md"), format!("---\nid: {}\n---\n\n- blk\n", ID_A));
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n- x\n![[{}]]\n- child\n- y\n", ID_A));
+}
+
+#[test]
+fn move_sibling_swaps_with_an_embed() {
+    let (d, mut v) = vault_files(
+        &format!("- a\n![[{}]]\n", ID_A),
+        &[("racfer~b.md", &format!("---\nid: {}\n---\n\n- b\n", ID_A))],
+    );
+    let a = at(&v, &["a"]);
+    ops::move_sibling(&mut v, a, true).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("![[{}]]\n- a\n", ID_A));
+    // and back, starting from the block itself
+    let b = at(&v, &["b"]);
+    ops::move_sibling(&mut v, b, true).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("- a\n![[{}]]\n", ID_A));
+}
+
+#[test]
+fn move_sibling_without_final_newline() {
+    let (_d, mut v) = vault_with("- a\n- b");
+    let b = at(&v, &["b"]);
+    ops::move_sibling(&mut v, b, false).unwrap();
+    assert_eq!(v.tree.files[0].text, "- b\n- a\n");
+}
+
+#[test]
+fn move_sibling_keeps_list_spacing() {
+    let (_d, mut v) = vault_with("# S\n\n- a\n- b\n\n# T\n");
+    let b = at(&v, &["S", "b"]);
+    ops::move_sibling(&mut v, b, false).unwrap();
+    assert_eq!(v.tree.files[0].text, "# S\n\n- b\n- a\n\n# T\n");
+}
+
+#[test]
+fn toggle_taskness_on_an_indented_heading() {
+    let (_d, mut v) = vault_with("- item\n  ## Sub\n");
+    let sub = at(&v, &["item", "Sub"]);
+    ops::toggle_taskness(&mut v, sub).unwrap();
+    assert_eq!(v.tree.files[0].text, "- item\n  ## [ ] Sub\n");
+}
+
+#[test]
+fn toggle_task_reopens_capital_x_and_dash() {
+    let (_d, mut v) = vault_with("- [X] one\n- [-] two\n");
+    let one = at(&v, &["one"]);
+    ops::toggle_task(&mut v, one).unwrap();
+    let two = at(&v, &["two"]);
+    ops::toggle_task(&mut v, two).unwrap();
+    assert_eq!(v.tree.files[0].text, "- [ ] one\n- [ ] two\n");
+}
+
+#[test]
+fn make_block_keeps_checkbox_like_title_text() {
+    let (_d, mut v) = vault_with("# A\n\n- [ ] Review [x] marks\n");
+    let t = at(&v, &["A", "Review [x] marks"]);
+    ops::make_block(&mut v, t).unwrap();
+    assert!(v.find_by_path(&["A".into(), "Review [x] marks".into()]).is_some());
+}
+
+#[test]
+fn refile_indented_embed_is_not_double_indented() {
+    let (d, mut v) = vault_files(
+        &format!("- parent\n  ![[{}]]\n\n# Dest\n", ID_A),
+        &[("racfer~b.md", &format!("---\nid: {}\n---\n\n- b\n", ID_A))],
+    );
+    let b = at(&v, &["parent", "b"]);
+    let dest = at(&v, &["Dest"]);
+    ops::refile(&mut v, b, dest).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("- parent\n\n# Dest\n\n![[{}]]\n", ID_A));
+}
+
+#[test]
+fn multi_line_capture_nests_under_the_item() {
+    let (_d, mut v) = vault_with("# Inbox\n");
+    let r = ops::capture(&mut v, "line one\n# Injected\nsome text", false).unwrap();
+    assert_eq!(v.tree.node(r).title, "line one");
+    let top: Vec<String> = v
+        .tree
+        .resolved_children(v.tree.root)
+        .iter()
+        .map(|&c| v.tree.node(c).title.clone())
+        .collect();
+    assert_eq!(top, vec!["Inbox"]);
+    let kids = v.tree.resolved_children(r);
+    assert_eq!(v.tree.node(kids[0]).title, "Injected");
+}
+
+#[test]
+fn targets_resolve_unicode_case_and_id_like_titles() {
+    let (_d, v) = vault_with("# Заметки\n\n## Проект\n\n# dozzod\n");
+    assert!(v.resolve_target("заметки/проект").is_ok());
+    assert!(v.resolve_target("dozzod").is_ok());
+}
+
+#[test]
+fn new_last_child_after_a_section_child_is_a_section() {
+    let (_d, mut v) = vault_with("# A\n\n## B\n");
+    let a = at(&v, &["A"]);
+    let r = ops::append_child_public(&mut v, a, "C").unwrap();
+    assert_eq!(v.tree.node(r).title, "C");
+    assert_eq!(v.tree.files[0].text, "# A\n\n## B\n\n## C\n");
+    let kids = v.tree.resolved_children(a);
+    assert_eq!(kids.len(), 2);
+}
+
+#[test]
+fn capture_to_a_node_with_sections_stays_an_item() {
+    let (_d, mut v) = vault_with("# P\n\n- a\n\n## S\n");
+    let p = at(&v, &["P"]);
+    let r = ops::capture_to(&mut v, "new", false, p).unwrap();
+    assert_eq!(v.tree.node(r).title, "new");
+    assert_eq!(v.tree.files[0].text, "# P\n\n- a\n- new\n\n## S\n");
+}
+
+#[test]
+fn check_fix_keeps_root_frontmatter_intro_and_malformed_files() {
+    let malformed = format!("---\nid: {}\n---\n\n# One\n\n# Two\n\nprecious\n", ID_A);
+    let fm_only = format!("---\nid: {}\n---\n", ID_B);
+    let (d, mut v) = vault_files(
+        "---\nvault: x\n---\n\nIntro text.\n\n# Inbox\n",
+        &[("racfer~one.md", &malformed), ("dozzod~empty.md", &fm_only)],
+    );
+    fold_core::check::fix(&mut v).unwrap();
+    assert_eq!(read(&d, "root.md"), "---\nvault: x\n---\n\nIntro text.\n\n# Inbox\n");
+    assert_eq!(read(&d, "racfer~one.md"), malformed);
+}
+
+#[test]
+fn check_fix_keeps_correct_prefixes_and_is_idempotent() {
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n", ID_A),
+        &[("racfer~blk.md", &format!("---\nid: {}\n---\n\n- blk\n", ID_A))],
+    );
+    fold_core::check::fix(&mut v).unwrap();
+    assert!(d.path().join("racfer~blk.md").exists());
+    assert_eq!(fold_core::check::fix(&mut v).unwrap(), 0);
 }

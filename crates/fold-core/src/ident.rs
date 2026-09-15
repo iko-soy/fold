@@ -46,16 +46,17 @@ impl Id {
     }
 
     /// The shortest leading run of words not used by any prefix in `taken`
-    /// (§6.4). The full id is always a valid prefix, so this terminates.
+    /// (§6.4). The full id is always a valid prefix: if even it is taken
+    /// (an id collision, reported elsewhere), it is returned anyway.
     pub fn shortest_prefix(&self, taken: &dyn Fn(&str) -> bool) -> String {
         let words = self.words();
-        for n in 1..=4 {
+        for n in 1..4 {
             let cand = words[..n].join("-");
             if !taken(&cand) {
                 return cand;
             }
         }
-        unreachable!("full id is always unique among existing prefixes")
+        self.0.clone()
     }
 
     pub fn as_str(&self) -> &str {
@@ -70,10 +71,11 @@ impl std::fmt::Display for Id {
 }
 
 fn is_word(w: &str) -> bool {
+    // ASCII first: slicing at byte 3 of a non-ASCII word would panic
     w.len() == 6
+        && w.is_ascii()
         && PREFIXES.contains(&&w[..3])
         && SUFFIXES.contains(&&w[3..])
-        && w.is_ascii()
 }
 
 /// True if `s` (already stripped of any `![[ ]]`) is a valid leading run of
@@ -177,6 +179,9 @@ mod tests {
         assert!(looks_like_id_prefix("racfer-hattes-dozzod-binwes"));
         assert!(!looks_like_id_prefix("racfer-hattes-dozzod-binwes-wat"));
         assert!(!looks_like_id_prefix("nope"));
+        // non-ASCII words must be rejected, not panic
+        assert!(Id::parse("ééaa-racfer-hattes-dozzod").is_none());
+        assert!(!looks_like_id_prefix("ééé"));
     }
 
     #[test]
@@ -196,6 +201,8 @@ mod tests {
             id.shortest_prefix(&|p| p == "racfer"),
             "racfer-hattes"
         );
+        // every shorter run taken: the full id, never a panic
+        assert_eq!(id.shortest_prefix(&|_| true), "racfer-hattes-mislup-nodrys");
     }
 
     #[test]

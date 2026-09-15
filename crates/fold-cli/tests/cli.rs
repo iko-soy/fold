@@ -131,3 +131,28 @@ fn help_prints_usage() {
         .stdout(predicate::str::contains("command palette"))
         .stdout(predicate::str::contains("make block"));
 }
+
+#[test]
+fn missing_vault_is_an_error_not_a_new_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let typo = dir.path().join("typo");
+    notes(&typo).arg("check").assert().failure();
+    assert!(!typo.exists());
+}
+
+#[test]
+fn trash_restore_never_overwrites_root_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# Keep\n").unwrap();
+    let trash = state.path().join("fold").join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    std::fs::write(trash.join("20260926-101010-root.md"), "# Root\n").unwrap();
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .args(["trash", "restore", "root"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(dir.path().join("root.md")).unwrap(), "# Keep\n");
+    assert!(dir.path().join("root-restored-2.md").exists());
+}
