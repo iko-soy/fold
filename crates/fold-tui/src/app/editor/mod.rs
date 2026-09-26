@@ -1352,7 +1352,15 @@ impl Editor {
     /// Jump to the next match of the last search.
     pub fn search_next(&mut self, fwd: bool) -> Option<Pos> {
         let pat = self.search.clone()?;
-        match self.find(&pat, self.cursor, fwd) {
+        // Helix searches on from the selection's end, or back from its start,
+        // so the match it has selected is not found again
+        let from = match self.anchor {
+            Some(a) if self.keys == Keys::Helix => {
+                if fwd { a.max(self.cursor) } else { a.min(self.cursor) }
+            }
+            _ => self.cursor,
+        };
+        match self.find(&pat, from, fwd) {
             Some(p) => {
                 self.set_cursor(p);
                 Some(p)

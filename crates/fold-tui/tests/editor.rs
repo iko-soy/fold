@@ -648,3 +648,23 @@ fn vim_dot_after_changing_a_double_clicked_word_changes_as_much_again() {
     keys(&mut app, "c1⎋w.:w⏎");
     assert_eq!(root(&d), "# A\n\n1 1 three\n");
 }
+
+#[test]
+fn helix_shift_n_selects_the_previous_match() {
+    // `/foo` from the start of the line selects the second "foo"; `N` must go
+    // back to the first one, not reselect the match it is standing on
+    let (d, mut app) = app_with("# A\n\nfoo bar foo\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejj/foo⏎Nd:wq⏎");
+    assert_eq!(root(&d), "# A\n\n bar foo\n");
+}
+
+#[test]
+fn helix_repeated_backward_search_selects_the_previous_match() {
+    // `?foo` from the start of the line wraps to the second "foo"; a repeated
+    // `?` must then select the first one
+    let (d, mut app) = app_with("# A\n\nfoo bar foo\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejj?foo⏎?⏎d:wq⏎");
+    assert_eq!(root(&d), "# A\n\n bar foo\n");
+}
