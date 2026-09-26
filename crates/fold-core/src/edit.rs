@@ -481,49 +481,14 @@ impl EditBuffer {
         while out.ends_with("\n\n") {
             out.pop();
         }
-        let not_found = || {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{}: edited node no longer found", info.path),
-            )
-        };
-        let (mut file, mut node) = self.locate(vault, &info).ok_or_else(not_found)?;
+        self.rebase(vault, owner)?;
+        let info = self.owners.get(&owner).cloned().unwrap_or(info);
+        let (file, node) = self.locate(vault, &info).ok_or_else(|| not_found(&info))?;
         let path = vault.tree.files[file].path.clone();
-        // External-change check (§5.2.5): the block's source span on disk
-        // must be what was read (or last written) through this buffer.
-        let on_disk = std::fs::read_to_string(vault.dir.join(&path)).unwrap_or_default();
-        let mut region = Span {
+        let region = Span {
             start: info.start,
             end: info.end,
         };
-        if let Some(base) = self.base_hashes.get(&path).filter(|h| **h != hash(&on_disk)) {
-            // The file changed underneath. Unless it was reloaded since,
-            // the vault still holds it as this buffer last read or wrote
-            // it: if the block's own text is unchanged, the change was
-            // elsewhere (another section, a property), and the block is
-            // written into the file as it is now, the change kept.
-            let known = &vault.tree.files[file].text;
-            let span = (*base == hash(known))
-                .then(|| span_now(known, &on_disk, node.is_none().then_some(region)))
-                .flatten();
-            let Some(span) = span else {
-                return Err(std::io::Error::other(format!(
-                    "{} changed on disk; not overwriting",
-                    path
-                )));
-            };
-            // the file as it is now is what the buffer has read, and what
-            // the vault writes over (its write guard compares with it)
-            vault.reparse(file, &on_disk)?;
-            self.base_hashes.insert(path.clone(), hash(&on_disk));
-            if node.is_none() {
-                region = span;
-                if let Some(i) = self.owners.get_mut(&owner) {
-                    (i.start, i.end) = (span.start, span.end);
-                }
-            }
-            (file, node) = self.locate(vault, &info).ok_or_else(not_found)?;
-        }
         let f = &vault.tree.files[file];
         // §4.9: a block file with text or an embed before its root is
         // read-only until fixed — the bytes before the root are not in the
@@ -577,6 +542,62 @@ impl EditBuffer {
         Ok(true)
     }
 
+    /// External-change check (§5.2.5) for one block: the block's source
+    /// span on disk must be what was read (or last written) through this
+    /// buffer. If the file changed underneath and, unless it was reloaded
+    /// since, the vault still holds it as this buffer last read or wrote it,
+    /// but the block's own text is unchanged, the change was elsewhere
+    /// (another section, a property): the file as it is now is taken as
+    /// what the buffer has read, the change kept. Otherwise the save is
+    /// refused.
+    fn rebase(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<()> {
+        let Some(info) = self.owners.get(&owner).cloned() else {
+            return Ok(());
+        };
+        let (file, node) = self.locate(vault, &info).ok_or_else(|| not_found(&info))?;
+        let path = vault.tree.files[file].path.clone();
+        let on_disk = std::fs::read_to_string(vault.dir.join(&path)).unwrap_or_default();
+        let Some(base) = self.base_hashes.get(&path).filter(|h| **h != hash(&on_disk)) else {
+            return Ok(());
+        };
+        let region = Span {
+            start: info.start,
+            end: info.end,
+        };
+        let known = &vault.tree.files[file].text;
+        let span = (*base == hash(known))
+            .then(|| span_now(known, &on_disk, node.is_none().then_some(region)))
+            .flatten();
+        let Some(span) = span else {
+            return Err(std::io::Error::other(format!(
+                "{} changed on disk; not overwriting",
+                path
+            )));
+        };
+        // the vault writes over the file as it is now (its write guard
+        // compares with it)
+        vault.reparse(file, &on_disk)?;
+        self.base_hashes.insert(path, hash(&on_disk));
+        if node.is_none() {
+            if let Some(i) = self.owners.get_mut(&owner) {
+                (i.start, i.end) = (span.start, span.end);
+            }
+        }
+        Ok(())
+    }
+
+    /// Take in what another program changed outside the dirty blocks'
+    /// source spans (§5.2.5) before they are saved, so that the vault, and
+    /// a snapshot taken of it for the op-log (§10.10), holds that change:
+    /// undoing the save then does not revert it. A block whose own span
+    /// changed is left for its save to refuse.
+    pub fn rebase_dirty(&mut self, vault: &mut Vault) {
+        self.settle();
+        for owner in self.dirty.clone() {
+            let _ = self.rebase(vault, owner);
+        }
+    }
+
     /// Splice every dirty block (§10.6: a commit may write several files,
     /// one splice per dirty block). Each block is written by its own splice
     /// (§5.2): one that is refused stays dirty, the others are still
@@ -612,6 +633,13 @@ impl EditBuffer {
 enum Line {
     Text(String),
     Embed(usize, Option<usize>, Id),
+}
+
+fn not_found(info: &OwnerInfo) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("{}: edited node no longer found", info.path),
+    )
 }
 
 fn hash(text: &str) -> String {

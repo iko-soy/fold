@@ -880,10 +880,13 @@ impl App {
             return true;
         }
         self.settle_undo();
-        let snap = ops::Snapshot::take(&self.vault, "edit");
         let cursor = self.current().map(|r| self.vault.key_of(r));
         let on_editor = self.anchor_zoom_for_save();
         let Some(mut ed) = self.editor.take() else { return true };
+        // what another program changed beside the edited blocks is taken in
+        // before the snapshot, so undoing this save leaves it be
+        ed.buf.rebase_dirty(&mut self.vault);
+        let snap = ops::Snapshot::take(&self.vault, "edit");
         let res = ed.buf.save_all(&mut self.vault);
         self.editor = Some(ed);
         self.settle_zoom_after_save(on_editor);
@@ -1058,9 +1061,10 @@ impl App {
         // moving out of a dirty block saves it (§10.6)
         if before != after && self.editor.as_ref().is_some_and(|e| e.buf.dirty.contains(&before)) {
             self.settle_undo();
-            let snap = ops::Snapshot::take(&self.vault, "edit");
             let on_editor = self.anchor_zoom_for_save();
             let mut ed = self.editor.take().unwrap();
+            ed.buf.rebase_dirty(&mut self.vault);
+            let snap = ops::Snapshot::take(&self.vault, "edit");
             let res = ed.buf.splice(&mut self.vault, before);
             self.editor = Some(ed);
             self.settle_zoom_after_save(on_editor);

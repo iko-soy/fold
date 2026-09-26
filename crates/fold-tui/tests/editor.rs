@@ -974,3 +974,19 @@ fn a_cursor_key_in_insert_mode_starts_a_new_undo_step() {
         }
     }
 }
+
+#[test]
+fn undoing_a_save_that_took_in_another_programs_change_keeps_that_change() {
+    // §5.2 step 5: the save keeps a change made outside the edited node;
+    // undoing the save takes back only the typing (§10.10)
+    let (d, mut app) = app_with("# A\n\nbody\n\n# B\n\nother\n");
+    keys(&mut app, "e");
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    keys(&mut app, "X");
+    std::fs::write(d.path().join("root.md"), "# A\n\nbody\n\n# B\n\nother, from Helix\n").unwrap();
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# AX\n\nbody\n\n# B\n\nother, from Helix\n");
+    keys(&mut app, "u");
+    assert_eq!(root(&d), "# A\n\nbody\n\n# B\n\nother, from Helix\n");
+}
