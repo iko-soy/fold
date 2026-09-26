@@ -180,10 +180,22 @@ impl Vault {
         self.write_file_text(file, &new_text)
     }
 
-    /// Write a whole file atomically, then re-parse it.
+    /// Write a whole file atomically, then re-parse it. Refuses, writing
+    /// nothing, when the file on disk is no longer the text it was parsed
+    /// from: every op computes its new text from the tree, so writing would
+    /// silently drop a change (a sync, another editor) not reloaded yet
+    /// (§1 principle 4, §5.2 step 5, §11.2).
     pub fn write_file_text(&mut self, file: usize, new_text: &str) -> std::io::Result<()> {
         let path = self.tree.files[file].path.clone();
-        atomic_write(&self.dir.join(&path), new_text)?;
+        let full = self.dir.join(&path);
+        // a missing file reads as empty, as `reload` reads a missing root.md
+        if read_if_exists(&full)?.unwrap_or_default() != self.tree.files[file].text {
+            return Err(std::io::Error::other(format!(
+                "{} changed on disk; not overwriting",
+                path
+            )));
+        }
+        atomic_write(&full, new_text)?;
         self.reparse(file, new_text)
     }
 
