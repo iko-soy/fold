@@ -1,7 +1,7 @@
 //! The Vim keymap: normal, insert and visual modes; counts; motions,
 //! operators and text objects; `.` repeat; `:` and `/`.
 
-use super::{order, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, Class, Editor, Group, Mode, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
@@ -201,6 +201,29 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
 fn find(e: &Editor, kind: char, ch: char, n: usize) -> Option<(Pos, Kind)> {
     let to = e.find_char(e.cursor, ch, kind, n)?;
     Some((to, if kind == 'f' || kind == 't' { Kind::Incl } else { Kind::Excl }))
+}
+
+/// `ge`: back to the end of the `n`th word before `p`, as Vim's
+/// bckend_word: off the word `p` is in, then back over blanks and line ends,
+/// stopping at an empty line.
+fn end_back(e: &Editor, p: Pos, n: usize) -> Pos {
+    let class_at = |q: Pos| e.char_at(q).map(|ch| class(ch, false));
+    let blank = |q: Pos| class_at(q) == Some(Class::Space) && !(q.col == 0 && e.len(q.line) == 0);
+    let mut q = p;
+    for _ in 0..n.max(1) {
+        let k = class_at(q).filter(|k| *k != Class::Space);
+        let Some(mut r) = e.prev(q) else { break };
+        while k.is_some() && class_at(r) == k {
+            let Some(x) = e.prev(r) else { return r };
+            r = x;
+        }
+        while blank(r) {
+            let Some(x) = e.prev(r) else { return r };
+            r = x;
+        }
+        q = r;
+    }
+    q
 }
 
 fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
@@ -518,15 +541,27 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
                     e.set_cursor(to);
                 }
             }
+            // ge: back to the end of the previous word, inclusive
             'e' => {
-                let to = e.word_back(e.cursor, false);
-                let to = e.prev(to).unwrap_or(to);
-                e.set_cursor(to);
+                let to = end_back(e, e.cursor, count.unwrap_or(1));
+                if let Some(op) = e.vim.op.take() {
+                    let from = e.cursor;
+                    apply(e, op, from, to, Kind::Incl);
+                } else {
+                    e.set_cursor(to);
+                }
             }
-            // gj / gk: by screen row through wrapped lines
+            // gj / gk: by screen row through wrapped lines; with an operator
+            // they are charwise and exclusive, not linewise like j / k
             'j' | 'k' => {
                 let n = count.unwrap_or(1) as isize;
+                let from = e.cursor;
                 e.move_visual(if c == 'j' { n } else { -n });
+                if let Some(op) = e.vim.op.take() {
+                    let to = e.cursor;
+                    e.cursor = from;
+                    apply(e, op, from, to, Kind::Excl);
+                }
             }
             _ => e.vim.op = None,
         },

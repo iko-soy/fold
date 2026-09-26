@@ -575,3 +575,33 @@ fn helix_join_two_selected_lines() {
     keys(&mut app, "ejjxxJ:wq⏎");
     assert_eq!(root(&d), "# A\n\na b\nc\nd\n");
 }
+
+/// Vim: `d` + `gj`/`gk`/`ge` is one complete command — whatever it does, the
+/// operator is no longer pending, so a following `j` only moves the cursor.
+#[test]
+fn vim_operator_with_g_motion_does_not_stay_pending() {
+    let text = "# A\n\none\ntwo\nthree\nfour\n";
+    let run = |seq: &str| {
+        let (d, mut app) = app_with(text);
+        app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+        keys(&mut app, "e");
+        draw(&mut app);
+        // cursor on "two"; Esc drops anything still pending before `:w`
+        keys(&mut app, "jjj");
+        keys(&mut app, seq);
+        keys(&mut app, "⎋:w⏎");
+        root(&d)
+    };
+    for m in ["gj", "gk", "ge"] {
+        let without = run(&format!("d{}", m));
+        let with_j = run(&format!("d{}j", m));
+        assert_eq!(with_j, without, "`j` after `d{}` ran as an operator motion", m);
+    }
+    // the reported case: `dgj` then `j` must not also delete "three"
+    assert!(run("dgjj").contains("three"), "{}", run("dgjj"));
+    // and the operators act over the motions, charwise as in Vim: `gj`/`gk`
+    // exclusive, `ge` (back to the end of the previous word) inclusive
+    assert_eq!(run("dgj"), "# A\n\none\nthree\nfour\n");
+    assert_eq!(run("dgk"), "# A\n\ntwo\nthree\nfour\n");
+    assert_eq!(run("dge"), "# A\n\nonwo\nthree\nfour\n");
+}
