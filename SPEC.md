@@ -852,7 +852,10 @@ Four regions, each of them live under the pointer:
   (click to resolve), *done hidden* when `zd` is on (click to show), the file, and the save
   state.
 
-Split layout, outline on the left at a third of the width (minimum 30 columns); the border
+The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
+bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor
+(§10.6) always opens in it, hiding it again when done if it was hidden before. Shown, the
+layout splits: outline on the left at a third of the width (minimum 30 columns); the border
 between the panes is a handle — drag it to resize. Below 80 columns the panes stack.
 
 **Long lines wrap** in the reading pane and the editor. Prose breaks after a space, and a
@@ -922,6 +925,7 @@ the popup — closes the topmost thing.
 | `zd` | toggle hiding done nodes (both panes) |
 | `zr` | toggle raw mode: exact source in the reading pane, frontmatter included |
 | `zw` | toggle wrapping of long lines in the reading pane and the editor (§10.1) |
+| `zp` | show / hide the reading pane (§10.1) |
 | `za` | archive: refile subtree under `Archive` (§6.5) |
 | `-` | go to parent |
 | `{` / `}` | previous / next sibling |

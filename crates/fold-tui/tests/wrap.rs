@@ -11,7 +11,9 @@ const H: u16 = 20;
 fn app_with(text: &str) -> (tempfile::TempDir, App) {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("root.md"), text).unwrap();
-    let app = App::new(d.path()).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    // these tests are about the reading pane, hidden by default
+    app.show_reading = true;
     (d, app)
 }
 

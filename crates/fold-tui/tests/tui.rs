@@ -10,7 +10,9 @@ fn key(code: KeyCode) -> KeyEvent {
 fn app_with(text: &str) -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.md"), text).unwrap();
-    let app = App::new(dir.path()).unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    // these tests are about the reading pane, hidden by default
+    app.show_reading = true;
     (dir, app)
 }
 

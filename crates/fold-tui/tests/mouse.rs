@@ -12,7 +12,9 @@ const H: u16 = 32;
 fn app_with(text: &str) -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.md"), text).unwrap();
-    let app = App::new(dir.path()).unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    // these tests are about the reading pane, hidden by default
+    app.show_reading = true;
     (dir, app)
 }
 
@@ -273,4 +275,28 @@ fn capture_button_prompts_and_saves() {
     click(&mut app, Hit::Button(Action::PromptOk, None));
     assert!(root(&d).contains("- milk"), "{}", root(&d));
     assert_eq!(title(&app), "milk");
+}
+
+#[test]
+fn the_reading_pane_is_hidden_until_asked_for_or_editing() {
+    let (_d, mut app) = app_with("# A\n\ntext\n");
+    app.show_reading = false;
+    let s = draw(&mut app);
+    assert!(app.hit_pos(Hit::ReadingPane).is_none() && app.hit_pos(Hit::Divider).is_none(), "{}", s);
+    assert!(!s.contains("text"), "{}", s);
+    // editing opens the pane for the editor, and closing it hides it again
+    typing(&mut app, "e");
+    assert_eq!(app.mode_pub(), "edit");
+    assert!(draw(&mut app).contains("text"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "normal");
+    assert!(!draw(&mut app).contains("text"));
+    assert!(app.hit_pos(Hit::ReadingPane).is_none());
+    // the top bar's button shows it, and `zp` hides it
+    button(&mut app, Action::ReadingPane);
+    assert!(draw(&mut app).contains("text"));
+    assert!(app.hit_pos(Hit::ReadingPane).is_some());
+    typing(&mut app, "zp");
+    draw(&mut app);
+    assert!(app.hit_pos(Hit::ReadingPane).is_none());
 }

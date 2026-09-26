@@ -75,6 +75,9 @@ pub struct App {
     raw_mode: bool,
     /// Long lines wrap in the reading pane and the editor (§10.1); `zw`.
     wrap: bool,
+    /// The reading pane is shown beside the outline (§10.1); `zp`. Hidden,
+    /// the outline takes the screen and the pane appears only to edit.
+    pub show_reading: bool,
     register: String,
     status: String,
     status_time: Instant,
@@ -164,6 +167,7 @@ impl App {
             hide_done: false,
             raw_mode: false,
             wrap: true,
+            show_reading: false,
             register: String::new(),
             status: "click to select · double-click to zoom · right-click for actions · drag to move · ? help".into(),
             status_time: Instant::now(),
@@ -658,6 +662,11 @@ impl App {
         self.open_editor_on(target);
     }
 
+    /// Whether the reading pane is on screen: shown, or holding the editor.
+    pub fn reading_visible(&self) -> bool {
+        self.show_reading || self.mode == Mode::Edit
+    }
+
     /// Open the built-in editor over a node's subtree (§10.6).
     fn open_editor_on(&mut self, target: NRef) {
         let buf = fold_core::edit::open_editor(&self.vault, target);
@@ -1099,6 +1108,7 @@ impl App {
                 }
                 ('z', KeyCode::Char('a')) => self.act_archive(),
                 ('z', KeyCode::Char('w')) => self.run_action(Action::Wrap),
+                ('z', KeyCode::Char('p')) => self.run_action(Action::ReadingPane),
                 ('g', KeyCode::Char('g')) => match self.focus {
                     Focus::Outline => self.cursor = 0,
                     Focus::Reading => self.read_cursor = 0,
@@ -1185,7 +1195,10 @@ impl App {
             }
             _ if ctrl => {}
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Tab => self.focus = Focus::Reading,
+            KeyCode::Tab => {
+                self.show_reading = true;
+                self.focus = Focus::Reading;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.cursor + 1 < len {
                     self.cursor += 1;
@@ -1788,6 +1801,13 @@ impl App {
                 self.clamp_cursor();
                 self.say(if self.hide_done { "done hidden" } else { "done shown" });
             }
+            Action::ReadingPane => {
+                self.show_reading = !self.show_reading;
+                if !self.show_reading && self.focus == Focus::Reading {
+                    self.focus = Focus::Outline;
+                }
+                self.say(if self.show_reading { "reading pane shown" } else { "reading pane hidden" });
+            }
             Action::Wrap => {
                 self.wrap = !self.wrap;
                 self.say(if self.wrap { "long lines wrap" } else { "long lines are cut at the edge" });
@@ -1862,7 +1882,9 @@ impl App {
             self.cursor = 0;
             self.read_cursor = 0;
             self.scroll_reading = 0;
-            self.focus = Focus::Reading;
+            if self.reading_visible() {
+                self.focus = Focus::Reading;
+            }
         }
     }
 
@@ -1924,7 +1946,7 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("n/N x t", "new sibling / child · done · task on/off"),
         ("J/K > < ~", "move · indent · outdent · heading ↔ bullet"),
         ("r y d p/P", "move to… · copy · delete · paste after / before"),
-        ("s za zd zr zw", "make block · archive · hide done · raw source · wrap lines"),
+        ("s za zd zr zw zp", "make block · archive · hide done · raw source · wrap lines · reading pane"),
         ("/ : ?", "filter · command palette · this help"),
         ("u/U q", "undo / redo · quit (everything is always saved)"),
         ("Tab", "switch panes · in the text: [[ ]] headings, / search, o link"),

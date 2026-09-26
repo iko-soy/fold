@@ -260,7 +260,13 @@ impl App {
             self.draw_conflict(f, body);
         } else {
             let narrow = area.width < 80;
-            let (outline, reading) = if narrow {
+            let shown = self.reading_visible();
+            if !shown && self.focus == Focus::Reading {
+                self.focus = Focus::Outline;
+            }
+            let (outline, reading) = if !shown {
+                (body, Rect { x: body.x + body.width, width: 0, ..body })
+            } else if narrow {
                 let h = body.height / 2;
                 (Rect { height: h, ..body }, Rect { y: body.y + h, height: body.height - h, ..body })
             } else {
@@ -275,10 +281,10 @@ impl App {
             self.draw_outline(f, outline);
             if self.mode == Mode::Edit {
                 self.draw_editor(f, reading);
-            } else {
+            } else if shown {
                 self.draw_reading(f, reading);
             }
-            if !narrow {
+            if shown && !narrow {
                 // the outline's right border is the handle
                 let handle = Rect { x: outline.x + outline.width - 1, y: outline.y + 1, width: 1, height: outline.height.saturating_sub(2) };
                 self.ui.push(handle, Hit::Divider);
@@ -403,7 +409,7 @@ impl App {
     fn draw_topbar(&mut self, f: &mut Frame, area: Rect) {
         let buf = f.buffer_mut();
         buf.set_style(area, Style::default().bg(theme::BAR));
-        let actions = [Action::Filter, Action::Capture, Action::Undo, Action::Redo, Action::Palette, Action::Help];
+        let actions = [Action::Filter, Action::Capture, Action::ReadingPane, Action::Undo, Action::Redo, Action::Palette, Action::Help];
         let crumbs = self.crumbs();
         let crumb_w: u16 = crumbs.iter().map(|&c| self.vault.tree.node(c).title.width() as u16 + 3).sum::<u16>() + 6;
         let room = area.width.saturating_sub(crumb_w.min(area.width / 2));

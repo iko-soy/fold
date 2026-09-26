@@ -103,6 +103,7 @@ fn reading_search_jumps_to_match() {
 #[test]
 fn reading_heading_jump() {
     let (_d, mut app) = app_with("# A\n\ntext\n\n## B\n\nmore\n\n## C\n");
+    app.show_reading = true;
     app.key_normal(key(KeyCode::Enter));
     // a single `]` does nothing (§10.4: `]]`)
     app.handle_key(key(KeyCode::Char(']')));

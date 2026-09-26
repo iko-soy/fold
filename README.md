@@ -43,7 +43,8 @@ starts a new vault with an `# Inbox`.
 
 The TUI is mouse-first, and every action also has a key.
 
-- **Click** a row to select it; the reading pane on the right shows it. Click `▸`/`▾` to
+- **Click** a row to select it. Click `◨` in the top bar (or press `zp`) to show the
+  reading pane beside the outline, which shows the selected node. Click `▸`/`▾` to
   fold, `☐` to check a task off, a breadcrumb in the top bar to zoom out.
 - **Double-click** a row to zoom into it. Double-click a line of text to edit it there.
 - **Right-click** a row (or click its `⋯`) for everything you can do to a node: edit, new
