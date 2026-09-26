@@ -1048,3 +1048,48 @@ fn review_undo_after_a_save_that_deleted_a_block_keeps_the_block_in_it() {
     assert_eq!(app.mode_pub(), "normal");
     assert_eq!(root(&d), format!("# A\n\n- one\n- b\n  {}\n- two\n", c), "b is {}, trashed", b);
 }
+
+#[test]
+fn a_refused_close_keeps_a_cut_block_in_transit() {
+    for reload in [false, true] {
+        a_refused_save_keeps_a_cut_block_in_transit(reload);
+    }
+}
+
+/// On Esc, or before a reload (which saves the editor first, §11.2).
+fn a_refused_save_keeps_a_cut_block_in_transit(reload: bool) {
+    // A embeds "cut" (racfer, with a due date) and "other" (dozzod)
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("root.md"),
+        "# A\n\n- one\n![[racfer-hattes-mislup-nodrys]]\n![[dozzod-binwes-talsun-worbec]]\n- two\n",
+    )
+    .unwrap();
+    let cut = d.path().join("racfer~cut.md");
+    std::fs::write(&cut, "---\nid: racfer-hattes-mislup-nodrys\ndue: 2026-10-01\n---\n\n- cut\n").unwrap();
+    let other = d.path().join("dozzod~other.md");
+    std::fs::write(&other, "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- other\n").unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    // cut "- cut": the block is in transit while the line is in the clipboard
+    ctrl(&mut app, 'k');
+    ctrl(&mut app, 's');
+    assert!(cut.exists(), "in transit");
+    // type into "other", which another program changes meanwhile
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    keys(&mut app, "X");
+    std::fs::write(&other, "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- other, from Helix\n").unwrap();
+    // Esc: the save is refused, so the editor stays open with its text, and
+    // the cut line can still be pasted back as the block
+    if reload {
+        app.reload_external();
+    } else {
+        keys(&mut app, "⎋");
+    }
+    assert_eq!(app.mode_pub(), "edit", "still editing");
+    assert!(cut.exists(), "a block cut in an editor still open was trashed (reload: {})", reload);
+}

@@ -846,8 +846,11 @@ impl App {
     /// Open the built-in editor over a node's subtree (§10.6).
     fn open_editor_on(&mut self, target: NRef) {
         // an editor already open saves first; one whose save is refused
-        // stays, with its text. A block cut and not pasted back is deleted
-        // now, as on leaving it (§5.2)
+        // stays, with its text and its clipboard. Once saved, a block cut
+        // and not pasted back is deleted, as on leaving it (§5.2)
+        if !self.save_editor("switch") {
+            return;
+        }
         if let Some(ed) = self.editor.as_mut() {
             ed.release_clip();
         }
@@ -940,11 +943,16 @@ impl App {
     /// save is refused the editor stays open with its text: nothing typed
     /// is dropped except by *Revert*.
     fn close_editor(&mut self) -> bool {
-        // a block cut and not pasted back is deleted now (§5.2)
-        if let Some(ed) = self.editor.as_mut() {
-            ed.release_clip();
-        }
-        if !self.save_editor("exit") {
+        // saved with a block cut and not pasted back still in transit, so a
+        // refused save leaves the editor as it was, its clipboard too; once
+        // saved, that block is deleted (§5.2)
+        let saved = self.save_editor("exit") && {
+            if let Some(ed) = self.editor.as_mut() {
+                ed.release_clip();
+            }
+            self.save_editor("exit")
+        };
+        if !saved {
             self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
             return false;
         }
@@ -989,9 +997,16 @@ impl App {
     /// is open on and the files as they are, for `editor_after_write`.
     fn editor_before_write(&mut self, why: &str) -> Option<(NodeKey, ops::Snapshot)> {
         // the editor is re-rendered after, so a block cut and not pasted
-        // back cannot be pasted as itself any more: it is deleted now (§5.2)
-        self.editor.as_mut()?.release_clip();
-        self.save_editor(why);
+        // back cannot be pasted as itself any more: once the editor is
+        // saved, it is deleted (§5.2). A refused save keeps it in transit,
+        // as the editor keeps its text (it is not re-rendered)
+        self.editor.as_ref()?;
+        if self.save_editor(why) {
+            if let Some(ed) = self.editor.as_mut() {
+                ed.release_clip();
+            }
+            self.save_editor(why);
+        }
         let key = self.editor_key()?;
         Some((key, ops::Snapshot::take(&self.vault, why)))
     }
