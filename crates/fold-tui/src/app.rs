@@ -2142,13 +2142,11 @@ impl App {
         }
     }
 
-    /// Run a node-menu item on the menu's target.
+    /// Run a node-menu item on the menu's target, found by its key; the
+    /// verb holds it by key across the editor's save (`run_action`).
     fn run_menu_item(&mut self, i: usize) {
         let Some(menu) = self.ui.menu.take() else { return };
         let Some(Some(a)) = action::NODE_MENU.get(i) else { return };
-        // the verb saves the editor first (§10.6), which re-parses what it
-        // wrote: the menu's node is found again by its key
-        self.save_editor("outline verb");
         let Some(target) = self.find_exact(&menu.target) else {
             self.say("that node is gone");
             return;
@@ -2163,13 +2161,23 @@ impl App {
     pub fn run_action(&mut self, a: Action) {
         // §10.6: an outline verb saves the editor first, and the editor is
         // then re-rendered over what the verb wrote. Revert must not save,
-        // and an action that opens the editor builds it afresh.
+        // and an action that opens the editor builds it afresh. The save
+        // re-parses what it writes, and deletes a block cut and not pasted
+        // back, renumbering the files after it (§5.2): a menu's or button's
+        // node is held by key across it
+        let target = self.action_target.map(|t| self.vault.key_of(t));
         let edit = match a {
             Action::EditRevert => None,
             _ => self.editor_before_write("outline verb"),
         };
-        self.run_action_inner(a);
-        if !matches!(a, Action::Edit | Action::NewSibling | Action::NewChild | Action::ConflictEdit) {
+        self.action_target = target.as_ref().and_then(|k| self.find_exact(k));
+        let gone = target.is_some() && self.action_target.is_none();
+        if gone {
+            self.say("that node is gone");
+        } else {
+            self.run_action_inner(a);
+        }
+        if gone || !matches!(a, Action::Edit | Action::NewSibling | Action::NewChild | Action::ConflictEdit) {
             self.editor_after_write(edit);
         }
     }

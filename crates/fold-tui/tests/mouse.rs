@@ -636,3 +636,32 @@ fn dropping_outside_the_outline_does_nothing() {
     app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (px, a.1)));
     assert_eq!(root(&d), "# A\n\n- a1\n\n# B\n\n- b1\n");
 }
+
+#[test]
+fn a_menu_verb_after_cutting_a_block_title_acts_on_the_menus_node() {
+    // root.md embeds block "cut me" (dozzod, file 1) and block "task"
+    // (racfer, file 2); the editor is open on A with "cut me"'s title cut
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("root.md"),
+        "# A\n\n- one\n![[dozzod-binwes-talsun-worbec]]\n- two\n\n# B\n\n![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join("dozzod~cut.md"), "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- cut me\n").unwrap();
+    let task = d.path().join("racfer~task.md");
+    std::fs::write(&task, "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- [ ] task\n").unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    typing(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    // right-click "task" in the outline, then its menu's Toggle done: the
+    // verb deletes the cut block first, which renumbers the files after it
+    draw(&mut app);
+    let row = (0..10).find(|&i| app.rows().get(i).is_some_and(|r| app.title_of(r.nref) == "task")).unwrap();
+    right_click(&mut app, Hit::Row(row));
+    click(&mut app, Hit::MenuItem(fold_tui::app::node_menu_index(Action::ToggleDone)));
+    assert!(std::fs::read_to_string(&task).unwrap().contains("- [x] task"));
+}
