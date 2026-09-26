@@ -136,13 +136,6 @@ fn capture_inner(
     task: bool,
     target: Option<NRef>,
 ) -> std::io::Result<NRef> {
-    let dest = match target {
-        Some(t) => t,
-        None => {
-            let inbox = find_or_create_inbox(vault)?;
-            find_or_create_day(vault, inbox)?
-        }
-    };
     // The first line is the title; further lines are the item's body, so a
     // captured document (`capture < file.md`) nests under the item instead
     // of injecting structure beside it (§4.1): its headings are pushed below
@@ -154,7 +147,15 @@ fn capture_inner(
     } else {
         first.trim().to_string()
     };
-    let mut line = format!("- {}", title);
+    // refused before the inbox or its day is created
+    let mut line = item_line(&title)?;
+    let dest = match target {
+        Some(t) => t,
+        None => {
+            let inbox = find_or_create_inbox(vault)?;
+            find_or_create_day(vault, inbox)?
+        }
+    };
     if !rest.trim().is_empty() {
         let item_indent = child_indent(&vault.tree, dest);
         let level = vault.tree.level(dest) as isize;
@@ -410,6 +411,8 @@ pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io
         },
         (None, None) => line.clone(),
     };
+    // `- [ ] ---` unchecked is `- ---`, a thematic break (§4.4)
+    not_a_break(&new_line)?;
     if new_line != ts.text(&vault.tree.files[file].text) {
         vault.write_span(file, ts, &new_line)?;
     }
@@ -1452,6 +1455,10 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     if n.is_embed() {
         return respell_embed(vault, r, to_section);
     }
+    // `## ---` spelled as an item is `- ---`, a thematic break (§4.4)
+    if !to_section && n.task.is_none() {
+        item_line(&n.title)?;
+    }
     let stand = stand_in(&vault.tree, r);
     let file = r.0;
     let text = vault.tree.files[file].text.clone();
@@ -1608,7 +1615,25 @@ pub fn append_child_public(
     parent: NRef,
     title: &str,
 ) -> std::io::Result<NRef> {
-    append_child_line(vault, parent, &format!("- {}", title), true)
+    append_child_line(vault, parent, &item_line(title)?, true)
+}
+
+/// The item line titled `title`, refused when it would not read back as
+/// one: a title of dashes (`---`, `- -`) makes it a thematic break, which
+/// CommonMark reads before a bullet, and body text (§4.4). Checked before
+/// anything is written, as the TUI won't create an invalid title (§4.3).
+fn item_line(title: &str) -> std::io::Result<String> {
+    let line = format!("- {}", title);
+    not_a_break(&line)?;
+    Ok(line)
+}
+
+/// Refuse an item's title line that reads as a thematic break (§4.4).
+fn not_a_break(line: &str) -> std::io::Result<()> {
+    if crate::parse::is_thematic_break(line.trim_start_matches([' ', '\t'])) {
+        return Err(io_err("a title of dashes reads as a thematic break, not an item"));
+    }
+    Ok(())
 }
 
 fn io_err(msg: &str) -> std::io::Error {

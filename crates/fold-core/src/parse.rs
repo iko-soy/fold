@@ -401,7 +401,7 @@ pub fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
 /// `_` with nothing but spaces or tabs between. CommonMark reads it before a
 /// list item, so `- - -` and `* * *` are body text like `---` (§4.4).
 /// `rest` starts at the line's first non-blank character.
-fn is_thematic_break(rest: &str) -> bool {
+pub(crate) fn is_thematic_break(rest: &str) -> bool {
     let Some(mark) = rest.chars().next().filter(|c| matches!(c, '-' | '*' | '_')) else {
         return false;
     };

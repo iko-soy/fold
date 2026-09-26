@@ -1057,3 +1057,61 @@ fn respelling_a_block_whose_parent_changed_on_disk_writes_nothing() {
         "the block was respelled, its embed was not"
     );
 }
+
+#[test]
+fn capturing_a_title_of_dashes_writes_nothing() {
+    // `- ---`, `- --` and `- - -` are thematic breaks, which CommonMark
+    // reads before a bullet: body text, not an item (§4.4). Capture refuses
+    // such a title before it writes anything, as it would an empty one
+    // (§4.3), instead of leaving a break under the day and failing after
+    for title in ["---", "--", "- -", "-- -"] {
+        let (d, mut v) = vault_with("# Projects\n");
+        let res = ops::capture(&mut v, title, false);
+        assert!(res.is_err(), "{:?} was captured", title);
+        assert_eq!(read(&d, "root.md"), "# Projects\n", "{:?}", title);
+        let (d, mut v) = vault_with("# A\n\n- x\n");
+        let a = at(&v, &["A"]);
+        let res = ops::capture_to(&mut v, title, false, a);
+        assert!(res.is_err(), "{:?} was captured", title);
+        assert_eq!(read(&d, "root.md"), "# A\n\n- x\n", "{:?}", title);
+    }
+    // a title that only starts with dashes, or a task's, is an item
+    let (_d, mut v) = vault_with("# A\n\n- x\n");
+    let a = at(&v, &["A"]);
+    let r = ops::capture_to(&mut v, "-- note", false, a).unwrap();
+    assert_eq!(v.tree.node(r).title, "-- note");
+    let a = at(&v, &["A"]);
+    let r = ops::capture_to(&mut v, "---", true, a).unwrap();
+    assert_eq!(v.tree.node(r).title, "---");
+    let a = at(&v, &["A"]);
+    let r = ops::capture_to(&mut v, "-", false, a).unwrap();
+    assert_eq!(v.tree.node(r).title, "-");
+}
+
+#[test]
+fn a_title_of_dashes_is_not_respelled_or_unchecked_into_a_thematic_break() {
+    // `~` on `## ---` would write `- ---`, and `t` on `- [ ] ---` would
+    // leave `- ---`: both thematic breaks, body text (§4.4), so the node
+    // would be gone and `y` under it taken in by `A`. Both are refused
+    // before they write
+    let (d, mut v) = vault_with("# A\n\n## ---\n\n- y\n");
+    let s = at(&v, &["A", "---"]);
+    assert!(ops::toggle_spelling(&mut v, s).is_err());
+    assert_eq!(read(&d, "root.md"), "# A\n\n## ---\n\n- y\n");
+    let (d, mut v) = vault_with("# A\n\n- [ ] ---\n- y\n");
+    let t = at(&v, &["A", "---"]);
+    assert!(ops::toggle_taskness(&mut v, t).is_err());
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [ ] ---\n- y\n");
+    // checked, and as a heading, it is still a title
+    let t = at(&v, &["A", "---"]);
+    ops::toggle_task(&mut v, t).unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [x] ---\n- y\n");
+    let t = at(&v, &["A", "---"]);
+    ops::toggle_spelling(&mut v, t).unwrap();
+    assert!(read(&d, "root.md").contains("\n## [x] ---\n"), "{}", read(&d, "root.md"));
+    at(&v, &["A", "---"]);
+    let (d, mut v) = vault_with("# A\n\n## [ ] ---\n");
+    let s = at(&v, &["A", "---"]);
+    ops::toggle_taskness(&mut v, s).unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\n## ---\n");
+}
