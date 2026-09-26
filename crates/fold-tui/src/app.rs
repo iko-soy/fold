@@ -317,6 +317,7 @@ impl App {
     /// flow (§12).
     pub fn reload_external(&mut self) {
         let edit = self.editor_before_write("external change");
+        let props_key = self.props_target.map(|t| self.vault.key_of(t));
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         let zoom_key = self.zoom_root.map(|z| self.vault.key_of(z));
         // sync-conflict files start the merge flow (§11.2)
@@ -346,6 +347,16 @@ impl App {
             }
         }
         self.clamp_cursor();
+        // the property form's node is found again, or the form closes; a
+        // target prompt lists its candidates again (the menu keeps a key)
+        self.props_target = props_key.and_then(|k| self.find_exact(&k));
+        if self.mode == Mode::Props {
+            match self.props_target {
+                Some(_) => self.reopen_props(),
+                None => self.mode = self.base_mode(),
+            }
+        }
+        self.refresh_picks();
         self.editor_after_write(edit);
     }
 
@@ -1996,11 +2007,17 @@ impl App {
     /// Open the node menu (§10.3) for `r`, anchored at a screen position.
     fn open_menu(&mut self, r: NRef, x: u16, y: u16) {
         self.ui.menu = Some(ui::Menu {
-            target: r,
+            target: self.vault.key_of(r),
             x,
             y,
             sel: 0,
         });
+    }
+
+    /// The node the open menu is on, found again by its key: `None` once
+    /// the files changed under the menu and that node is gone (§11.2).
+    fn menu_target(&self) -> Option<NRef> {
+        self.find_exact(&self.ui.menu.as_ref()?.target)
     }
 
     fn key_menu(&mut self, key: KeyEvent) {
@@ -2027,9 +2044,8 @@ impl App {
         let Some(Some(a)) = action::NODE_MENU.get(i) else { return };
         // the verb saves the editor first (§10.6), which re-parses what it
         // wrote: the menu's node is found again by its key
-        let key = self.vault.key_of(menu.target);
         self.save_editor("outline verb");
-        let Some(target) = self.find_exact(&key) else {
+        let Some(target) = self.find_exact(&menu.target) else {
             self.say("that node is gone");
             return;
         };

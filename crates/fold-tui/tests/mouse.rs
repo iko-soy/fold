@@ -549,3 +549,54 @@ fn resolving_conflicts_from_the_editor_saves_and_leaves_it() {
     assert_eq!(app.mode_pub(), "edit");
     assert!(!app.editor_dirty());
 }
+
+#[test]
+fn an_open_menu_survives_an_external_rewrite_that_shrinks_the_file() {
+    let (d, mut app) = app_with("# A\n\n- one\n- two\n- three\n");
+    right_click(&mut app, Hit::Row(3));
+    assert!(draw(&mut app).contains("Move down"), "menu open on three");
+    // another program rewrites the file while the menu is open (§11.2)
+    std::fs::write(d.path().join("root.md"), "# A\n").unwrap();
+    app.reload_external();
+    // the next frame must not index a node that no longer exists
+    draw(&mut app);
+}
+
+#[test]
+fn an_open_menu_never_acts_on_a_different_node_after_a_reload() {
+    let (d, mut app) = app_with("# A\n\n- one\n- two\n- three\n");
+    right_click(&mut app, Hit::Row(3));
+    assert!(draw(&mut app).contains("Move down"), "menu open on three");
+    // a line inserted above renumbers every node below it
+    std::fs::write(d.path().join("root.md"), "# A\n\n- zero\n- one\n- two\n- three\n").unwrap();
+    app.reload_external();
+    // whether the menu closed or still targets "three", Delete never hits "two"
+    draw(&mut app);
+    let delete = fold_tui::app::node_menu_index(Action::Delete);
+    if let Some(p) = app.hit_pos(Hit::MenuItem(delete)) {
+        app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), p));
+        app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), p));
+    }
+    let text = root(&d);
+    assert!(text.contains("- two\n"), "Delete removed a node the menu was not opened on: {:?}", text);
+    assert_eq!(text, "# A\n\n- zero\n- one\n- two\n", "the menu stayed on three");
+}
+
+#[test]
+fn an_open_property_form_or_move_to_list_survives_an_external_rewrite() {
+    let (d, mut app) = app_with("# A\n\n- one\n- two\n- three\n");
+    click(&mut app, Hit::Row(3));
+    typing(&mut app, "a");
+    assert_eq!(app.mode_pub(), "props");
+    std::fs::write(d.path().join("root.md"), "# A\n").unwrap();
+    app.reload_external();
+    draw(&mut app);
+    assert_eq!(app.mode_pub(), "normal", "the form closes with its node gone");
+    // Move to…'s list of nodes is made again from the files as they are
+    let (d, mut app) = app_with("# A\n\n- one\n- two\n- three\n");
+    right_click(&mut app, Hit::Row(3));
+    click(&mut app, Hit::MenuItem(fold_tui::app::node_menu_index(Action::Refile)));
+    std::fs::write(d.path().join("root.md"), "# A\n").unwrap();
+    app.reload_external();
+    assert!(draw(&mut app).contains("Move to"));
+}

@@ -8,6 +8,7 @@ use fold_core::ops::Drop;
 use fold_core::parse::{Kind, TaskState};
 use fold_core::render::render;
 use fold_core::tree::NRef;
+use fold_core::vault::NodeKey;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -71,10 +72,12 @@ pub enum Hit {
     PropDelete(usize),
 }
 
-/// The node menu: which node, where, and the highlighted item.
-#[derive(Debug, Clone, Copy)]
+/// The node menu: which node, where, and the highlighted item. The node is
+/// kept by its key (§3.4), since files can change under an open menu — a
+/// reload, an editor save — and renumber every node (§11.2).
+#[derive(Debug, Clone)]
 pub struct Menu {
-    pub target: NRef,
+    pub target: NodeKey,
     pub x: u16,
     pub y: u16,
     pub sel: usize,
@@ -1066,7 +1069,12 @@ impl App {
     }
 
     fn draw_menu(&mut self, f: &mut Frame, screen: Rect) {
-        let Some(menu) = self.ui.menu else { return };
+        let Some(menu) = self.ui.menu.clone() else { return };
+        let Some(target) = self.menu_target() else {
+            // its node is gone, the files changed under it: the menu closes
+            self.ui.menu = None;
+            return;
+        };
         let w: u16 = 28;
         let h = NODE_MENU.len() as u16 + 2;
         let x = menu.x.min(screen.x + screen.width.saturating_sub(w));
@@ -1074,7 +1082,7 @@ impl App {
         let r = Rect { x, y, width: w, height: h }.intersection(screen);
         self.ui.push(screen, Hit::Backdrop);
         f.render_widget(Clear, r);
-        let title = self.vault.tree.node(menu.target).title.clone();
+        let title = self.vault.tree.node(target).title.clone();
         let block = rounded(Line::from(Span::styled(format!(" {} ", fit(&title, 20)), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
         f.render_widget(block, r);
@@ -1096,7 +1104,7 @@ impl App {
                             m.sel = i;
                         }
                     }
-                    let sel = self.ui.menu.map(|m| m.sel == i).unwrap_or(false);
+                    let sel = self.ui.menu.as_ref().map(|m| m.sel == i).unwrap_or(false);
                     let base = if sel { Style::default().bg(theme::SEL) } else { Style::default() };
                     buf.set_style(row, base);
                     let label_style = if *a == Action::Delete { base.fg(theme::DANGER) } else { base };
