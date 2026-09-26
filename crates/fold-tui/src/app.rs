@@ -74,7 +74,12 @@ pub struct App {
     pub(crate) vault: Vault,
     mode: Mode,
     focus: Focus,
+    /// Read it through `zoom()` and set it through `set_zoom()`.
     zoom_root: Option<NRef>,
+    /// The zoom root's key while a verb or undo runs: the files it writes
+    /// are re-parsed and their nodes renumbered, so until the verb settles
+    /// the zoom is found by key (§11.2), not by its old index.
+    zoom_anchor: Option<NodeKey>,
     pub cursor: usize,
     folded: Vec<NodeKey>,
     hide_done: bool,
@@ -170,6 +175,7 @@ impl App {
             mode: Mode::Normal,
             focus: Focus::Outline,
             zoom_root: None,
+            zoom_anchor: None,
             cursor: 0,
             folded: Vec::new(),
             hide_done: false,
@@ -336,9 +342,34 @@ impl App {
     /// and the hide-done toggle.
     pub fn rows(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
-        let root = self.zoom_root.unwrap_or(self.vault.tree.root);
+        let root = self.zoom().unwrap_or(self.vault.tree.root);
         self.flatten(root, 0, false, &mut out, &mut Vec::new());
         out
+    }
+
+    /// The zoom root (§10.3), found again by key while a verb runs.
+    fn zoom(&self) -> Option<NRef> {
+        match &self.zoom_anchor {
+            Some(k) => self.vault.find_by_key(k).filter(|&r| self.vault.tree.node(r).kind != Kind::Root),
+            None => self.zoom_root,
+        }
+    }
+
+    fn set_zoom(&mut self, r: Option<NRef>) {
+        self.zoom_root = r;
+        self.zoom_anchor = None;
+    }
+
+    /// Hold the zoom by key before a verb or undo rewrites files; a zoomed
+    /// node that goes away zooms out to its deepest surviving ancestor.
+    fn anchor_zoom(&mut self) {
+        self.zoom_root = self.zoom();
+        self.zoom_anchor = self.zoom_root.map(|z| self.vault.key_of(z));
+    }
+
+    /// The verb is over: the zoom it found by key holds.
+    fn settle_zoom(&mut self) {
+        self.set_zoom(self.zoom());
     }
 
     /// `seen` holds the blocks already shown: an embed cycle or a second
@@ -458,11 +489,15 @@ impl App {
     fn act_make_block(&mut self) {
         let Some(r) = self.subject() else { return };
         self.push_undo("act_make_block");
+        let zoomed = self.zoom() == Some(r);
         match ops::make_block(&mut self.vault, r) {
             Ok(id) => {
                 self.say(format!("block {}", id));
-                // the cursor stays on the node, now a block
+                // the cursor (and a zoom) stays on the node, now a block
                 if let Some(nr) = self.vault.tree.block_by_id(&id) {
+                    if zoomed {
+                        self.set_zoom(Some(nr));
+                    }
                     self.move_cursor_to(nr);
                 }
             }
@@ -576,7 +611,7 @@ impl App {
 
     fn act_clear_done(&mut self) {
         self.push_undo("act_clear_done");
-        let target = self.zoom_root.unwrap_or(self.vault.tree.root);
+        let target = self.zoom().unwrap_or(self.vault.tree.root);
         match ops::clear_done(&mut self.vault, target) {
             Ok(n) => self.refresh_after(&format!("{} done item(s) trashed", n)),
             Err(e) => self.say(format!("error: {}", e)),
@@ -688,7 +723,7 @@ impl App {
             hide_done: self.hide_done,
             keys: Some(self.edit_keys),
             outline_width: self.ui.outline_width,
-            zoom: self.zoom_root.map(|z| self.vault.key_of(z)),
+            zoom: self.zoom().map(|z| self.vault.key_of(z)),
             folded: self.folded.clone(),
         }
     }
@@ -704,7 +739,7 @@ impl App {
         }
         self.ui.outline_width = v.outline_width;
         self.folded = v.folded;
-        self.zoom_root = v.zoom.and_then(|k| self.vault.find_by_key(&k)).filter(|&r| self.vault.tree.node(r).kind != Kind::Root);
+        self.set_zoom(v.zoom.and_then(|k| self.vault.find_by_key(&k)).filter(|&r| self.vault.tree.node(r).kind != Kind::Root));
         self.cursor = 0;
         self.clamp_cursor();
     }
@@ -976,8 +1011,13 @@ impl App {
                         return;
                     }
                     self.push_undo("set property");
+                    let zoomed = self.zoom() == Some(t);
                     match ops::set_property(&mut self.vault, t, &k, &p.text) {
                         Ok(block) => {
+                            // a first property makes a block (§6.1): a zoom follows it
+                            if zoomed {
+                                self.set_zoom(Some(block));
+                            }
                             self.say(format!("{} set", k));
                             self.props_target = Some(block);
                             self.reopen_props();
@@ -1067,8 +1107,8 @@ impl App {
             let k = self.vault.key_of(a);
             self.folded.retain(|f| f != &k);
         }
-        if self.zoom_root.is_some() && !self.rows().iter().any(|row| row.nref == r) {
-            self.zoom_root = None;
+        if self.zoom().is_some() && !self.rows().iter().any(|row| row.nref == r) {
+            self.set_zoom(None);
         }
         self.move_cursor_to(r);
         self.focus = Focus::Outline;
@@ -1366,6 +1406,7 @@ impl App {
             return;
         };
         self.mark_self_write();
+        self.anchor_zoom();
         match inv.undo(&mut self.vault) {
             Ok(()) => {
                 self.say(format!("undone: {}", inv.description));
@@ -1387,6 +1428,7 @@ impl App {
             return;
         };
         self.mark_self_write();
+        self.anchor_zoom();
         match inv.redo(&mut self.vault) {
             Ok(()) => {
                 self.say(format!("redone: {}", inv.description));
@@ -1406,12 +1448,14 @@ impl App {
         self.settle_undo();
         self.pending_undo = Some(ops::Snapshot::take(&self.vault, desc));
         self.mark_self_write();
+        self.anchor_zoom();
     }
 
     /// Turn the pending snapshot into an op-log entry holding exactly the
     /// files the verb changed (§10.10); a verb that changed nothing leaves
     /// no entry and keeps the redo stack.
     fn settle_undo(&mut self) {
+        self.settle_zoom();
         if let Some(snap) = self.pending_undo.take() {
             self.record_undo(snap);
         }
@@ -1487,7 +1531,7 @@ impl App {
                                 let _ = ops::toggle_task(&mut app.vault, r);
                             });
                         } else if n.kind == Kind::Section {
-                            self.zoom_root = Some(r);
+                            self.set_zoom(Some(r));
                             self.read_cursor = 0;
                             self.scroll_reading = 0;
                         }
@@ -1495,7 +1539,7 @@ impl App {
                     Some(LineRef::Embed(e)) => {
                         let t = self.vault.tree.resolved_child(e);
                         if t != e {
-                            self.zoom_root = Some(t);
+                            self.set_zoom(Some(t));
                             self.read_cursor = 0;
                             self.scroll_reading = 0;
                         }
@@ -1504,16 +1548,16 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if let Some(z) = self.zoom_root {
+                if let Some(z) = self.zoom() {
                     if let Some(p) = self.vault.tree.node(z).parent {
                         let pr = (z.0, p);
-                        self.zoom_root = if self.vault.tree.node(pr).kind != Kind::Root {
+                        self.set_zoom(if self.vault.tree.node(pr).kind != Kind::Root {
                             Some(pr)
                         } else {
                             None
-                        };
+                        });
                     } else {
-                        self.zoom_root = None;
+                        self.set_zoom(None);
                     }
                     self.read_cursor = 0;
                     self.scroll_reading = 0;
@@ -1560,7 +1604,7 @@ impl App {
     /// Reset the reading cursor when the pane starts showing another node
     /// (outline cursor moved, zoom changed), and keep it inside the doc.
     fn sync_read_target(&mut self) {
-        let key = self.zoom_root.or_else(|| self.current()).map(|r| self.vault.key_of(r));
+        let key = self.zoom().or_else(|| self.current()).map(|r| self.vault.key_of(r));
         if key != self.read_key {
             self.read_key = key;
             self.read_cursor = 0;
@@ -1573,7 +1617,7 @@ impl App {
 
     pub fn reading_doc_pub(&self) -> fold_core::reading::ReadingDoc { self.reading_doc() }
     fn reading_doc(&self) -> fold_core::reading::ReadingDoc {
-        let target = self.zoom_root.or_else(|| self.current());
+        let target = self.zoom().or_else(|| self.current());
         match target {
             Some(r) => fold_core::reading::build(&self.vault, r),
             None => fold_core::reading::ReadingDoc {
@@ -1890,19 +1934,25 @@ impl App {
             }
             Action::GoTo => self.open_prompt("go to", PromptAction::GoTo, String::new()),
             Action::ClearDone => self.act_clear_done(),
-            Action::Canonicalize => match fold_core::check::fix(&mut self.vault) {
-                Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
-                Err(e) => self.say(format!("error: {}", e)),
-            },
-            Action::Merge => match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
-                Ok(o) => {
-                    self.say(format!("{} merge(s)", o.len()));
-                    if !fold_core::merge::conflict_pairs(&self.vault).is_empty() {
-                        self.enter_conflict_view();
-                    }
+            Action::Canonicalize => {
+                self.anchor_zoom();
+                match fold_core::check::fix(&mut self.vault) {
+                    Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
+                    Err(e) => self.say(format!("error: {}", e)),
                 }
-                Err(e) => self.say(format!("error: {}", e)),
-            },
+            }
+            Action::Merge => {
+                self.anchor_zoom();
+                match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+                    Ok(o) => {
+                        self.say(format!("{} merge(s)", o.len()));
+                        if !fold_core::merge::conflict_pairs(&self.vault).is_empty() {
+                            self.enter_conflict_view();
+                        }
+                    }
+                    Err(e) => self.say(format!("error: {}", e)),
+                }
+            }
             Action::ResolveConflicts => self.enter_conflict_view(),
             Action::EditorKeys => self.set_edit_keys(self.edit_keys.next()),
             Action::EditDone => self.close_editor(),
@@ -1950,7 +2000,7 @@ impl App {
     /// Zoom into a node: the reading pane shows it (§10.3 `Enter`).
     fn zoom_into(&mut self, r: NRef) {
         if self.vault.tree.node(r).kind != Kind::Root {
-            self.zoom_root = Some(r);
+            self.set_zoom(Some(r));
             self.cursor = 0;
             self.read_cursor = 0;
             self.scroll_reading = 0;
@@ -1961,11 +2011,11 @@ impl App {
     }
 
     fn zoom_out(&mut self) {
-        if let Some(z) = self.zoom_root {
+        if let Some(z) = self.zoom() {
             let key = self.vault.key_of(z);
-            self.zoom_root = self.vault.tree.node(z).parent.map(|p| (z.0, p)).filter(|&p| {
+            self.set_zoom(self.vault.tree.node(z).parent.map(|p| (z.0, p)).filter(|&p| {
                 self.vault.tree.node(p).kind != Kind::Root
-            });
+            }));
             self.cursor = 0;
             if let Some(r) = self.vault.find_by_key(&key) {
                 self.move_cursor_to(r);
@@ -1975,8 +2025,8 @@ impl App {
 
     /// Zoom straight to a node, or to the root (breadcrumbs, §10.1).
     fn zoom_to(&mut self, r: Option<NRef>) {
-        let prev = self.zoom_root;
-        self.zoom_root = r;
+        let prev = self.zoom();
+        self.set_zoom(r);
         self.cursor = 0;
         if let Some(p) = prev {
             if !self.rows().iter().any(|row| row.nref == p) {

@@ -268,3 +268,48 @@ fn an_embed_cycle_does_not_overflow_the_stack() {
     press(&mut app, "lj");
     draw(&mut app, 100, 24);
 }
+
+#[test]
+fn deleting_the_zoomed_node_zooms_out() {
+    let (d, mut app) = app_with("# A\n\n# B\n\n- b1\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B; the cursor is on B
+    assert_eq!(current_title(&app), "B");
+    press(&mut app, "d"); // B is gone: the zoom must not dangle
+    assert_eq!(root(&d), "# A\n");
+    assert_eq!(current_title(&app), "A");
+    draw(&mut app, 100, 24);
+    // a zoomed node inside another zooms out to it
+    let (d, mut app) = app_with("# A\n\n## B\n\n# C\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "d");
+    assert_eq!(root(&d), "# A\n\n# C\n");
+    let titles: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
+    assert_eq!(titles, ["A"]);
+}
+
+#[test]
+fn undoing_under_a_zoom_keeps_the_zoom() {
+    let (_d, mut app) = app_with("- a\n- b\n");
+    press(&mut app, "ypG"); // paste a copy of a; the cursor is on b
+    app.handle_key(key(KeyCode::Enter)); // zoom into b
+    assert_eq!(current_title(&app), "b");
+    press(&mut app, "u"); // the file shrinks back to a, b
+    assert_eq!(current_title(&app), "b");
+    press(&mut app, "U");
+    assert_eq!(current_title(&app), "b");
+    draw(&mut app, 100, 24);
+}
+
+#[test]
+fn moving_the_zoomed_node_keeps_the_zoom_on_it() {
+    let (d, mut app) = app_with("- A\n- B\n  - B1\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B
+    press(&mut app, "K");
+    assert_eq!(root(&d), "- B\n  - B1\n- A\n");
+    assert_eq!(current_title(&app), "B");
+    let titles: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
+    assert_eq!(titles, ["B", "B1"]);
+}
