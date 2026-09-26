@@ -115,6 +115,9 @@ pub struct App {
     edit_last_key: Instant,
     /// The pane that had focus when the editor opened, focused again after.
     edit_return: Focus,
+    /// Where an outline verb moved the node the editor is open on: the
+    /// editor is re-rendered there after the verb (`follow`).
+    edit_moved: Option<NRef>,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -211,6 +214,7 @@ impl App {
             edit_clip: editor::Clip::default(),
             edit_last_key: Instant::now(),
             edit_return: Focus::Outline,
+            edit_moved: None,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -558,19 +562,35 @@ impl App {
     fn act_make_block(&mut self) {
         let Some(r) = self.subject() else { return };
         self.push_undo("act_make_block");
-        let zoomed = self.zoom() == Some(r);
+        let on = self.on_node(r);
         match ops::make_block(&mut self.vault, r) {
             Ok(id) => {
                 self.say(format!("block {}", id));
-                // the cursor (and a zoom) stays on the node, now a block
+                // the cursor (a zoom, the editor) stays on the node, now a block
                 if let Some(nr) = self.vault.tree.block_by_id(&id) {
-                    if zoomed {
-                        self.set_zoom(Some(nr));
-                    }
+                    self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
             }
             Err(e) => self.say(format!("error: {}", e)),
+        }
+    }
+
+    /// Whether the zoom, and the editor, are on `r`, before a verb moves it.
+    fn on_node(&self, r: NRef) -> (bool, bool) {
+        let r = self.vault.tree.resolved_child(r);
+        (self.zoom() == Some(r), self.editor_node() == Some(r))
+    }
+
+    /// A node a verb moved landed at `nr`: a zoom on it stays on it
+    /// (§10.3), and the editor open on it is re-rendered there after the
+    /// verb (§10.6), not over whatever node its old path now leads to.
+    fn follow(&mut self, (zoomed, editing): (bool, bool), nr: NRef) {
+        if zoomed {
+            self.set_zoom(Some(nr));
+        }
+        if editing {
+            self.edit_moved = Some(nr);
         }
     }
 
@@ -643,18 +663,17 @@ impl App {
         // it goes under the node before it (§10.3)
         let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
         let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| self.vault.key_of(sibs[i]));
-        let zoomed = self.zoom() == Some(r);
+        let on = self.on_node(r);
         match ops::demote(&mut self.vault, s) {
             Ok(moved) => {
-                // the cursor (and a zoom) stays on the node where it landed
+                // the cursor (a zoom, the editor) stays on the node where it
+                // landed
                 let landed = match &prev {
                     Some(dest) => self.moved_node(&key, kind, dest, None),
                     None => self.find_exact(&key),
                 };
                 if let Some(nr) = landed {
-                    if zoomed {
-                        self.set_zoom(Some(nr));
-                    }
+                    self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
                 if moved {
@@ -674,18 +693,17 @@ impl App {
         let parent = self.outline_parent(r);
         let grand = parent.map(|p| self.outline_parent(p).unwrap_or(self.vault.tree.root));
         let (parent, grand) = (parent.map(|p| self.vault.key_of(p)), grand.map(|g| self.vault.key_of(g)));
-        let zoomed = self.zoom() == Some(r);
+        let on = self.on_node(r);
         match ops::promote(&mut self.vault, s) {
             Ok(moved) => {
-                // the cursor (and a zoom) stays on the node where it landed
+                // the cursor (a zoom, the editor) stays on the node where it
+                // landed
                 let landed = match &grand {
                     Some(dest) => self.moved_node(&key, kind, dest, parent.as_ref()),
                     None => self.find_exact(&key),
                 };
                 if let Some(nr) = landed {
-                    if zoomed {
-                        self.set_zoom(Some(nr));
-                    }
+                    self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
                 if moved {
@@ -719,10 +737,12 @@ impl App {
         self.push_undo("move to");
         let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
         let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
+        let on = self.on_node(rr);
         match ops::refile(&mut self.vault, r, dest) {
             Ok(moved) => {
                 self.refresh_after(&with_rule_note("moved", moved));
                 if let Some(nr) = self.moved_node(&key, kind, &dest_key, None) {
+                    self.follow(on, nr);
                     self.reveal(nr);
                 }
             }
@@ -1064,23 +1084,25 @@ impl App {
     }
 
     /// After it: if any file changed, the editor is re-rendered over the
-    /// files as they now are, so its next save is not refused.
+    /// files as they now are, so its next save is not refused: on its node
+    /// where the verb moved it (`follow`), else the very node its key names.
     fn editor_after_write(&mut self, before: Option<(NodeKey, ops::Snapshot)>) {
+        let moved = self.edit_moved.take();
         let Some((key, snap)) = before else { return };
         if ops::Inverse::since(snap, &self.vault).is_some() {
-            self.rebuild_editor(&key);
+            self.rebuild_editor(moved.or_else(|| self.find_exact(&key)));
         }
     }
 
     /// Re-render a clean editor over the files as they are now (§11.2), on
-    /// the node `key` finds again (id, key, deepest surviving step), with
-    /// the cursor where it was. Text a refused save still holds is never
-    /// replaced.
-    fn rebuild_editor(&mut self, key: &NodeKey) {
+    /// its node found again, with the cursor where it was: over the same
+    /// node's text, never an ancestor's its old path falls back to. Text a
+    /// refused save still holds is never replaced.
+    fn rebuild_editor(&mut self, target: Option<NRef>) {
         if self.editor.is_none() || self.editor_dirty() {
             return;
         }
-        let Some(target) = self.vault.find_by_key(key) else {
+        let Some(target) = target else {
             // nothing unsaved, and nothing left to edit
             self.close_editor();
             self.say("the node being edited is gone");
@@ -1321,13 +1343,12 @@ impl App {
                         return;
                     }
                     self.push_undo("set property");
-                    let zoomed = self.zoom() == Some(t);
+                    let on = self.on_node(t);
                     match ops::set_property(&mut self.vault, t, &k, &p.text) {
                         Ok(block) => {
-                            // a first property makes a block (§6.1): a zoom follows it
-                            if zoomed {
-                                self.set_zoom(Some(block));
-                            }
+                            // a first property makes a block (§6.1): a zoom
+                            // and the editor follow it
+                            self.follow(on, block);
                             self.say(format!("{} set", k));
                             self.props_target = Some(block);
                             self.reopen_props();

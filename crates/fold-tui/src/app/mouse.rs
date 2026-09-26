@@ -260,6 +260,7 @@ impl App {
         };
         let title = self.vault.tree.node(self.vault.tree.resolved_child(r)).title.clone();
         let target_key = self.vault.key_of(self.vault.tree.resolved_child(target));
+        let on = self.on_node(r);
         self.push_undo("move");
         match ops::move_node(&mut self.vault, r, target, how) {
             Ok(moved) => {
@@ -274,7 +275,11 @@ impl App {
                     pool.into_iter().rev().find(|&c| self.vault.tree.node(c).title == title)
                 });
                 match landed {
-                    Some(n) => self.reveal(n),
+                    Some(n) => {
+                        // the editor open on it follows it (§10.6)
+                        self.follow(on, n);
+                        self.reveal(n);
+                    }
                     None => self.clamp_cursor(),
                 }
             }

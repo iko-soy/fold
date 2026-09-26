@@ -734,3 +734,79 @@ fn a_new_node_whose_editor_cannot_open_leaves_the_open_editor_alone() {
     assert!(!s.contains("# A new"), "typing for the new node went into A's title:\n{}", s);
     assert!(s.contains("bodyX"), "{}", s);
 }
+
+#[test]
+fn making_the_edited_node_a_block_keeps_the_editor_on_it() {
+    // editing b, *Make block* from the palette (or the node menu) on b: the
+    // editor is re-rendered over what the verb wrote, still on b
+    let (_d, mut app) = app_with("# A\n\n- a\n- b\n  body\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    typing(&mut app, "jje");
+    assert!(draw(&mut app).contains("Editing b"));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.run_action(Action::MakeBlock);
+    assert_eq!(app.mode_pub(), "edit");
+    typing(&mut app, "!");
+    let s = draw(&mut app);
+    assert!(s.contains("Editing b") && !s.contains("# A"), "the editor moved off b:\n{}", s);
+}
+
+#[test]
+fn a_verb_that_moves_the_edited_node_keeps_the_editor_on_it() {
+    let editing_b = |text: &str| {
+        let (d, mut app) = app_with(text);
+        app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+        let b = app.rows().iter().position(|r| app.title_of(r.nref) == "b").unwrap();
+        typing(&mut app, &"j".repeat(b));
+        typing(&mut app, "e");
+        assert!(draw(&mut app).contains("Editing b"));
+        (d, app)
+    };
+    let on_b = |app: &mut App| {
+        assert_eq!(app.mode_pub(), "edit");
+        let s = draw(app);
+        assert!(s.contains("Editing b") && !s.contains("- a"), "the editor moved off b:\n{}", s);
+    };
+    // Indent and Outdent (palette, node menu)
+    let (d, mut app) = editing_b("# A\n\n- a\n- b\n  body\n");
+    app.run_action(Action::Indent);
+    assert_eq!(root(&d), "# A\n\n- a\n  - b\n    body\n");
+    on_b(&mut app);
+    app.run_action(Action::Outdent);
+    assert_eq!(root(&d), "# A\n\n- a\n- b\n  body\n");
+    on_b(&mut app);
+    // Move to…
+    let (d, mut app) = editing_b("# A\n\n- a\n- b\n  body\n\n# C\n");
+    app.run_action(Action::Refile);
+    typing(&mut app, "C");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(root(&d).ends_with("# C\n\n- b\n  body\n"), "{}", root(&d));
+    on_b(&mut app);
+    // a first property, set in the form opened over the editor, makes it
+    // a block (§6.1)
+    let (d, mut app) = editing_b("# A\n\n- a\n- b\n  body\n");
+    app.run_action(Action::Props);
+    typing(&mut app, "ntag");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    typing(&mut app, "x");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!root(&d).contains("- b"), "b is a block: {}", root(&d));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    on_b(&mut app);
+    // dragged onto a's title (§10.1)
+    let (d, mut app) = editing_b("# A\n\n- a\n- b\n  body\n");
+    draw(&mut app);
+    let (from, onto) = (app.hit_pos(Hit::Row(2)).unwrap(), app.hit_pos(Hit::Row(1)).unwrap());
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), onto));
+    draw(&mut app);
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), onto));
+    assert_eq!(root(&d), "# A\n\n- a\n  - b\n    body\n");
+    on_b(&mut app);
+    // deleted, it leaves nothing to edit: the editor closes instead of
+    // showing the node above it
+    let (d, mut app) = editing_b("# A\n\n- a\n- b\n  body\n");
+    app.run_action(Action::Delete);
+    assert_eq!(root(&d), "# A\n\n- a\n");
+    assert_eq!(app.mode_pub(), "normal");
+}
