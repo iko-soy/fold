@@ -8,7 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{Kind, Span};
+use crate::parse::{parse_file, Block, Content, Kind, ParsedFile, Span};
 use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -326,7 +326,31 @@ impl EditBuffer {
             ));
         }
         let f = &vault.tree.files[file];
+        // §4.9: a block file with text or an embed before its root is
+        // read-only until fixed — the bytes before the root are not in the
+        // buffer, and rewriting the file would drop them
+        if malformed_block_file(f) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{}: text or an embed before the block's root; read-only until fixed", path),
+            ));
+        }
         if let Some(ni) = node {
+            // §5.2 step 2: a block's text parses to exactly one root-level
+            // node, so splice never writes a block file it would then treat
+            // as read-only, or one with no root at all
+            if let Some(b) = f.nodes[ni].block.as_ref().filter(|b| b.id.is_some()) {
+                let b = Block {
+                    frontmatter_span: None,
+                    ..b.clone()
+                };
+                if malformed_block_file(&parse_file(&path, &out, file, Some(b))) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("{}: the block's text must start with its title line; not saved", path),
+                    ));
+                }
+            }
             // the block IS the file: keep its frontmatter, replace the rest
             let fm_end = f.nodes[ni]
                 .block
@@ -380,6 +404,21 @@ enum Line {
 
 fn hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+/// A block file with text or an embed before its root node, or with no
+/// root at all (§4.9). `root.md` never is: text before its first node is
+/// its Root's own.
+fn malformed_block_file(f: &ParsedFile) -> bool {
+    let root = &f.nodes[f.root_node];
+    if root.block.is_some() {
+        return false;
+    }
+    let text_before = root.content.iter().any(|c| match c {
+        Content::Text(sp) => !sp.text(&f.text).trim().is_empty(),
+        Content::Node(_) => false,
+    });
+    text_before || root.children.len() != 1 || f.nodes[root.children[0]].is_embed()
 }
 
 /// Where a node's own text ends: its span without the blank lines that

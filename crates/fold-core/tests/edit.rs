@@ -414,3 +414,54 @@ fn line_opened_above_zoomed_title_is_not_duplicated() {
     buf.save_all(&mut v).unwrap();
     assert_eq!(v.tree.files[0].text, "intro\n# A\n\nbody!\n\n# B\n\nb\n");
 }
+
+#[test]
+fn splice_keeps_text_before_block_root() {
+    // §4.9: text before a block file's root is a diagnostic and the file is
+    // read-only until fixed; §11.5: never delete user content without a
+    // trash copy. Saving the block from the editor must not drop it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "# A\n\n![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    let bf = dir.path().join("racfer~task.md");
+    let malformed = "---\nid: racfer-hattes-mislup-nodrys\n---\n\nphone note\n- task\n";
+    std::fs::write(&bf, malformed).unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "- task!".into());
+    // refused (read-only), and the block stays unsaved
+    assert!(buf.save_all(&mut v).is_err());
+    assert_eq!(std::fs::read_to_string(&bf).unwrap(), malformed);
+    assert!(buf.dirty.iter().any(|o| o.file == 1));
+}
+
+#[test]
+fn splice_never_writes_a_block_file_without_its_root() {
+    // §5.2 step 2: a block's text parses to exactly one root-level node.
+    // Editing a block itself and deleting its title line leaves no root;
+    // splice refuses rather than write a file with only frontmatter and
+    // text, which would drop the block from the tree.
+    let (d, mut v) = vault_with("# A\n\n- task\n  note\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    ops::make_block(&mut v, t).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let path = d.path().join(&v.tree.files[1].path);
+    let before = std::fs::read_to_string(&path).unwrap();
+    let mut buf = open_editor(&v, t);
+    let texts: Vec<&str> = buf.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["- task", "  note"]);
+    buf.delete_line(0);
+    assert!(buf.save_all(&mut v).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    // text typed above the title line would be text before the root
+    let mut buf = open_editor(&v, t);
+    buf.set_line(0, "intro".into());
+    buf.insert_line(0, "- task".into());
+    assert!(buf.save_all(&mut v).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
