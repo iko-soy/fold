@@ -544,6 +544,13 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
         let base = cfile.split(".sync-conflict-").next().unwrap().to_string() + ".md";
         let cpath = vault.dir.join(&cfile);
         let bpath = vault.dir.join(&base);
+        // only root.md and block files are ours to merge: the conflict copy
+        // of an ignored file is left alone, like the file (§4.1, §11.4)
+        let parsed = base == "root.md" || vault.file_index(&base).is_some();
+        if !parsed && bpath.exists() {
+            outcomes.push(format!("{}: {} is not a vault file, left alone", cfile, base));
+            continue;
+        }
         let theirs = std::fs::read_to_string(&cpath)?;
         let ours = std::fs::read_to_string(&bpath).unwrap_or_default();
         // device + timestamp from the filename

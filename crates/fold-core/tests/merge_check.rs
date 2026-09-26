@@ -391,3 +391,44 @@ fn sync_conflict_merge_keeps_embeds_in_the_merged_file() {
     assert!(text.contains(&format!("![[{}]]", BID)), "{}", text);
     assert!(text.contains("- new"), "{}", text);
 }
+
+#[test]
+fn merge_leaves_ignored_files_alone() {
+    // §4.1/§11.4: a `.md` file without an id is ignored — never parsed,
+    // never written. A sync-conflict copy of it is not ours to merge.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    std::fs::write(dir.path().join("readme.md"), "* [ ] first\n").unwrap();
+    std::fs::write(
+        dir.path().join("readme.sync-conflict-20260912-100000-phone.md"),
+        "* [x] first\n",
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(outcomes.iter().any(|o| o.contains("left alone")), "{:?}", outcomes);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("readme.md")).unwrap(),
+        "* [ ] first\n"
+    );
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "readme.md".to_string(),
+            "readme.sync-conflict-20260912-100000-phone.md".to_string(),
+            "root.md".to_string(),
+        ]
+    );
+    let diags = fold_core::check::check(&v);
+    assert!(
+        diags.iter().all(|d| !d.message.contains("unresolved conflict")),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
