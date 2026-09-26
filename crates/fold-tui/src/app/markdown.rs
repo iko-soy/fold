@@ -24,8 +24,14 @@ pub fn style_line(l: &str, in_fence: bool) -> Styled {
     let (indent, rest) = l.split_at(indent_len);
     out.push(indent, Style::default());
 
-    if in_fence || rest.starts_with("```") || rest.starts_with("~~~") {
+    if in_fence {
         out.push(rest, Style::default().fg(theme::CODE));
+        return out.finish();
+    }
+    if rest.starts_with("```") || rest.starts_with("~~~") {
+        let n = rest.chars().take_while(|&c| c == '`' || c == '~').count();
+        out.push(&rest[..n], Style::default().fg(theme::DIM));
+        out.push(&rest[n..], Style::default().fg(theme::ACCENT).add_modifier(Modifier::ITALIC));
         return out.finish();
     }
     if rest.starts_with("![[") {

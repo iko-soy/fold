@@ -170,3 +170,24 @@ fn question_mark_opens_help() {
     app.key_palette(key(KeyCode::Enter));
     assert_eq!(app.mode_pub(), "help");
 }
+
+#[test]
+fn code_blocks_are_highlighted_by_their_language() {
+    let (_d, mut app) = app_with("# A\n\n```rust\nfn main() {}\n```\n\n~~~unknown\nfn main() {}\n~~~\n");
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    // find each `fn` in the reading pane (right of the outline)
+    let mut fns = Vec::new();
+    for y in 0..20 {
+        for x in 34..97 {
+            if buf[(x, y)].symbol() == "f" && buf[(x + 1, y)].symbol() == "n" && buf[(x + 2, y)].symbol() == " " {
+                fns.push(buf[(x, y)].fg);
+            }
+        }
+    }
+    assert_eq!(fns.len(), 2, "both blocks drawn");
+    assert_eq!(fns[0], ratatui::style::Color::Magenta, "rust keyword highlighted");
+    assert_eq!(fns[1], ratatui::style::Color::Yellow, "unknown language: plain code colour");
+}

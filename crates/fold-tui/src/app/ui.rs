@@ -114,6 +114,8 @@ pub struct Ui {
     pub reading_view: usize,
     pub reading_len: usize,
     pub edit_view: usize,
+    /// Highlighted code blocks by (info string, code).
+    pub highlight_cache: std::collections::HashMap<(String, String), Vec<Vec<Span<'static>>>>,
 }
 
 impl Ui {
@@ -641,14 +643,9 @@ impl App {
         let moved = self.ui.last_read_cursor != Some(self.read_cursor);
         self.ui.last_read_cursor = Some(self.read_cursor);
         follow(&mut self.scroll_reading, cursor_shown, moved, view, shown.len());
-        let mut fence = false;
+        let texts: Vec<&str> = shown.iter().map(|(_, t)| t.as_str()).collect();
+        let code = self.code_lines(&texts);
         for (si, (doc_line, text)) in shown.iter().enumerate() {
-            let t = text.trim_start();
-            let is_fence = t.starts_with("```") || t.starts_with("~~~");
-            let in_fence = fence && !is_fence;
-            if is_fence {
-                fence = !fence;
-            }
             if si < self.scroll_reading || si >= self.scroll_reading + view {
                 continue;
             }
@@ -659,10 +656,23 @@ impl App {
                 put(buf, inner.x, y, &fit(text, inner.width as usize), inner.width, Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC));
                 continue;
             };
-            let styled = style_line(text, in_fence && !self.raw_mode);
+            let styled = match &code[si] {
+                Some(spans) => super::markdown::Styled { line: Line::from(spans.clone()), check: None, link: None },
+                None => style_line(text, false),
+            };
             let cur = focused && *di == self.read_cursor;
             let matched = self.read_matches.contains(di);
-            let bg = if cur { Some(theme::SEL_BLUR) } else if matched { Some(ratatui::style::Color::Indexed(58)) } else if self.ui.hovered(line_rect) && self.ui.menu.is_none() { Some(theme::HOVER) } else { None };
+            let bg = if cur {
+                Some(theme::SEL_BLUR)
+            } else if matched {
+                Some(ratatui::style::Color::Indexed(58))
+            } else if self.ui.hovered(line_rect) && self.ui.menu.is_none() {
+                Some(theme::HOVER)
+            } else if code[si].is_some() {
+                Some(theme::CODE_BG)
+            } else {
+                None
+            };
             if let Some(b) = bg {
                 buf.set_style(line_rect, Style::default().bg(b));
             }
@@ -683,6 +693,76 @@ impl App {
                 &mut st,
             );
         }
+    }
+
+    /// The lines inside fenced code blocks, styled: highlighted by the
+    /// fence's language (§10.9), else in the plain code colour. `None` for
+    /// every line that is not code, fences included.
+    fn code_lines(&mut self, texts: &[&str]) -> Vec<Option<Vec<Span<'static>>>> {
+        let mut out: Vec<Option<Vec<Span<'static>>>> = vec![None; texts.len()];
+        let mut i = 0;
+        while i < texts.len() {
+            let t = texts[i].trim_start();
+            let indent = texts[i].len() - t.len();
+            let fc = match t.chars().next() {
+                Some(c @ ('`' | '~')) => c,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let n = t.chars().take_while(|&c| c == fc).count();
+            if n < 3 {
+                i += 1;
+                continue;
+            }
+            let info = t[n..].trim().to_string();
+            // the block runs to a fence of the same character, at least as long
+            let end = (i + 1..texts.len())
+                .find(|&j| {
+                    let u = texts[j].trim_start();
+                    u.chars().take_while(|&c| c == fc).count() >= n && u.trim_end().chars().all(|c| c == fc)
+                })
+                .unwrap_or(texts.len());
+            let body: Vec<&str> = texts[i + 1..end]
+                .iter()
+                .map(|l| {
+                    let cut = l.len() - l.trim_start_matches(' ').len();
+                    &l[cut.min(indent)..]
+                })
+                .collect();
+            let mut code = body.join("\n");
+            code.push('\n');
+            let lit = self.highlighted(&info, &code);
+            for (k, j) in (i + 1..end).enumerate() {
+                let mut spans = vec![Span::raw(" ".repeat(indent))];
+                match lit.as_ref().and_then(|l| l.get(k)) {
+                    Some(line) => spans.extend(line.iter().cloned()),
+                    None => spans.push(Span::styled(body[k].to_string(), Style::default().fg(theme::CODE))),
+                }
+                out[j] = Some(spans);
+            }
+            i = end + 1;
+        }
+        out
+    }
+
+    /// Highlight a block, remembering the result: the reading pane redraws
+    /// on every event, the code rarely changes.
+    fn highlighted(&mut self, info: &str, code: &str) -> Option<Vec<Vec<Span<'static>>>> {
+        if !super::highlight::supported(info) {
+            return None;
+        }
+        let key = (info.to_string(), code.to_string());
+        if let Some(hit) = self.ui.highlight_cache.get(&key) {
+            return Some(hit.clone());
+        }
+        let lit = super::highlight::highlight(info, code)?;
+        if self.ui.highlight_cache.len() > 64 {
+            self.ui.highlight_cache.clear();
+        }
+        self.ui.highlight_cache.insert(key, lit.clone());
+        Some(lit)
     }
 
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {

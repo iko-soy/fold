@@ -1023,8 +1023,19 @@ conflicts*. `?` is help: the pointer gestures first, then the keys.
 ### 10.9 Markdown styling in the reading pane
 
 Line-based, not a full renderer: headings coloured by level, task checkboxes shown as `☐ ☑`
-(clickable; done lines dimmed and struck through), links underlined (clickable), code
-fences and `` `code` `` tinted, `**bold**` and `*em*` styled, quotes in colour. Raw text is
+(clickable; done lines dimmed and struck through), links underlined (clickable),
+`` `code` `` tinted, `**bold**` and `*em*` styled, quotes in colour.
+
+**Fenced code** sits on a tinted background, its fence dimmed and its info string in the
+accent colour, and is **syntax-highlighted** with tree-sitter when the info string's first
+word names a known language: Rust (`rust`, `rs`), Python (`python`, `py`), JavaScript
+(`js`, `jsx`), TypeScript (`ts`, `tsx`), shell (`bash`, `sh`, `zsh`, `console`), JSON,
+TOML, YAML, Go, C, Nix, HTML and CSS. `rust,ignore`, `{.python}` and `sh title=x` work
+too. The grammars are compiled into the binary and each is loaded on first use; the block
+is highlighted as a whole (so a string or comment spanning lines is right) and cached until
+its text changes. Any other language, or a block its grammar cannot parse, is shown in the
+plain code colour. Highlighting is the reading pane's only: the editor is a plain text box
+(§10.6). Raw text is
 never hidden: `#`, `-`, `**` and link targets stay on screen, dimmed. `zr` shows exact
 source, frontmatter included.
 
@@ -1298,7 +1309,8 @@ recorded per node as "non-canonical", which `notes check` reports and touching r
 
 ### 15.4 Dependencies
 
-`ratatui`, `crossterm`, `tui-textarea` (built-in editor), `notify` (watcher), `jiff`
+`ratatui`, `crossterm`, `tui-textarea` (built-in editor), `notify` (watcher),
+`tree-sitter` + `tree-sitter-highlight` and the grammar crates of §10.9 (code highlighting), `jiff`
 (today's date), `clap`, `indexmap`, `nucleo` (fuzzy
 filter), `similar` (sequence alignment and diff3 for merge), `blake3`, `tempfile`,
 `unicode-normalization`, `unicode-width`, `directories` (XDG),

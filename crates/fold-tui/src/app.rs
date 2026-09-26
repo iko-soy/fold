@@ -21,6 +21,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod action;
+mod highlight;
 mod markdown;
 mod mouse;
 mod ui;
