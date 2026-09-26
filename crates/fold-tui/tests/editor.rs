@@ -1412,3 +1412,64 @@ fn an_item_typed_at_the_start_of_a_block_title_and_split_off_is_the_parents() {
     assert_eq!(root(&d), format!("# A\n\n- one\n- new\n{}\n- two\n", embed));
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
 }
+
+#[test]
+fn review_deleting_from_a_block_title_through_a_later_lines_end_deletes_the_block() {
+    // the mirror of deleting_whole_lines_up_to_a_block_titles_end_deletes_the_block:
+    // "- task" and "- two" selected from column 0 of "- task" through the end
+    // of "- two" and deleted; both lines go whole, so the block's title line
+    // is deleted and the block with it (§5.2), and leaving the editor saves
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- task\n- two\n- three\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    // "# A", "", "- one", "- task", "- two", "- three"
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    for k in [
+        KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+    ] {
+        app.handle_key(k);
+    }
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal", "the editor cannot be left:\n{}", draw(&mut app));
+    assert_eq!(root(&d), "# A\n\n- one\n\n- three\n");
+    assert!(!block.exists(), "the deleted block's file is still in the vault");
+}
+
+#[test]
+fn deleting_a_blocks_title_and_body_whole_deletes_the_block() {
+    // "- task" and its body selected from column 0 through the end of the
+    // body, normal keymap and vim `vj$d`: every line of the block goes, its
+    // title line with them, so the block does (§5.2); the empty line left
+    // is A's, and leaving the editor saves
+    for vim in [false, true] {
+        let (d, mut app, _embed, block) = editing_task_block_with_body();
+        if vim {
+            app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+            keys(&mut app, "0vj$d:wq⏎");
+        } else {
+            for k in [
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            ] {
+                app.handle_key(k);
+            }
+            keys(&mut app, "⎋");
+        }
+        assert_eq!(app.mode_pub(), "normal", "vim {}:\n{}", vim, draw(&mut app));
+        assert_eq!(root(&d), "# A\n\n- one\n\n- two\n", "vim {}", vim);
+        assert!(!block.exists(), "vim {}: the deleted block's file is still in the vault", vim);
+    }
+}

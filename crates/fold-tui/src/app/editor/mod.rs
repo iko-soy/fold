@@ -441,8 +441,10 @@ impl Editor {
     /// line `a`, unless the range starts at column 0 and leaves some of line
     /// `b`, or ends at its start (short of the end of the text): then line
     /// `b` is what is left. A range from column 0 through the end of line
-    /// `b` deletes it whole, so a nested block's title line deleted that way
-    /// deletes the block.
+    /// `b` deletes lines `a` to `b` whole, and the empty line left keeps the
+    /// tag of a block whose title line was not among them (`kept`), so a
+    /// nested block's title line deleted that way deletes the block,
+    /// whichever end of the range it is at.
     pub fn delete(&mut self, a: Pos, b: Pos) -> String {
         let (a, mut b) = order(a, b);
         if b.line >= self.lines() {
@@ -463,12 +465,40 @@ impl Editor {
             self.buf.set_line(a.line, rest.to_string());
             return gone;
         }
+        let whole = (a.col == 0 && a.line < b.line).then(|| self.kept(a.line, b.line));
         let joined = format!("{}{}", &first[..byte(&first, a.col)], rest);
         for l in (a.line + 1..=b.line).rev() {
             self.buf.delete_line(l);
         }
         self.buf.set_line(a.line, joined);
+        if let Some(o) = whole {
+            let was = std::mem::replace(&mut self.buf.lines[a.line].owner, o);
+            self.buf.mark_dirty(was);
+            self.buf.mark_dirty(o);
+        }
         gone
+    }
+
+    /// The block the empty line left where lines `l1..=l2` are deleted whole
+    /// belongs to: one whose title line (§5.2) is not among them — line
+    /// `l1`'s, else line `l2`'s, else the block they sit in.
+    fn kept(&self, l1: usize, l2: usize) -> Owner {
+        let titles = self.titles();
+        let gone = |o: Owner| {
+            self.buf.owners.get(&o).is_some_and(|i| i.parent.is_some())
+                && titles.get(&o).is_some_and(|t| (l1..=l2).contains(t))
+        };
+        let (mut o, last) = (self.buf.lines[l1].owner, self.buf.lines[l2].owner);
+        if gone(o) && !gone(last) {
+            return last;
+        }
+        while gone(o) {
+            match self.buf.owners.get(&o).and_then(|i| i.parent) {
+                Some(p) => o = p,
+                None => break,
+            }
+        }
+        o
     }
 
     /// Delete whole lines `l1..=l2`; returns them, each ending in `\n`.
