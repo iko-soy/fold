@@ -433,6 +433,12 @@ fn emit_node_with(o: &Tree, a: NRef, level: usize, indent: usize, kids: &str) ->
     let mut out = String::new();
     let ind = " ".repeat(indent);
     match n.kind {
+        // embeds stay unresolved here (§12.4): the line is the reference
+        // itself, in its own form (§4.7), never an empty title
+        Kind::Section | Kind::Item if n.embed.is_some() => {
+            out.push_str(&crate::render::embed_line(n, level, indent));
+            out.push('\n');
+        }
         Kind::Section => {
             out.push_str(&ind);
             out.push_str(&"#".repeat(level.max(1)));

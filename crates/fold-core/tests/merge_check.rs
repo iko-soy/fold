@@ -349,3 +349,45 @@ fn crlf_separated_text_is_not_flagged_or_padded() {
     let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
     assert_eq!(text, "# A\n\n- a\n\ntext\n");
 }
+
+#[test]
+fn merge_rewrite_keeps_embeds() {
+    // §12.4: embeds match by id and every node from O and T survives; a
+    // re-rendered merge (T adds a node) must not turn `![[id]]` into `- `
+    let o = format!("# A\n\n![[{}]]\n\n# B\n", BID);
+    let t = format!("# A\n\n![[{}]]\n\n# B\n\n- new\n", BID);
+    let out = merge::merge_texts(&o, &t, "d", "ts");
+    assert!(out.text.contains(&format!("![[{}]]", BID)), "{}", out.text);
+    assert!(out.text.contains("- new"), "{}", out.text);
+    // a T-only embed (block made on the other device) must survive too
+    let o2 = "# A\n\n- x\n";
+    let t2 = format!("# A\n\n- x\n![[{}]]\n", BID);
+    let out2 = merge::merge_texts(o2, &t2, "d", "ts");
+    assert!(out2.text.contains(&format!("![[{}]]", BID)), "{}", out2.text);
+    // heading form
+    let o3 = format!("# A\n\n## ![[{}]]\n\n# B\n", BID);
+    let t3 = format!("# A\n\n## ![[{}]]\n\n# B\n\n- new\n", BID);
+    let out3 = merge::merge_texts(&o3, &t3, "d", "ts");
+    assert!(out3.text.contains(&format!("## ![[{}]]", BID)), "{}", out3.text);
+    // idempotent (§12.4): merging T into the result again adds nothing
+    for (out, t) in [(&out, &t), (&out2, &t2), (&out3, &t3)] {
+        assert_eq!(merge::merge_texts(&out.text, t, "d", "ts").text, out.text);
+    }
+}
+
+#[test]
+fn sync_conflict_merge_keeps_embeds_in_the_merged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n\n# B\n", BID)).unwrap();
+    std::fs::write(dir.path().join("racfer~t.md"), format!("---\nid: {}\n---\n\n- t\n", BID)).unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        format!("# A\n\n![[{}]]\n\n# B\n\n- new\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert!(text.contains(&format!("![[{}]]", BID)), "{}", text);
+    assert!(text.contains("- new"), "{}", text);
+}
