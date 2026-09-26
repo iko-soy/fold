@@ -476,3 +476,76 @@ fn a_checkbox_click_toggles_the_row_clicked_when_the_save_first_adds_rows() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(root(&d), "# A\n- [ ] n\n\n- [x] t\n");
 }
+
+#[test]
+fn palette_from_the_editor_keeps_its_text() {
+    let (d, mut app) = app_with("# A\n\nbody\n");
+    typing(&mut app, "e");
+    for k in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        app.handle_key(KeyEvent::new(k, KeyModifiers::NONE));
+    }
+    typing(&mut app, "!");
+    assert!(app.editor_dirty());
+    // ☰ Commands in the top bar, before the 750 ms autosave, then Esc: the
+    // popup closes back to the editor it opened over (§10.2)
+    button(&mut app, Action::Palette);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "edit");
+    typing(&mut app, "?");
+    // and a pasted line goes into the editor only while it is on screen
+    button(&mut app, Action::Help);
+    app.handle_paste("pasted");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "edit");
+    button(&mut app, Action::Filter);
+    click(&mut app, Hit::Backdrop);
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\nbody!?\n");
+}
+
+#[test]
+fn editor_keys_from_the_palette_keeps_the_editor_and_its_text() {
+    let (d, mut app) = app_with("# A\n\nbody\n");
+    typing(&mut app, "e");
+    for k in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        app.handle_key(KeyEvent::new(k, KeyModifiers::NONE));
+    }
+    typing(&mut app, "!");
+    // ☰ → Editor keys, the documented way to change keymaps while editing
+    button(&mut app, Action::Palette);
+    typing(&mut app, "editor keys");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "edit", "switching keymaps leaves the editor open");
+    click(&mut app, Hit::Button(Action::EditDone, None));
+    assert_eq!(root(&d), "# A\n\nbody!\n");
+}
+
+#[test]
+fn resolving_conflicts_from_the_editor_saves_and_leaves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n\nbody\n\n- [ ] task\n").unwrap();
+    std::fs::write(dir.path().join("root.sync-conflict-20260912-100000-phone.md"), "# A\n\nbody\n\n- [x] task\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    drop(v);
+    let mut app = App::new(dir.path()).unwrap();
+    app.show_reading = true;
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    typing(&mut app, "ejjA!");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.cursor_block() && app.editor_dirty(), "Vim normal mode, unsaved");
+    // the status bar's ⚠ opens the conflict view, which replaces the editor:
+    // no editor is left behind it, holding the terminal's block cursor
+    button(&mut app, Action::ResolveConflicts);
+    assert_eq!(app.mode_pub(), "conflict");
+    assert!(!app.cursor_block());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "normal");
+    assert!(root(&dir).contains("body!"), "{}", root(&dir));
+    // nothing is left behind the outline: `e` opens a fresh editor
+    typing(&mut app, "e");
+    assert_eq!(app.mode_pub(), "edit");
+    assert!(!app.editor_dirty());
+}

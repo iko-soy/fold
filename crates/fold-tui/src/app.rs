@@ -325,8 +325,10 @@ impl App {
                 match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
                     Ok(outcomes) => {
                         self.say(format!("merged: {}", outcomes.join("; ")));
-                        self.mode = Mode::Conflict;
-                        self.conflict_idx = 0;
+                        if self.editor.is_none() || self.close_editor() {
+                            self.mode = Mode::Conflict;
+                            self.conflict_idx = 0;
+                        }
                     }
                     Err(e) => self.say(format!("merge error: {}", e)),
                 }
@@ -811,6 +813,14 @@ impl App {
 
     /// Open the built-in editor over a node's subtree (§10.6).
     fn open_editor_on(&mut self, target: NRef) {
+        // an editor already open saves first; one whose save is refused
+        // stays, with its text
+        if !self.save_editor("switch") {
+            return;
+        }
+        if let Some(ed) = self.editor.take() {
+            self.edit_clip = ed.clip;
+        }
         let buf = fold_core::edit::open_editor(&self.vault, target);
         self.editor = Some(editor::Editor::new(buf, self.edit_keys, self.edit_clip.clone()));
         if self.mode != Mode::Edit {
@@ -1000,7 +1010,7 @@ impl App {
         if let Some(p) = self.prompt.as_mut() {
             p.text.push_str(text.lines().next().unwrap_or(""));
             self.refresh_picks();
-        } else if let Some(ed) = self.editor.as_mut() {
+        } else if let (Mode::Edit, Some(ed)) = (self.mode, self.editor.as_mut()) {
             ed.paste_text(text);
             self.edit_last_key = Instant::now();
         } else if self.mode == Mode::Filter {
@@ -1071,7 +1081,7 @@ impl App {
     pub fn key_props(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.props_sel + 1 < self.props_rows.len() {
@@ -1291,6 +1301,10 @@ impl App {
             self.say("no conflicts");
             return;
         }
+        // the view replaces the editor, which saves and closes first
+        if self.editor.is_some() && !self.close_editor() {
+            return;
+        }
         self.mode = Mode::Conflict;
         self.conflict_idx = 0;
     }
@@ -1426,7 +1440,7 @@ impl App {
                     key.code,
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
                 ) {
-                    self.mode = Mode::Normal;
+                    self.mode = self.base_mode();
                 }
             }
             Mode::Conflict => self.key_conflict(key),
@@ -1949,7 +1963,7 @@ impl App {
         let hits = self.palette_hits();
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.palette.clear();
             }
             KeyCode::Up => self.palette_sel = self.palette_sel.saturating_sub(1),
@@ -1960,7 +1974,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let chosen = hits.get(self.palette_sel).copied();
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.palette.clear();
                 self.palette_sel = 0;
                 if let Some(a) = chosen {
@@ -2161,6 +2175,16 @@ impl App {
         }
     }
 
+    /// The mode under a popup (§10.2): the editor if one is open, since a
+    /// popup opened over it closes back to it, else normal.
+    fn base_mode(&self) -> Mode {
+        if self.editor.is_some() {
+            Mode::Edit
+        } else {
+            Mode::Normal
+        }
+    }
+
     /// Close whatever is on top: a menu, a prompt, then a popup mode.
     fn close_top(&mut self) {
         if self.ui.menu.take().is_some() {
@@ -2174,15 +2198,15 @@ impl App {
                 self.close_editor();
             }
             Mode::Filter => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.filter.clear();
                 self.filter_rows.clear();
             }
             Mode::Picker => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.palette.clear();
             }
-            Mode::Props | Mode::Help | Mode::Conflict => self.mode = Mode::Normal,
+            Mode::Props | Mode::Help | Mode::Conflict => self.mode = self.base_mode(),
             Mode::Normal => {}
         }
     }
