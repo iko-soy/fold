@@ -243,14 +243,24 @@ impl Vault {
             .collect()
     }
 
-    /// Move a file to the trash (§11.5) and remove it from the vault.
+    /// Move a file to the trash (§11.5) and remove it from the vault. Only
+    /// that file leaves the index: the others are not read again, so a
+    /// change another program made to one of them (a sync) is not taken in
+    /// as part of the operation, nor into its op-log entry (§10.10).
     pub fn trash_file(&mut self, file: usize) -> std::io::Result<()> {
         let path = self.tree.files[file].path.clone();
         let trash = trash_dir();
         std::fs::create_dir_all(&trash)?;
         let target = trash_target(&trash, &path);
         move_file(&self.dir.join(&path), &target)?;
-        self.reload()?;
+        self.tree.files.remove(file);
+        // the files after it move down one place
+        for (fi, f) in self.tree.files.iter_mut().enumerate().skip(file) {
+            for n in &mut f.nodes {
+                n.file = fi;
+            }
+        }
+        self.tree.restitch();
         Ok(())
     }
 

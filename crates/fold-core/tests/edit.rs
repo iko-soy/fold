@@ -811,3 +811,35 @@ fn review_external_edit_of_the_zoomed_node_never_lands_on_an_identical_one() {
         "# W\n\n- call mom\n\n# X\n\n- call mom tomorrow\n\n# Y\n\n- call mom, from phone\n"
     );
 }
+
+#[test]
+fn review_undoing_an_editor_save_leaves_another_files_sync_alone() {
+    // §10.10: an op-log entry holds exactly the files the operation
+    // changed. An editor save that deletes a nested block trashes its file,
+    // and the trash reloads every file: a sync to another block's file not
+    // reloaded yet must not become part of the save's entry, or undoing
+    // the save writes that file's old text back over the sync
+    let (d, mut v) = vault_with("# A\n\n- task\n\n# N\n\n- note\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    ops::make_block(&mut v, t).unwrap();
+    let n = v.find_by_path(&["N".into(), "note".into()]).unwrap();
+    let note_id = ops::make_block(&mut v, n).unwrap();
+    let note = d.path().join(&v.tree.files[v.tree.block_by_id(&note_id).unwrap().0].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.delete_line(i);
+    let synced = std::fs::read_to_string(&note).unwrap().replace("- note", "- note, from phone");
+    std::fs::write(&note, &synced).unwrap();
+    // what the app does on a save (§10.10)
+    buf.rebase_dirty(&mut v);
+    let snap = ops::Snapshot::take(&v, "edit");
+    buf.save_all(&mut v).unwrap();
+    let inv = ops::Inverse::since(snap, &v).unwrap();
+    inv.undo(&mut v).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&note).unwrap(),
+        synced,
+        "undoing the save reverted another device's change to a file it never touched"
+    );
+}
