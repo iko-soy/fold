@@ -468,3 +468,33 @@ fn merge_with_missing_base_keeps_theirs_frontmatter() {
     assert!(outcomes.iter().any(|o| o.contains("left alone")), "{:?}", outcomes);
     assert!(dir.path().join(c).exists() && !dir.path().join("readme.md").exists());
 }
+
+#[test]
+fn merge_places_insertions_by_their_neighbours() {
+    // §12.4: a node present on one side only is an insertion, placed
+    // relative to its matched neighbours — `new` sits between `a` and `b`
+    let o = "# A\n\n- a\n- b\n- c\n";
+    let t = "# A\n\n- a\n- new\n- b\n- c\n";
+    let out = merge::merge_texts(o, t, "dev", "ts");
+    assert_eq!(out.conflicts, 0, "{}", out.text);
+    let p = |s: &str| out.text.find(s).unwrap();
+    assert!(p("- a") < p("- new") && p("- new") < p("- b"), "{}", out.text);
+    // one inserted after the text that follows its neighbour in T stays
+    // after that text, so merging T in again changes nothing
+    let o = "# P\n\n- a\n\nnote\n";
+    let t = "# P\n\n- a\n\nnote\n\n- new\n";
+    let out = merge::merge_texts(o, t, "dev", "ts");
+    assert_eq!(out.conflicts, 0, "{}", out.text);
+    assert_eq!(out.text, t);
+}
+
+#[test]
+fn merge_places_inserted_sections_by_their_neighbours() {
+    // the same for a section: `B` sits between `A` and `C`, not last
+    let o = "# A\n\n# C\n";
+    let t = "# A\n\n# B\n\n# C\n";
+    let out = merge::merge_texts(o, t, "dev", "ts");
+    assert_eq!(out.conflicts, 0, "{}", out.text);
+    let p = |s: &str| out.text.find(s).unwrap();
+    assert!(p("# A") < p("# B") && p("# B") < p("# C"), "{}", out.text);
+}

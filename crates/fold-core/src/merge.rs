@@ -234,9 +234,10 @@ fn merge_children(
 ) -> String {
     let o_kids = o.resolved_children(op);
     let t_kids = t.resolved_children(tp);
-    // match: embed by id, else by exact title among unmatched siblings
-    let mut t_used = vec![false; t_kids.len()];
-    let mut pairs: Vec<(Option<NRef>, Option<NRef>)> = Vec::new();
+    // match: embed by id, else by exact title among unmatched siblings;
+    // `t_match[i]` is the O kid that T kid `i` matched
+    let mut t_match: Vec<Option<usize>> = vec![None; t_kids.len()];
+    let mut pairs: Vec<(NRef, Option<NRef>)> = Vec::new();
     // a block file's root is the same node on both sides, whatever its
     // title: match it by the file's id (§12.4 rule 1)
     let file_id = |tr: &Tree, r: NRef| tr.node(r).block.as_ref().and_then(|b| b.id.clone());
@@ -246,18 +247,18 @@ fn merge_children(
         }
         _ => None,
     };
-    for &ok in &o_kids {
+    for (j, &ok) in o_kids.iter().enumerate() {
         let on = o.node(ok);
         if let Some((rok, rtk)) = root_pair {
             if ok == rok {
-                t_used[0] = true;
-                pairs.push((Some(ok), Some(rtk)));
+                t_match[0] = Some(j);
+                pairs.push((ok, Some(rtk)));
                 continue;
             }
         }
         let mut found = None;
         for (i, &tk) in t_kids.iter().enumerate() {
-            if t_used[i] {
+            if t_match[i].is_some() {
                 continue;
             }
             let tn = t.node(tk);
@@ -274,21 +275,40 @@ fn merge_children(
             }
         }
         if let Some(i) = found {
-            t_used[i] = true;
-            pairs.push((Some(ok), Some(t_kids[i])));
-        } else {
-            pairs.push((Some(ok), None));
+            t_match[i] = Some(j);
         }
+        pairs.push((ok, found.map(|i| t_kids[i])));
     }
+    // T-only nodes are insertions, placed relative to their matched
+    // neighbours (§12.4): after the O partner of the nearest matched node
+    // before them in T — and after O's text there too, when T has text
+    // between the two — or first, when no matched node precedes them
+    let t_trailing = trailing_runs(t, tp);
+    let mut first: Vec<NRef> = Vec::new();
+    let mut after_node: Vec<Vec<NRef>> = vec![Vec::new(); o_kids.len()];
+    let mut after_text: Vec<Vec<NRef>> = vec![Vec::new(); o_kids.len()];
+    let mut anchor: Option<(usize, usize)> = None; // (T kid, its O kid)
     for (i, &tk) in t_kids.iter().enumerate() {
-        if !t_used[i] {
-            pairs.push((None, Some(tk)));
+        match (t_match[i], anchor) {
+            (Some(j), _) => anchor = Some((i, j)),
+            (None, None) => first.push(tk),
+            (None, Some((ti, j))) => {
+                let text_between = t_trailing
+                    .iter()
+                    .any(|&(pos, sp)| (ti..i).contains(&pos) && !run_lines(t, tp, sp).is_empty());
+                if text_between {
+                    after_text[j].push(tk);
+                } else {
+                    after_node[j].push(tk);
+                }
+            }
         }
     }
+    ctx.insertions += t_match.iter().filter(|m| m.is_none()).count();
+    let inserted = |&b: &NRef| Piece::Node(t.node(b).kind, emit_subtree(t, b, level, indent));
     // Emit: matched pairs merge field-by-field; single-sided nodes are
     // insertions; differing fields raise conflict pairs (§12.4). O's text
-    // children stay where O has them; T-only nodes are placed by the
-    // ordering rule (§3.1): items before the first section, sections last.
+    // children stay where O has them.
     let mut pieces: Vec<Piece> = Vec::new();
     if o.node(op).kind == Kind::Root {
         // the root's own text: O's, plus T's when it differs (never lost)
@@ -302,42 +322,27 @@ fn merge_children(
             }
         }
     }
+    pieces.extend(first.iter().map(inserted));
     let o_trailing = trailing_runs(o, op);
-    let mut t_items: Vec<Piece> = Vec::new();
-    let mut t_sections: Vec<Piece> = Vec::new();
-    for (ok, tk) in pairs {
-        match (ok, tk) {
-            (Some(a), tk) => {
-                let text = match tk {
-                    Some(b) => merge_pair(o, t, a, b, ctx, level, indent),
-                    None => emit_subtree(o, a, level, indent),
-                };
-                pieces.push(Piece::Node(o.node(a).kind, text));
-                let j = o_kids.iter().position(|&k| k == a).unwrap_or(usize::MAX);
-                for (_, sp) in o_trailing.iter().filter(|(pos, _)| *pos == j) {
-                    pieces.push(Piece::Text(emit_text(o, op, *sp, indent)));
-                }
-            }
-            (None, Some(b)) => {
-                ctx.insertions += 1;
-                let piece = Piece::Node(t.node(b).kind, emit_subtree(t, b, level, indent));
-                if t.node(b).kind == Kind::Section {
-                    t_sections.push(piece);
-                } else {
-                    t_items.push(piece);
-                }
-            }
-            (None, None) => {}
+    for (j, (a, tk)) in pairs.into_iter().enumerate() {
+        let text = match tk {
+            Some(b) => merge_pair(o, t, a, b, ctx, level, indent),
+            None => emit_subtree(o, a, level, indent),
+        };
+        pieces.push(Piece::Node(o.node(a).kind, text));
+        pieces.extend(after_node[j].iter().map(inserted));
+        for (_, sp) in o_trailing.iter().filter(|(pos, _)| *pos == j) {
+            pieces.push(Piece::Text(emit_text(o, op, *sp, indent)));
         }
+        pieces.extend(after_text[j].iter().map(inserted));
     }
-    let first_section = pieces
-        .iter()
-        .position(|p| matches!(p, Piece::Node(Kind::Section, _)))
-        .unwrap_or(pieces.len());
-    let tail = pieces.split_off(first_section);
-    pieces.extend(t_items);
-    pieces.extend(tail);
-    pieces.extend(t_sections);
+    // clamped by the ordering rule (§3.1): an inserted item or text goes no
+    // later than just before the first section, an inserted section no
+    // earlier than just after the last item; O's own order already obeys it
+    let (mut pieces, sections): (Vec<Piece>, Vec<Piece>) = pieces
+        .into_iter()
+        .partition(|p| !matches!(p, Piece::Node(Kind::Section, _)));
+    pieces.extend(sections);
     join_pieces(pieces)
 }
 
