@@ -552,14 +552,41 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
             continue;
         }
         let theirs = std::fs::read_to_string(&cpath)?;
-        let ours = std::fs::read_to_string(&bpath).unwrap_or_default();
+        let tid = crate::parse::parse_frontmatter(&theirs)
+            .and_then(|f| f.props.get("id").cloned())
+            .and_then(|v| Id::parse(&v));
+        // X.md gone: a block renamed since is still found by its id (§6.4)
+        let bpath = match tid.as_ref().and_then(|id| vault.tree.block_by_id(id)) {
+            Some(r) if !bpath.exists() => {
+                vault.dir.join(&vault.tree.node(r).block.as_ref().unwrap().path)
+            }
+            _ => bpath,
+        };
+        let ours = match std::fs::read_to_string(&bpath) {
+            Ok(text) => text,
+            // nothing to merge against: T wins as it is, frontmatter and
+            // all, rather than being merged into an empty O that has none
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && (parsed || tid.is_some()) => {
+                outcomes.push(format!("{}: {} missing, keeping theirs", cfile, base));
+                if !dry_run {
+                    std::fs::rename(&cpath, &bpath)?;
+                }
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                outcomes.push(format!("{}: not a block file, left alone", cfile));
+                continue;
+            }
+            // an O that cannot be read is never overwritten
+            Err(e) => {
+                outcomes.push(format!("{}: cannot read {}: {}, left alone", cfile, base, e));
+                continue;
+            }
+        };
         // device + timestamp from the filename
         let (device, stamp) = parse_conflict_name(&cfile);
         // id check: differing ids mean a prefix collision, not a conflict (§12.2)
         let oid = crate::parse::parse_frontmatter(&ours)
-            .and_then(|f| f.props.get("id").cloned())
-            .and_then(|v| Id::parse(&v));
-        let tid = crate::parse::parse_frontmatter(&theirs)
             .and_then(|f| f.props.get("id").cloned())
             .and_then(|v| Id::parse(&v));
         match (&oid, &tid) {

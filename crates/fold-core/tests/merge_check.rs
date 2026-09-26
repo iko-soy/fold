@@ -432,3 +432,39 @@ fn merge_leaves_ignored_files_alone() {
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn merge_with_missing_base_keeps_theirs_frontmatter() {
+    // X.md is gone (deleted, or its deletion synced in first): with no O to
+    // merge against, T must survive with its frontmatter (id, due) intact
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
+    let theirs = format!("---\nid: {}\ndue: 2026-09-20\n---\n\n- t\n", BID);
+    let c = "racfer~t.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), &theirs).unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("racfer~t.md")).unwrap();
+    assert_eq!(text, theirs);
+    assert!(!dir.path().join(c).exists());
+    assert!(v.tree.block_by_id(&fold_core::Id::parse(BID).unwrap()).is_some());
+    // a block renamed since (§6.4) is still O: found by its id, merged
+    // into, never duplicated
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
+    std::fs::write(dir.path().join("racfer~new.md"), format!("---\nid: {}\n---\n\n- [ ] t\n", BID)).unwrap();
+    std::fs::write(dir.path().join(c), format!("---\nid: {}\n---\n\n- [x] t\n", BID)).unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(!dir.path().join("racfer~t.md").exists());
+    assert_eq!(merge::conflict_pairs(&v).len(), 1, "{}", v.tree.files[0].text);
+    // the copy of a foreign file that is gone is not ours either (§4.1)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    let c = "readme.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), "* [x] first\n").unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(outcomes.iter().any(|o| o.contains("left alone")), "{:?}", outcomes);
+    assert!(dir.path().join(c).exists() && !dir.path().join("readme.md").exists());
+}
