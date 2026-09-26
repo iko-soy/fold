@@ -11,9 +11,9 @@ use unicode_width::UnicodeWidthStr;
 pub struct Styled {
     pub line: Line<'static>,
     /// Column of the checkbox glyph, if the line is a task.
-    pub check: Option<u16>,
+    pub check: Option<usize>,
     /// Columns `[start, end)` of the first link, if any.
-    pub link: Option<(u16, u16)>,
+    pub link: Option<(usize, usize)>,
 }
 
 /// Style one line of the reading pane. `in_fence` is whether the line sits
@@ -80,9 +80,9 @@ pub fn style_line(l: &str, in_fence: bool) -> Styled {
 #[derive(Default)]
 struct Out {
     spans: Vec<Span<'static>>,
-    col: u16,
-    check: Option<u16>,
-    link: Option<(u16, u16)>,
+    col: usize,
+    check: Option<usize>,
+    link: Option<(usize, usize)>,
 }
 
 impl Out {
@@ -90,7 +90,7 @@ impl Out {
         if s.is_empty() {
             return;
         }
-        self.col += s.width() as u16;
+        self.col += s.width();
         self.spans.push(Span::styled(s.to_string(), style));
     }
 

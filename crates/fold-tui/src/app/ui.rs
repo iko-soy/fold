@@ -193,8 +193,8 @@ struct Drawn {
     doc: Option<usize>,
     line: Line<'static>,
     code: bool,
-    check: Option<u16>,
-    link: Option<(u16, u16)>,
+    check: Option<usize>,
+    link: Option<(usize, usize)>,
 }
 
 /// Break a styled line into screen rows at `cols` columns (§10.1): each row
@@ -757,14 +757,14 @@ impl App {
             };
             let parts = wrap_styled(&styled.line, cols, code[si].is_some());
             for (line, row) in parts {
-                let within = |c: u16| (c as usize) >= row.start && (c as usize) < row.end.max(row.start + 1);
-                let at = |c: u16| (row.indent + c as usize - row.start) as u16;
+                let within = |c: usize| c >= row.start && c < row.end.max(row.start + 1);
+                let at = |c: usize| row.indent + c - row.start;
                 rows.push(Drawn {
                     doc: *doc_line,
                     line,
                     code: code[si].is_some(),
                     check: styled.check.filter(|c| within(*c)).map(at),
-                    link: styled.link.filter(|(a, _)| within(*a)).map(|(a, b)| (at(a), at((b as usize).min(row.end) as u16))),
+                    link: styled.link.filter(|(a, _)| within(*a)).map(|(a, b)| (at(a), at(b.min(row.end)))),
                 });
             }
         }
@@ -797,11 +797,13 @@ impl App {
             buf.set_line(inner.x, y, &d.line, inner.width);
             let Some(di) = d.doc else { continue };
             self.ui.push(line_rect, Hit::DocLine(di));
-            if let Some(c) = d.check {
-                self.ui.push(Rect { x: inner.x + c, y, width: 1, height: 1 }, Hit::DocCheck(di));
+            // only what is on screen: a line cut at the edge can be far wider
+            let w = inner.width as usize;
+            if let Some(c) = d.check.filter(|c| *c < w) {
+                self.ui.push(Rect { x: inner.x + c as u16, y, width: 1, height: 1 }, Hit::DocCheck(di));
             }
-            if let Some((a, b)) = d.link {
-                self.ui.push(Rect { x: inner.x + a, y, width: b.saturating_sub(a).max(1), height: 1 }, Hit::Link(di));
+            if let Some((a, b)) = d.link.filter(|(a, _)| *a < w) {
+                self.ui.push(Rect { x: inner.x + a as u16, y, width: b.min(w).saturating_sub(a).max(1) as u16, height: 1 }, Hit::Link(di));
             }
         }
         if rows.len() > view {

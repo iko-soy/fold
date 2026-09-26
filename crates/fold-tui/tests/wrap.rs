@@ -164,3 +164,20 @@ fn tabs_in_code_keep_their_indentation_in_the_editor() {
     let p = t.get_cursor_position().unwrap();
     assert_eq!((p.x, p.y), (col(&s[y], "indented"), y as u16), "editor: {:#?}", s);
 }
+
+#[test]
+fn a_very_long_line_does_not_overflow_the_styler() {
+    // over 65,535 columns in all, with a stray `*` so the styler pushes it in
+    // several pieces, and a link 65,541 columns in
+    let (_d, mut app) = app_with(&format!("# A\n\n{} * {} [docs](x)\n", "a".repeat(40000), "b".repeat(25536)));
+    let s = draw(&mut app);
+    assert!(s.iter().any(|l| l.contains("aaaa")), "{:#?}", s);
+    // zw: cut at the edge; the link is far off screen, not wrapped round
+    // into a u16 over the start of the line
+    keys(&mut app, "zw");
+    let s = draw(&mut app);
+    let y = s.iter().position(|l| l.contains("aaaa")).unwrap();
+    for x in 0..W {
+        assert_ne!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+    }
+}
