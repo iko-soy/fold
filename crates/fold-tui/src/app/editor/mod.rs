@@ -857,18 +857,9 @@ impl Editor {
             let mut fence: Option<(char, usize)> = None;
             for l in 0..self.lines() {
                 let text = self.line(l);
-                let t = text.trim_start();
-                let fc = t.chars().next().filter(|c| *c == '`' || *c == '~');
-                let n = fc.map(|c| t.chars().take_while(|x| *x == c).count()).unwrap_or(0);
-                let is_fence = n >= 3;
-                let code = fence.is_some() && !is_fence;
-                if is_fence {
-                    fence = match fence {
-                        Some((c, m)) if Some(c) == fc && n >= m => None,
-                        None => Some((fc.unwrap(), n)),
-                        keep => keep,
-                    };
-                }
+                // fences as the parser reads them (§3.3); the fences
+                // themselves are not code
+                let code = !fold_core::parse::fence_transition(text, &mut fence) && fence.is_some();
                 codes.push(code);
                 rows.push(match self.wrap_cols {
                     Some(cols) => wrap::wrap(text, cols, code),

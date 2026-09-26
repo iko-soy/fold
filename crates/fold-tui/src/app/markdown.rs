@@ -17,20 +17,47 @@ pub struct Styled {
     pub link: Option<(usize, usize)>,
 }
 
-/// Style one line of the reading pane. `in_fence` is whether the line sits
-/// inside a fenced code block (the caller tracks fences).
-pub fn style_line(l: &str, in_fence: bool) -> Styled {
+/// Where a line stands to fenced code (§10.9).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Code {
+    /// Markdown.
+    Text,
+    /// A fence that opens or closes a block.
+    Fence,
+    /// A line inside a block.
+    Inside,
+}
+
+/// Where each of a run of lines stands to fenced code, reading fences as
+/// the parser does (§3.3), so what is drawn as code is what is parsed as
+/// code: `` ```a`b `` is inline code, and ```` ``` x ```` closes nothing.
+pub fn fences<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<Code> {
+    let mut open = None;
+    lines
+        .into_iter()
+        .map(|l| match fold_core::parse::fence_transition(l, &mut open) {
+            true => Code::Fence,
+            false if open.is_some() => Code::Inside,
+            false => Code::Text,
+        })
+        .collect()
+}
+
+/// Style one line of the reading pane; `code` is where it stands to fenced
+/// code (the caller tracks fences with `fences`).
+pub fn style_line(l: &str, code: Code) -> Styled {
     let mut out = Out::default();
     let indent_len = l.len() - l.trim_start().len();
     let (indent, rest) = l.split_at(indent_len);
     out.push(indent, Style::default());
 
-    if in_fence {
+    if code == Code::Inside {
         out.push(rest, Style::default().fg(theme::CODE));
         return out.finish();
     }
-    if rest.starts_with("```") || rest.starts_with("~~~") {
-        let n = rest.chars().take_while(|&c| c == '`' || c == '~').count();
+    if code == Code::Fence {
+        let fc = rest.chars().next();
+        let n = rest.chars().take_while(|&c| Some(c) == fc).count();
         out.push(&rest[..n], Style::default().fg(theme::DIM));
         out.push(&rest[n..], Style::default().fg(theme::ACCENT).add_modifier(Modifier::ITALIC));
         return out.finish();
@@ -217,22 +244,22 @@ mod tests {
 
     #[test]
     fn nothing_is_hidden_but_checkboxes_become_glyphs() {
-        let s = style_line("- [ ] Buy **milk** and `oat`", false);
+        let s = style_line("- [ ] Buy **milk** and `oat`", Code::Text);
         assert_eq!(text(&s), "- ☐ Buy **milk** and `oat`");
         assert_eq!(s.check, Some(2));
-        let s = style_line("#### [x] Snapshot policy", false);
+        let s = style_line("#### [x] Snapshot policy", Code::Text);
         assert_eq!(text(&s), "#### ☑ Snapshot policy");
         assert_eq!(s.check, Some(5));
     }
 
     #[test]
     fn links_report_their_columns() {
-        let s = style_line("see [docs](https://x.org) now", false);
+        let s = style_line("see [docs](https://x.org) now", Code::Text);
         assert_eq!(s.link, Some((5, 9)));
-        let s = style_line("  https://a.b/c tail", false);
+        let s = style_line("  https://a.b/c tail", Code::Text);
         assert_eq!(s.link, Some((2, 15)));
         // character columns, however wide the characters are drawn
-        let s = style_line("漢字 [docs](x)", false);
+        let s = style_line("漢字 [docs](x)", Code::Text);
         assert_eq!(s.link, Some((4, 8)));
     }
 }

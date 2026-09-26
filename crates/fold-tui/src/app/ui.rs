@@ -2,7 +2,7 @@
 //! is drawn, so what the pointer can do is exactly what is on screen.
 
 use super::action::{Action, NODE_MENU};
-use super::markdown::style_line;
+use super::markdown::{fences, style_line, Code};
 use super::{App, Focus, Mode, PromptAction};
 use fold_core::ops::Drop;
 use fold_core::parse::{Kind, TaskState};
@@ -742,7 +742,8 @@ impl App {
         self.ui.reading_view = view;
         // every line styled, then laid out in screen rows (§10.1)
         let texts: Vec<&str> = shown.iter().map(|(_, t)| t.as_str()).collect();
-        let code = self.code_lines(&texts);
+        let fenced = fences(texts.iter().copied());
+        let code = self.code_lines(&texts, &fenced);
         let cols = if self.wrap { inner.width as usize } else { usize::MAX / 2 };
         let mut rows: Vec<Drawn> = Vec::new();
         for (si, (doc_line, text)) in shown.iter().enumerate() {
@@ -755,7 +756,7 @@ impl App {
             } else {
                 match &code[si] {
                     Some(spans) => super::markdown::Styled { line: Line::from(spans.clone()), check: None, link: None },
-                    None => style_line(text, false),
+                    None => style_line(text, fenced[si]),
                 }
             };
             let parts = wrap_styled(&styled.line, cols, code[si].is_some());
@@ -830,33 +831,23 @@ impl App {
 
     /// The lines inside fenced code blocks, styled: highlighted by the
     /// fence's language (§10.9), else in the plain code colour. `None` for
-    /// every line that is not code, fences included.
-    fn code_lines(&mut self, texts: &[&str]) -> Vec<Option<Vec<Span<'static>>>> {
+    /// every line that is not code, fences included. `fences` is where
+    /// each line stands to fenced code, as the parser reads it.
+    fn code_lines(&mut self, texts: &[&str], fences: &[Code]) -> Vec<Option<Vec<Span<'static>>>> {
         let mut out: Vec<Option<Vec<Span<'static>>>> = vec![None; texts.len()];
         let mut i = 0;
         while i < texts.len() {
-            let t = texts[i].trim_start();
-            let indent = texts[i].len() - t.len();
-            let fc = match t.chars().next() {
-                Some(c @ ('`' | '~')) => c,
-                _ => {
-                    i += 1;
-                    continue;
-                }
-            };
-            let n = t.chars().take_while(|&c| c == fc).count();
-            if n < 3 {
+            if fences[i] != Code::Fence {
                 i += 1;
                 continue;
             }
+            let t = texts[i].trim_start();
+            let indent = texts[i].len() - t.len();
+            let fc = t.chars().next();
+            let n = t.chars().take_while(|&c| Some(c) == fc).count();
             let info = t[n..].trim().to_string();
-            // the block runs to a fence of the same character, at least as long
-            let end = (i + 1..texts.len())
-                .find(|&j| {
-                    let u = texts[j].trim_start();
-                    u.chars().take_while(|&c| c == fc).count() >= n && u.trim_end().chars().all(|c| c == fc)
-                })
-                .unwrap_or(texts.len());
+            // the block runs to its closing fence, or to the end
+            let end = (i + 1..texts.len()).find(|&j| fences[j] != Code::Inside).unwrap_or(texts.len());
             let body: Vec<&str> = texts[i + 1..end]
                 .iter()
                 .map(|l| {
@@ -1288,7 +1279,11 @@ impl App {
         ] {
             let text = render(&self.vault.tree, r, 1, true);
             let block = WBlock::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(color)).title(title);
-            let lines: Vec<Line> = text.lines().map(|l| style_line(&super::wrap::shown(l, 0, usize::MAX), false).line).collect();
+            let lines: Vec<Line> = text
+                .lines()
+                .zip(fences(text.lines()))
+                .map(|(l, code)| style_line(&super::wrap::shown(l, 0, usize::MAX), code).line)
+                .collect();
             f.render_widget(Paragraph::new(lines).block(block), rect);
         }
     }

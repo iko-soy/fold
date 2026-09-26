@@ -365,8 +365,9 @@ fn classify_title(raw: &str) -> Option<(usize, TitleInfo)> {
 /// Track fenced code blocks (§3.3) one line at a time: true when `raw` opens
 /// or closes one. Fences are CommonMark's: a backtick fence's info string
 /// holds no backtick (a line that starts with inline code is text), and a
-/// closing fence is followed by nothing but spaces or tabs.
-pub(crate) fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
+/// closing fence is followed by nothing but spaces or tabs. Public so that
+/// what the TUI draws as code is what the parser reads as code.
+pub fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
     let t = raw.trim_start_matches([' ', '\t']);
     let first = match t.chars().next() {
         Some(c) if c == '`' || c == '~' => c,
