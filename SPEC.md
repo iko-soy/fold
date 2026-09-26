@@ -978,8 +978,34 @@ app keeps track. Blocks are saved on their own:
 
 The pane's border shows the title of the block the cursor is in and a dot while something
 is unsaved, and lines of other blocks in the subtree are drawn a shade dimmer — the only
-hints that blocks exist. A click puts the cursor where it lands; the wheel scrolls.
-`Ctrl-c` or *Revert* discards changes made since the last save. Undo inside the editor is the editor's own; each automatic save is one
+hints that blocks exist. *Revert* (or `:q!`) discards changes made since the last save.
+
+**Keymaps.** The editor speaks one of three keymaps, over the same text, cursor, selection,
+clipboard and undo:
+
+- **normal** (the default): a conventional editor in the manner of micro. Always typing;
+  arrows, `Home`/`End`, `PgUp`/`PgDn`, `Ctrl-←/→` by word; `Shift` with any of them
+  selects; typing replaces the selection. `Ctrl-C`/`X`/`V` copy, cut, paste (with nothing
+  selected, the current line); `Ctrl-Z`/`Y` undo, redo; `Ctrl-A` select all; `Ctrl-K` cut
+  the line; `Ctrl-D` duplicate; `Alt-↑/↓` move lines; `Tab`/`Shift-Tab` indent;
+  `Ctrl-F` find, `Ctrl-N`/`Ctrl-P` next, previous; `Ctrl-S` save; `Ctrl-E` a `:` command;
+  `Esc` clears the selection, then leaves.
+- **vim**: normal, insert, visual and visual-line modes; counts; motions `h j k l w b e W
+  B E 0 ^ $ gg G { } % f t F T ; ,`; operators `d c y > <` with any motion, doubled for
+  lines, and text objects `iw aw i" a" i' a' i( a( i[ a[ i{ a{ i< a< ip ap`; `x X s S D C Y
+  r J ~ p P o O i a I A u Ctrl-R .`; `/ ? n N * #`; `ZZ`, `ZQ`.
+- **helix**: selection first — `w b e W B E` select, `x` selects (and extends by) lines,
+  `% ; Alt-;`, `f t F T`, `gg ge gh gl gs`, `mi` / `ma` + object, `v` to extend; `d c y p P
+  R r ~ > < J` act on the selection; `i a I A o O`; `u U`; `/ ? n N *`.
+
+All three take `:` commands — `:w` save, `:q` / `:wq` / `:x` done, `:q!` / `:e!` revert,
+`:N` go to line — and in all three a click puts the cursor where it lands, a drag
+selects, a double-click selects a word, the wheel scrolls, and text pasted into the
+terminal is inserted as typed. Copying also sets the system clipboard (OSC 52). Undo
+inside the editor is the editor's own; each save is still one entry in the op log (§10.10).
+
+The keymap is `$FOLD_KEYS` (`normal`, `vim`, `helix`), or `--keys`; the *Editor keys*
+action, or the `⌨` label in the editor's border, switches it for the session. Undo inside the editor is the editor's own; each automatic save is one
 entry in the session op log (§10.10). The box is not a Markdown editor and stays one.
 
 Properties are not text. `a`, or *Properties…* in the node menu, opens the **property
@@ -1211,7 +1237,7 @@ All commands take `--vault PATH` (default: `$NOTES_VAULT`, else the nearest ance
 
 | Command | Purpose |
 |---|---|
-| `notes` | open the TUI; creates `root.md` if the directory is empty (§4.1.1) |
+| `notes [--keys normal\|vim\|helix]` | open the TUI; creates `root.md` if the directory is empty (§4.1.1); `--keys` picks the editor's keymap (§10.6) |
 | `notes capture [TEXT] [--to TARGET] [--task]` | append to the inbox (stdin if no TEXT) |
 | `notes check [--fix]` | diagnostics with source spans (§15.7); `--fix` rewrites the vault in canonical form (§4.2) and repairs filenames (§6.4) |
 | `notes merge [--dry-run]` | process sync-conflict files non-interactively; list leftovers |
@@ -1238,6 +1264,8 @@ tools keep in configuration is:
 - the vault: `--vault PATH`, else `$NOTES_VAULT`, else the nearest ancestor of `$PWD`
   containing `root.md`, else `~/notes`;
 - the trash location: `$XDG_STATE_HOME/notes/trash/` (§11.5);
+- the editor's keymap: `--keys`, else `$FOLD_KEYS` (`normal`, `vim`, `helix`), else
+  `normal` (§10.6);
 - everything visual: fixed (§10.1) or a session toggle (`zd`, `zr`).
 
 The only thing the app keeps outside the vault is the trash.
@@ -1446,8 +1474,9 @@ task state; wiki-links between nodes and backlinks
 13. **Inbox by title.** Capture finds the inbox by the title `Inbox`. Renaming it means the
     next capture creates a new one. A hidden marker property would be the only setting.
 14. **No config file.** Presentation choices are fixed or session toggles; a config format, a
-    lookup order and a `notes config` command are not worth it. A real per-device need (a
-    colour-blind palette, say) would be one environment variable.
+    lookup order and a `notes config` command are not worth it. A real per-device need is
+    one environment variable: the editor's keymap is `$FOLD_KEYS` (§10.6), and a
+    colour-blind palette, say, would be another.
 15. **Windows.** Slugs and atomic writes are Windows-safe by design; nothing else is tested.
 16. **No links or query language in 1.0.** Embeds prove the id machinery, and links can be
     built on it without changing the file format, which is why `[[…]]` is reserved rather

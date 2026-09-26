@@ -110,10 +110,11 @@ pub struct Ui {
     pub last_edit_line: Option<usize>,
     pub edit_scroll: usize,
     pub edit_area: Rect,
+    /// The left button went down in the editor: moving selects.
+    pub edit_drag: bool,
     pub outline_view: usize,
     pub reading_view: usize,
     pub reading_len: usize,
-    pub edit_view: usize,
     /// Highlighted code blocks by (info string, code).
     pub highlight_cache: std::collections::HashMap<(String, String), Vec<Vec<Span<'static>>>>,
 }
@@ -403,7 +404,7 @@ impl App {
             .map(|r| self.vault.tree.files[r.0].path.clone())
             .unwrap_or_else(|| "root.md".into());
         let unsaved = self.mode == Mode::Edit
-            && self.edit_buf.as_ref().map(|b| !b.dirty.is_empty()).unwrap_or(false);
+            && self.editor_dirty();
         let buf = f.buffer_mut();
         buf.set_style(area, Style::default().bg(theme::BAR));
         let mut x = area.x + 1;
@@ -766,49 +767,99 @@ impl App {
     }
 
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
-        let Some(buf_) = &self.edit_buf else { return };
-        let owner = buf_.owner_at(self.edit_cursor.0);
-        let owner_title = buf_.owners.get(&owner).map(|o| o.title.clone()).unwrap_or_default();
-        let dirty = !buf_.dirty.is_empty();
+        let Some(ed) = &self.editor else { return };
+        let owner = ed.buf.owner_at(ed.cursor.line);
+        let owner_title = ed.buf.owners.get(&owner).map(|o| o.title.clone()).unwrap_or_default();
         let mut title = vec![
             Span::styled(" Editing ", Style::default().fg(theme::ACCENT)),
             Span::styled(owner_title, Style::default().add_modifier(Modifier::BOLD)),
+            if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) },
         ];
-        title.push(if dirty {
-            Span::styled(" ● ", Style::default().fg(theme::WARN))
-        } else {
-            Span::raw(" ")
-        });
+        let mode = ed.mode_name();
+        if !mode.is_empty() {
+            let bg = match mode {
+                "INSERT" => ratatui::style::Color::Green,
+                "NORMAL" => theme::ACCENT,
+                _ => ratatui::style::Color::Magenta,
+            };
+            title.push(Span::styled(format!(" {} ", mode), Style::default().bg(bg).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
+            title.push(Span::raw(" "));
+        }
+        let keys_label = ed.keys.name();
         let block = rounded(Line::from(title), true);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let room = area.width.saturating_sub(4) / 2;
-        self.buttons_right(f.buffer_mut(), area.x + area.width - 2, area.y, &[Action::EditDone, Action::EditRevert], None, room);
+        let start = self.buttons_right(f.buffer_mut(), area.x + area.width - 2, area.y, &[Action::EditDone, Action::EditRevert], None, room);
+        // the keymap, a click away from the next one
+        let label = format!(" ⌨ {} ", keys_label);
+        let lw = label.width() as u16;
+        if start > area.x + lw + 2 {
+            let r = Rect { x: start - lw - 1, y: area.y, width: lw, height: 1 };
+            let bg = if self.ui.hovered(r) { theme::BUTTON_HOVER } else { theme::BUTTON };
+            put(f.buffer_mut(), r.x, r.y, &label, lw, Style::default().bg(bg).fg(ratatui::style::Color::White));
+            self.ui.push(r, Hit::Button(Action::EditorKeys, None));
+        }
         self.ui.edit_area = inner;
         self.ui.push(inner, Hit::EditArea);
-        let view = inner.height as usize;
-        self.ui.edit_view = view;
-        let lines: Vec<(String, bool)> = {
-            let b = self.edit_buf.as_ref().unwrap();
-            b.lines.iter().map(|l| (l.text.clone(), l.owner == owner)).collect()
+        // a command, search or message takes the pane's last line
+        let ed = self.editor.as_ref().unwrap();
+        let bottom = match (&ed.cmdline, &ed.message) {
+            (Some(c), _) => Some((format!("{}{}", c.kind, c.text), true)),
+            (None, Some(m)) => Some((m.clone(), false)),
+            _ => None,
         };
-        let moved = self.ui.last_edit_line != Some(self.edit_cursor.0);
-        self.ui.last_edit_line = Some(self.edit_cursor.0);
-        follow(&mut self.ui.edit_scroll, self.edit_cursor.0, moved, view, lines.len());
+        let view = inner.height as usize - bottom.is_some() as usize;
+        let (cursor, sel, block_cur) = (ed.cursor, ed.selection(), ed.block_cursor());
+        let lines: Vec<(String, bool)> = ed.buf.lines.iter().map(|l| (l.text.clone(), l.owner == owner)).collect();
+        let moved = self.ui.last_edit_line != Some(cursor.line);
+        self.ui.last_edit_line = Some(cursor.line);
+        follow(&mut self.ui.edit_scroll, cursor.line, moved, view, lines.len());
+        if let Some(ed) = self.editor.as_mut() {
+            ed.page = view.max(1);
+        }
         let buf = f.buffer_mut();
         for (i, (text, own)) in lines.iter().enumerate().skip(self.ui.edit_scroll).take(view) {
             let y = inner.y + (i - self.ui.edit_scroll) as u16;
-            if i == self.edit_cursor.0 {
+            if i == cursor.line {
                 buf.set_style(Rect { x: inner.x, y, width: inner.width, height: 1 }, Style::default().bg(theme::HOVER));
             }
-            // lines of the block being edited are bright, the rest of the
-            // subtree is context
+            // the block being edited is bright, the rest of the subtree is
+            // context
             let style = if *own { Style::default() } else { Style::default().fg(ratatui::style::Color::Gray) };
             put(buf, inner.x, y, text, inner.width, style);
+            if let Some((s, e)) = sel {
+                if i >= s.line && i <= e.line {
+                    let len = text.chars().count();
+                    let from = if i == s.line { s.col } else { 0 };
+                    // a selected line end shows as one cell
+                    let to = if i == e.line { e.col } else { len + 1 };
+                    for col in from..to {
+                        let x = inner.x + col as u16;
+                        if x < inner.x + inner.width {
+                            buf[(x, y)].set_style(Style::default().bg(theme::SEL));
+                        }
+                    }
+                }
+            }
         }
-        let cx = inner.x + (self.edit_cursor.1 as u16).min(inner.width.saturating_sub(1));
-        let cy = inner.y + self.edit_cursor.0.saturating_sub(self.ui.edit_scroll) as u16;
-        if cy < inner.y + inner.height {
+        if let Some((text, input)) = bottom {
+            let y = inner.y + inner.height - 1;
+            let style = if input { Style::default() } else { Style::default().fg(theme::WARN) };
+            buf.set_style(Rect { x: inner.x, y, width: inner.width, height: 1 }, Style::default().bg(theme::BAR));
+            put(buf, inner.x, y, &text, inner.width, style.bg(theme::BAR));
+            if input {
+                let cx = inner.x + (text.width() as u16).min(inner.width.saturating_sub(1));
+                f.set_cursor_position((cx, y));
+                return;
+            }
+        }
+        if cursor.line >= self.ui.edit_scroll && cursor.line < self.ui.edit_scroll + view {
+            let cx = inner.x + (cursor.col as u16).min(inner.width.saturating_sub(1));
+            let cy = inner.y + (cursor.line - self.ui.edit_scroll) as u16;
+            if block_cur {
+                f.buffer_mut()[(cx, cy)].set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
             f.set_cursor_position((cx, cy));
         }
     }

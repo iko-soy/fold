@@ -125,7 +125,18 @@ impl App {
                 let doc = self.reading_doc();
                 self.open_link_under_cursor(&doc);
             }
-            Hit::EditArea => self.place_edit_cursor(x, y),
+            Hit::EditArea => {
+                let p = self.edit_pos(x, y);
+                if let Some(ed) = self.editor.as_mut() {
+                    if double {
+                        ed.select_word(p);
+                    } else {
+                        ed.click(p);
+                    }
+                }
+                self.ui.edit_drag = true;
+                self.edit_last_key = Instant::now();
+            }
             Hit::MenuItem(i) => self.run_menu_item(i),
             Hit::PaletteRow(i) => {
                 self.palette_sel = i;
@@ -160,6 +171,20 @@ impl App {
     }
 
     fn mouse_drag(&mut self, x: u16, y: u16) {
+        if self.ui.edit_drag {
+            // dragging past the top or bottom scrolls the editor
+            let area = self.ui.edit_area;
+            if y < area.y {
+                self.ui.edit_scroll = self.ui.edit_scroll.saturating_sub(1);
+            } else if y >= area.y + area.height {
+                self.ui.edit_scroll += 1;
+            }
+            let p = self.edit_pos(x, y);
+            if let Some(ed) = self.editor.as_mut() {
+                ed.drag_to(p);
+            }
+            return;
+        }
         if self.ui.resizing {
             let w = x.saturating_sub(self.pane_outline.x) + 1;
             self.ui.outline_width = Some(w.max(20));
@@ -200,6 +225,11 @@ impl App {
 
     fn mouse_up(&mut self) {
         self.ui.resizing = false;
+        if std::mem::take(&mut self.ui.edit_drag) {
+            if let Some(ed) = self.editor.as_mut() {
+                ed.end_drag();
+            }
+        }
         let press = self.ui.press.take();
         let drop = self.ui.drop.take();
         let (Some(press), Some((j, how))) = (press, drop) else { return };
@@ -332,23 +362,19 @@ impl App {
                 self.action_target = self.reading_target();
                 self.act_edit();
                 self.action_target = None;
-                if let Some(b) = self.edit_buf.as_ref() {
-                    let line = i.min(b.lines.len().saturating_sub(1));
-                    self.edit_cursor = (line, 0);
+                if let Some(ed) = self.editor.as_mut() {
+                    let line = i.min(ed.lines() - 1);
+                    ed.click(super::editor::Pos::new(line, 0));
+                    ed.end_drag();
                 }
             }
         }
     }
 
-    fn place_edit_cursor(&mut self, x: u16, y: u16) {
+    /// The text position under a screen cell in the editor.
+    fn edit_pos(&self, x: u16, y: u16) -> super::editor::Pos {
         let area = self.ui.edit_area;
-        let line = self.ui.edit_scroll + (y - area.y) as usize;
-        if let Some(buf) = self.edit_buf.as_ref() {
-            if line < buf.lines.len() {
-                let len = buf.lines[line].text.chars().count();
-                self.edit_cursor = (line, ((x - area.x) as usize).min(len));
-                self.edit_last_key = Instant::now();
-            }
-        }
+        let line = self.ui.edit_scroll + y.saturating_sub(area.y) as usize;
+        super::editor::Pos::new(line, x.saturating_sub(area.x) as usize)
     }
 }

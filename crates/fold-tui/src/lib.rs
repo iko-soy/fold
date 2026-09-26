@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub mod app;
 
-pub fn run(vault_dir: &Path) -> anyhow::Result<()> {
-    app::run(vault_dir)
+/// Run the TUI; `keys` picks the editor keymap (`normal`, `vim`, `helix`).
+pub fn run(vault_dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
+    app::run(vault_dir, keys)
 }

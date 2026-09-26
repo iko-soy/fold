@@ -63,11 +63,14 @@ fn ctrl_d_pages_instead_of_deleting() {
 }
 
 #[test]
-fn ctrl_c_in_editor_discards_without_quitting() {
+fn ctrl_c_in_the_editor_never_quits() {
+    // in the normal keymap Ctrl-c copies; the app quits only outside it
     let (_d, mut app) = app_with("# A\n\nbody\n");
     press(&mut app, "e");
     app.handle_key(ctrl('c'));
     assert!(!app.quit_requested());
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.mode_pub(), "normal");
     app.handle_key(ctrl('c'));
     assert!(app.quit_requested());

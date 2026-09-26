@@ -6,7 +6,8 @@ use crossterm::event::{
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::cursor::SetCursorStyle;
+use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
 use crossterm::ExecutableCommand;
 use fold_core::ops;
 use fold_core::parse::{Kind, TaskState};
@@ -21,6 +22,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod action;
+mod editor;
 mod grammars;
 mod highlight;
 mod markdown;
@@ -28,6 +30,7 @@ mod mouse;
 mod ui;
 
 pub use action::Action;
+pub use editor::Keys as EditKeys;
 
 /// Where an action sits in the node menu (for tests and scripted clicks).
 pub fn node_menu_index(a: Action) -> usize {
@@ -82,10 +85,12 @@ pub struct App {
     scroll_reading: usize,
     quit: bool,
     // edit mode (§10.6)
-    edit_buf: Option<fold_core::edit::EditBuffer>,
-    edit_cursor: (usize, usize), // (line, col)
+    editor: Option<editor::Editor>,
+    /// The editor's keymap (normal, Vim, Helix), and its clipboard, kept
+    /// across editing sessions.
+    edit_keys: editor::Keys,
+    edit_clip: editor::Clip,
     edit_last_key: Instant,
-    edit_saved_dot: bool,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -166,10 +171,13 @@ impl App {
             palette: String::new(),
             scroll_reading: 0,
             quit: false,
-            edit_buf: None,
-            edit_cursor: (0, 0),
+            editor: None,
+            edit_keys: std::env::var("FOLD_KEYS")
+                .ok()
+                .and_then(|k| editor::Keys::parse(&k))
+                .unwrap_or_default(),
+            edit_clip: editor::Clip::default(),
             edit_last_key: Instant::now(),
-            edit_saved_dot: false,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -275,7 +283,7 @@ impl App {
     /// re-parse, cursor re-attached by id, key, deepest surviving step. A new
     /// sync-conflict file starts the merge flow (§12).
     pub fn reload_external(&mut self) {
-        if self.edit_buf.is_some() {
+        if self.editor.is_some() {
             self.save_editor("external change");
         }
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
@@ -642,163 +650,115 @@ impl App {
 
     pub fn act_edit(&mut self) {
         let Some(r) = self.subject() else { return };
-        let target = if self.vault.tree.node(r).is_embed() {
-            self.vault.tree.resolved_child(r)
-        } else {
-            r
-        };
-        self.edit_buf = Some(fold_core::edit::open_editor(&self.vault, target));
-        self.edit_cursor = (0, 0);
-        self.edit_saved_dot = false;
+        let target = self.vault.tree.resolved_child(r);
+        self.open_editor_on(target);
+    }
+
+    /// Open the built-in editor over a node's subtree (§10.6).
+    fn open_editor_on(&mut self, target: NRef) {
+        let buf = fold_core::edit::open_editor(&self.vault, target);
+        self.editor = Some(editor::Editor::new(buf, self.edit_keys, self.edit_clip.clone()));
         self.mode = Mode::Edit;
         self.focus = Focus::Reading;
+        self.edit_last_key = Instant::now();
+    }
+
+    /// The editor's keymap; switching applies to an open editor at once.
+    pub fn set_edit_keys(&mut self, keys: editor::Keys) {
+        self.edit_keys = keys;
+        if let Some(ed) = self.editor.as_mut() {
+            ed.set_keys(keys);
+        }
+        self.say(format!("editor keys: {}", keys.name()));
     }
 
     fn save_editor(&mut self, why: &str) {
-        let Some(mut buf) = self.edit_buf.take() else { return };
+        let Some(mut ed) = self.editor.take() else { return };
         self.settle_undo();
         let snap = ops::Snapshot::take(&self.vault, "edit");
-        match buf.save_all(&mut self.vault) {
+        match ed.buf.save_all(&mut self.vault) {
             Ok(n) => {
                 self.record_undo(snap);
                 if n > 0 {
                     self.say(format!("saved {} block(s) ({})", n, why));
                 }
-                self.edit_saved_dot = false;
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
-        self.edit_buf = Some(buf);
+        self.editor = Some(ed);
         self.edit_last_key = Instant::now();
     }
 
     fn close_editor(&mut self) {
         self.save_editor("exit");
-        self.edit_buf = None;
+        if let Some(ed) = self.editor.take() {
+            self.edit_clip = ed.clip;
+        }
         self.mode = Mode::Normal;
     }
 
+    /// Whether the editor holds changes not yet written.
+    pub fn editor_dirty(&self) -> bool {
+        self.editor.as_ref().map(|e| !e.buf.dirty.is_empty()).unwrap_or(false)
+    }
+
     pub fn key_edit(&mut self, key: KeyEvent) {
-        let Some(buf) = self.edit_buf.as_mut() else {
+        let Some(ed) = self.editor.as_mut() else {
             self.mode = Mode::Normal;
             return;
         };
-        let (line, col) = self.edit_cursor;
-        let nlines = buf.lines.len();
-        match key.code {
-            KeyCode::Esc => {
-                self.close_editor();
-                return;
-            }
-            KeyCode::Up | KeyCode::Down => {
-                let target = if key.code == KeyCode::Up {
-                    line.checked_sub(1)
-                } else {
-                    Some(line + 1).filter(|&l| l < nlines)
-                };
-                if let Some(t) = target {
-                    let len = buf.lines[t].text.chars().count();
-                    self.edit_cursor = (t, col.min(len));
-                }
-            }
-            KeyCode::Left => {
-                self.edit_cursor.1 = col.saturating_sub(1);
-            }
-            KeyCode::Right => {
-                let len = buf.lines.get(line).map(|l| l.text.chars().count()).unwrap_or(0);
-                if col < len {
-                    self.edit_cursor.1 = col + 1;
-                }
-            }
-            KeyCode::Enter => {
-                // split the line at the cursor
-                let cur = buf.lines.get(line).map(|l| l.text.clone()).unwrap_or_default();
-                let byte_col = cur
-                    .char_indices()
-                    .nth(col)
-                    .map(|(i, _)| i)
-                    .unwrap_or(cur.len());
-                let (a, b) = cur.split_at(byte_col);
-                buf.set_line(line, a.to_string());
-                buf.insert_line(line, b.to_string());
-                self.edit_cursor = (line + 1, 0);
-            }
-            KeyCode::Backspace => {
-                if col > 0 {
-                    if let Some(l) = buf.lines.get(line) {
-                        let byte_col = l
-                            .text
-                            .char_indices()
-                            .nth(col)
-                            .map(|(i, _)| i)
-                            .unwrap_or(l.text.len());
-                        let prev = l.text[..byte_col]
-                            .char_indices()
-                            .last()
-                            .map(|(i, c)| (i, c.len_utf8()))
-                            .unwrap_or((0, 0));
-                        let mut t = l.text.clone();
-                        t.replace_range(prev.0..byte_col, "");
-                        buf.set_line(line, t);
-                        self.edit_cursor.1 = col - 1;
-                    }
-                } else if line > 0 {
-                    // join with the previous line
-                    let cur = buf.lines.get(line).map(|l| l.text.clone()).unwrap_or_default();
-                    let prev_len = buf
-                        .lines
-                        .get(line - 1)
-                        .map(|l| l.text.chars().count())
-                        .unwrap_or(0);
-                    let prev = buf.lines.get(line - 1).map(|l| l.text.clone()).unwrap_or_default();
-                    buf.set_line(line - 1, format!("{}{}", prev, cur));
-                    buf.delete_line(line);
-                    self.edit_cursor = (line - 1, prev_len);
-                }
-            }
-            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {}
-            KeyCode::Char(c) => {
-                if let Some(l) = buf.lines.get(line) {
-                    let byte_col = l
-                        .text
-                        .char_indices()
-                        .nth(col)
-                        .map(|(i, _)| i)
-                        .unwrap_or(l.text.len());
-                    let mut t = l.text.clone();
-                    t.insert(byte_col, c);
-                    buf.set_line(line, t);
-                    self.edit_cursor.1 = col + 1;
-                    self.edit_saved_dot = true;
-                }
-            }
-            _ => {}
-        }
+        let before = ed.buf.owner_at(ed.cursor.line);
+        let out = ed.handle(key);
+        let after = ed.buf.owner_at(ed.cursor.line);
         self.edit_last_key = Instant::now();
-        // moving out of a dirty block saves it (§10.6)
-        let new_owner = self
-            .edit_buf
-            .as_ref()
-            .map(|b| b.owner_at(self.edit_cursor.0));
-        let old_owner = self.edit_buf.as_ref().map(|b| b.owner_at(line));
-        if new_owner != old_owner {
-            if let (Some(old), Some(buf2)) = (old_owner, self.edit_buf.as_mut()) {
-                if buf2.dirty.contains(&old) {
-                    self.settle_undo();
-                    let snap = ops::Snapshot::take(&self.vault, "edit");
-                    let mut tmp = self.edit_buf.take().unwrap();
-                    if tmp.splice(&mut self.vault, old).is_ok() {
-                        self.record_undo(snap);
-                    }
-                    self.edit_buf = Some(tmp);
-                }
-            }
+        if out.revert {
+            self.discard_editor();
+            return;
         }
-        self.edit_saved_dot = self
-            .edit_buf
-            .as_ref()
-            .map(|b| !b.dirty.is_empty())
-            .unwrap_or(false);
+        if out.save {
+            self.save_editor("save");
+        }
+        if out.close {
+            self.close_editor();
+            return;
+        }
+        // moving out of a dirty block saves it (§10.6)
+        if before != after && self.editor.as_ref().is_some_and(|e| e.buf.dirty.contains(&before)) {
+            self.settle_undo();
+            let snap = ops::Snapshot::take(&self.vault, "edit");
+            let mut ed = self.editor.take().unwrap();
+            if ed.buf.splice(&mut self.vault, before).is_ok() {
+                self.record_undo(snap);
+            }
+            self.editor = Some(ed);
+        }
+    }
+
+    /// Text pasted into the terminal (bracketed paste): into the editor or
+    /// the open prompt.
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(p) = self.prompt.as_mut() {
+            p.text.push_str(text.lines().next().unwrap_or(""));
+            self.refresh_picks();
+        } else if let Some(ed) = self.editor.as_mut() {
+            ed.paste_text(text);
+            self.edit_last_key = Instant::now();
+        } else if self.mode == Mode::Filter {
+            self.filter.push_str(text.lines().next().unwrap_or(""));
+            self.update_filter();
+        }
+    }
+
+    /// The cursor shape the terminal should show: a block in Vim and Helix
+    /// normal modes, a bar while typing.
+    pub fn cursor_block(&self) -> bool {
+        self.editor.as_ref().map(|e| e.block_cursor()).unwrap_or(false)
+    }
+
+    /// Text copied in the editor since the last call, for the system
+    /// clipboard.
+    pub fn take_copied(&mut self) -> Option<String> {
+        self.editor.as_mut().and_then(|e| e.copied.take())
     }
 
     // -------------------------------------------------------- props (§10.6)
@@ -1104,10 +1064,7 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(&(ours, _)) = pairs.get(self.conflict_idx) {
-                    self.edit_buf = Some(fold_core::edit::open_editor(&self.vault, ours));
-                    self.edit_cursor = (0, 0);
-                    self.edit_saved_dot = false;
-                    self.mode = Mode::Edit;
+                    self.open_editor_on(ours);
                 }
             }
             _ => {}
@@ -1176,13 +1133,8 @@ impl App {
             }
             Mode::Filter => self.key_filter(key),
             Mode::Picker => self.key_palette(key),
-            Mode::Edit => {
-                if ctrl && key.code == KeyCode::Char('c') {
-                    self.discard_editor();
-                    return;
-                }
-                self.key_edit(key)
-            }
+            // the keymap decides what Ctrl-c means (copy, or Vim's escape)
+            Mode::Edit => self.key_edit(key),
             Mode::Props => self.key_props(key),
             Mode::Help => {
                 if matches!(
@@ -1196,9 +1148,11 @@ impl App {
         }
     }
 
-    /// Drop the editor's unsaved changes (§10.6 `Ctrl-c`).
+    /// Drop the editor's unsaved changes (§10.6: *Revert*, `:q!`).
     fn discard_editor(&mut self) {
-        self.edit_buf = None;
+        if let Some(ed) = self.editor.take() {
+            self.edit_clip = ed.clip;
+        }
         self.mode = Mode::Normal;
         let _ = self.vault.reload();
         self.clamp_cursor();
@@ -1495,15 +1449,8 @@ impl App {
             }
             KeyCode::Char('e') => {
                 if let Some(r) = self.read_node() {
-                    let target = if self.vault.tree.node(r).is_embed() {
-                        self.vault.tree.resolved_child(r)
-                    } else {
-                        r
-                    };
-                    self.edit_buf = Some(fold_core::edit::open_editor(&self.vault, target));
-                    self.edit_cursor = (0, 0);
-                    self.edit_saved_dot = false;
-                    self.mode = Mode::Edit;
+                    let target = self.vault.tree.resolved_child(r);
+                    self.open_editor_on(target);
                 }
             }
             KeyCode::Char('a') => {
@@ -1856,6 +1803,7 @@ impl App {
                 Err(e) => self.say(format!("error: {}", e)),
             },
             Action::ResolveConflicts => self.enter_conflict_view(),
+            Action::EditorKeys => self.set_edit_keys(self.edit_keys.next()),
             Action::EditDone => self.close_editor(),
             Action::EditRevert => self.discard_editor(),
             Action::Close => self.close_top(),
@@ -1972,6 +1920,14 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("u/U q", "undo / redo · quit (everything is always saved)"),
         ("Tab", "switch panes · in the text: [[ ]] headings, / search, o link"),
         ("", ""),
+        ("EDITOR", ""),
+        ("keymaps", "normal (like micro) · vim · helix — ⌨ in the editor's border,"),
+        ("", "  ☰ Editor keys, --keys or $FOLD_KEYS"),
+        ("normal", "type · Shift+arrows select · ^C ^X ^V ^Z ^Y · ^S save · ^F find"),
+        ("", "  ^K cut line · ^D duplicate · Alt-↑/↓ move line · Esc done"),
+        ("vim/helix", "the usual modes, motions and operators · :w :q :wq :q!"),
+        ("mouse", "click places the cursor · drag selects · double-click a word"),
+        ("", ""),
         ("", "Every action is also in ☰ Commands and in the node menu."),
     ];
     entries
@@ -2035,8 +1991,15 @@ fn extract_url(line: &str) -> Option<String> {
 
 // ------------------------------------------------------------ main loop
 
-pub fn run(dir: &Path) -> anyhow::Result<()> {
+/// Run the TUI on a vault. `keys` picks the editor's keymap (`normal`,
+/// `vim`, `helix`), overriding `$FOLD_KEYS`.
+pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
     let mut app = App::new(dir)?;
+    if let Some(k) = keys {
+        let parsed = editor::Keys::parse(k)
+            .ok_or_else(|| anyhow::anyhow!("unknown keymap {:?}: use normal, vim or helix", k))?;
+        app.edit_keys = parsed;
+    }
     app.start_watcher();
     // a sync-conflict file present at startup starts the merge flow (§12.2)
     if let Ok(files) = app.vault.conflict_files() {
@@ -2053,33 +2016,62 @@ pub fn run(dir: &Path) -> anyhow::Result<()> {
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     std::io::stdout().execute(EnableMouseCapture)?;
+    std::io::stdout().execute(EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let res = run_loop(&mut terminal, &mut app);
     disable_raw_mode()?;
+    std::io::stdout().execute(DisableBracketedPaste)?;
     std::io::stdout().execute(DisableMouseCapture)?;
+    std::io::stdout().execute(SetCursorStyle::DefaultUserShape)?;
     std::io::stdout().execute(LeaveAlternateScreen)?;
     res
+}
+
+/// Standard base64, for OSC 52.
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> anyhow::Result<()> {
+    let mut block = None;
     loop {
         terminal.draw(|f| app.draw(f))?;
+        // the cursor's shape follows the editor's mode
+        let want = app.cursor_block();
+        if block != Some(want) {
+            let style = if want { SetCursorStyle::SteadyBlock } else { SetCursorStyle::DefaultUserShape };
+            std::io::stdout().execute(style)?;
+            block = Some(want);
+        }
+        // copied text reaches the system clipboard (OSC 52)
+        if let Some(t) = app.take_copied() {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            write!(out, "\x1b]52;c;{}\x07", base64(t.as_bytes()))?;
+            out.flush()?;
+        }
         if app.quit {
             // save any open editor on quit (§10.6)
-            if app.edit_buf.is_some() {
+            if app.editor.is_some() {
                 app.close_editor();
             }
             return Ok(());
         }
         // autosave after 750 ms without a keystroke (§10.6)
-        if app.mode == Mode::Edit
-            && app.edit_buf.as_ref().map(|b| !b.dirty.is_empty()).unwrap_or(false)
-            && app.edit_last_key.elapsed() > Duration::from_millis(750)
-        {
+        if app.mode == Mode::Edit && app.editor_dirty() && app.edit_last_key.elapsed() > Duration::from_millis(750) {
             app.save_editor("pause");
         }
         // external changes: debounced reload (§11.2)
@@ -2090,6 +2082,7 @@ fn run_loop(
             match event::read()? {
                 Event::Mouse(m) => app.handle_mouse(m),
                 Event::Key(key) => app.handle_key(key),
+                Event::Paste(text) => app.handle_paste(&text),
                 _ => {}
             }
         }

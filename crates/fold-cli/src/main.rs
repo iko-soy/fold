@@ -13,6 +13,11 @@ struct Cli {
     #[arg(long, global = true)]
     vault: Option<PathBuf>,
 
+    /// The editor's keymap: normal (micro-like), vim or helix (default:
+    /// $FOLD_KEYS, else normal).
+    #[arg(long, value_name = "KEYMAP")]
+    keys: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -95,7 +100,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         None => {
             // open the TUI (§13)
-            fold_tui::run(&dir)?;
+            fold_tui::run(&dir, cli.keys.as_deref())?;
         }
         Some(Command::Capture { text, to, task }) => {
             let mut text = match text {
