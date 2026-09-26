@@ -198,7 +198,15 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
             let l = count.map(|c| c.saturating_sub(1)).unwrap_or(last).min(last);
             (Pos::new(l, e.first_non_blank(l)), Kind::Line)
         }
-        '}' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, true)), 0), Kind::Excl),
+        '}' => {
+            let l = (0..n).fold(p.line, |l, _| e.paragraph(l, true));
+            if l == last && e.len(l) > 0 {
+                // no blank line below: on the last character, inclusive (Vim's findpar)
+                (Pos::new(l, e.len(l) - 1), Kind::Incl)
+            } else {
+                (Pos::new(l, 0), Kind::Excl)
+            }
+        }
         '{' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, false)), 0), Kind::Excl),
         '%' => (e.match_bracket(p)?, Kind::Incl),
         // `n` the way the last search went, `N` the other way

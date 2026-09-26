@@ -668,3 +668,19 @@ fn helix_repeated_backward_search_selects_the_previous_match() {
     keys(&mut app, "ejj?foo⏎?⏎d:wq⏎");
     assert_eq!(root(&d), "# A\n\n bar foo\n");
 }
+
+#[test]
+fn vim_brace_in_last_paragraph_takes_the_last_line() {
+    // No blank line after the paragraph (the usual end of an edited subtree):
+    // Vim's `}` lands on the last character and is inclusive, so `d}` from the
+    // first line deletes the whole paragraph, last line included.
+    let (d, mut app) = app_with("# A\n\na\nb\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjd}:w⏎");
+    assert_eq!(root(&d).trim_end(), "# A", "{:?}", root(&d));
+    // with a blank line after it, `}` stops there (column 0, exclusive)
+    let (d, mut app) = app_with("# A\n\na\nb\n\nc\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjd}:w⏎");
+    assert_eq!(root(&d), "# A\n\n\nc\n");
+}
