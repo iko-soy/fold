@@ -86,3 +86,48 @@ fn drag_selects_and_paste_replaces() {
     keys(&mut app, "⎋⎋");
     assert_eq!(root(&d), "# A\n\ngoodbye world\n");
 }
+
+/// root.md "# A\n\n- one\n![[id]]\n", the embedded block's own file holding
+/// "- two"; returns the block's file.
+fn vault_with_bullet_block() -> (tempfile::TempDir, std::path::PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- two\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let two = v.find_by_path(&["A".into(), "two".into()]).unwrap();
+    fold_core::ops::make_block(&mut v, two).unwrap();
+    drop(v);
+    let block = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "md") && !p.ends_with("root.md"))
+        .unwrap();
+    assert!(root(&d).starts_with("# A\n\n- one\n![["), "{}", root(&d));
+    (d, block)
+}
+
+#[test]
+fn helix_xyp_above_a_block_leaves_the_block_file_alone() {
+    // §5.2: a line pasted somewhere takes the tag of the line above it, so
+    // "- one" duplicated below itself belongs to A, not to the block whose
+    // title line happens to follow
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjxyp:w⏎");
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+    assert!(root(&d).contains("- one\n- one\n![["), "{}", root(&d));
+}
+
+#[test]
+fn vim_o_above_a_block_leaves_the_block_file_alone() {
+    // §5.2: a line typed after a tagged line inherits its tag; `O` on the
+    // block's title line opens a line of A, above the block
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjjO- new⎋:w⏎");
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+    assert!(root(&d).contains("- one\n- new\n![["), "{}", root(&d));
+}
