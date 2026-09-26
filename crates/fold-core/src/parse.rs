@@ -815,6 +815,17 @@ fn make_setext_section(
                 }
             }
         }
+        // push_body grew the owner's span, and its ancestors', over the
+        // title line: give that back too, so a node the new section does not
+        // sit in ends before it (sibling spans never overlap). The section's
+        // own ancestors are grown again below.
+        let mut cur = Some(owner);
+        while let Some(c) = cur {
+            if nodes[c].span.end == tl.next {
+                nodes[c].span.end = tl.start;
+            }
+            cur = nodes[c].parent;
+        }
     }
     // Pop frames that can't contain a section at this position.
     loop {

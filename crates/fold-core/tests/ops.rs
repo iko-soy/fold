@@ -567,3 +567,54 @@ fn check_fix_keeps_correct_prefixes_and_is_idempotent() {
     assert!(d.path().join("racfer~blk.md").exists());
     assert_eq!(fold_core::check::fix(&mut v).unwrap(), 0);
 }
+
+#[test]
+fn setext_sibling_spans_do_not_overlap() {
+    // the setext title line is taken back out of A's text: A's span must
+    // shrink with it, or A and Title overlap
+    let (_d, mut v) = vault_with("# A\n\nTitle\n===\n\nbody\n");
+    let kids = v.tree.resolved_children(v.tree.root);
+    assert_eq!(kids.len(), 2);
+    let (a, b) = (v.tree.node(kids[0]).span, v.tree.node(kids[1]).span);
+    assert!(a.end <= b.start, "A {:?} overlaps Title {:?}", a, b);
+    ops::move_sibling(&mut v, kids[0], true).unwrap();
+    let kids = v.tree.resolved_children(v.tree.root);
+    assert_eq!(v.tree.node(kids[0]).title, "Title");
+    assert_eq!(v.tree.node(kids[1]).title, "A");
+}
+
+#[test]
+fn move_sibling_before_a_setext_sibling_does_not_panic() {
+    let (_d, mut v) = vault_with("# A\n\nTitle\n===\n\nbody\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    ops::move_sibling(&mut v, a, true).unwrap();
+    let kids = v.tree.resolved_children(v.tree.root);
+    assert_eq!(v.tree.node(kids[0]).title, "Title", "{}", v.tree.files[0].text);
+    assert_eq!(v.tree.node(kids[1]).title, "A", "{}", v.tree.files[0].text);
+}
+
+#[test]
+fn delete_before_a_setext_sibling_keeps_its_title() {
+    let (_d, mut v) = vault_with("# A\n\nTitle\n===\n\nbody\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    ops::delete_subtree(&mut v, a).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert!(text.contains("Title"), "{}", text);
+    let top = v.tree.resolved_children(v.tree.root);
+    assert_eq!(top.len(), 1, "{}", text);
+    assert_eq!(v.tree.node(top[0]).title, "Title", "{}", text);
+}
+
+#[test]
+fn capture_before_a_setext_sibling_keeps_it() {
+    let (_d, mut v) = vault_with("# Inbox\n\nMeeting notes\n=============\n\n- action\n");
+    let inbox = v.tree.resolved_children(v.tree.root)[0];
+    ops::capture_to(&mut v, "new", false, inbox).unwrap();
+    let text = v.tree.files[0].text.clone();
+    let top = v.tree.resolved_children(v.tree.root);
+    assert_eq!(top.len(), 2, "{}", text);
+    assert_eq!(v.tree.node(top[1]).title, "Meeting notes", "{}", text);
+    let kids = v.tree.resolved_children(top[1]);
+    assert_eq!(kids.len(), 1, "{}", text);
+    assert_eq!(v.tree.node(kids[0]).title, "action", "{}", text);
+}
