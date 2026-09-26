@@ -689,17 +689,22 @@ impl App {
         self.push_undo("act_promote");
         let r = self.vault.tree.resolved_child(s);
         let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
-        // it goes beside its parent, under the parent's parent (§10.3)
+        // it goes beside its parent, right after it, under the parent's
+        // parent (§10.3)
         let parent = self.outline_parent(r);
         let grand = parent.map(|p| self.outline_parent(p).unwrap_or(self.vault.tree.root));
-        let (parent, grand) = (parent.map(|p| self.vault.key_of(p)), grand.map(|g| self.vault.key_of(g)));
+        let rank = parent.zip(grand).and_then(|(p, g)| {
+            let at = self.vault.tree.resolved_children(g).iter().position(|&c| c == p)?;
+            Some(self.namesakes_before(r, g, at + 1))
+        });
+        let grand = grand.map(|g| self.vault.key_of(g));
         let on = self.on_node(r);
         match ops::promote(&mut self.vault, s) {
             Ok(moved) => {
                 // the cursor (a zoom, the editor) stays on the node where it
                 // landed
                 let landed = match &grand {
-                    Some(dest) => self.moved_node(&key, kind, dest, parent.as_ref()),
+                    Some(dest) => self.moved_node(&key, kind, dest, rank),
                     None => self.find_exact(&key),
                 };
                 if let Some(nr) = landed {
@@ -755,24 +760,41 @@ impl App {
     /// by its id; else, among `dest`'s children with the node's title and
     /// kind, the one the ordering rule (§3.1) put it at. Moved in as the
     /// last child, that is the last of them (an item goes after the items,
-    /// a section after the sections); promoted past its old parent, `near`,
-    /// the nearest to that parent, ties going after it.
-    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, near: Option<&NodeKey>) -> Option<NRef> {
+    /// a section after the sections); put at a place among them, the one
+    /// after the `rank` namesakes that `namesakes_before` counted there.
+    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, rank: Option<usize>) -> Option<NRef> {
         let title = match key {
             NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
             NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
             NodeKey::Root => None,
         }?;
         let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
-        let near = near.and_then(|k| self.find_exact(k)).and_then(|p| kids.iter().position(|&c| c == p));
-        let mut hits = kids.iter().enumerate().filter(|&(_, &c)| {
+        let mut hits = kids.iter().filter(|&&c| {
             let n = self.vault.tree.node(c);
             n.title == title && n.kind == kind
         });
-        match near {
-            Some(p) => hits.min_by_key(|&(i, _)| (i.abs_diff(p), i < p)).map(|(_, &c)| c),
-            None => hits.next_back().map(|(_, &c)| c),
+        match rank {
+            Some(i) => hits.nth(i).copied(),
+            None => hits.next_back().copied(),
         }
+    }
+
+    /// Before a verb puts `r` among `dest`'s children, just before the
+    /// `at`-th: how many of them, other than `r`, share its title and kind
+    /// and come before that place, for `moved_node`. Clamped by the
+    /// ordering rule (§3.1), an item goes no later than the first section
+    /// and a section no earlier than after the last item, so it still comes
+    /// right after these namesakes.
+    fn namesakes_before(&self, r: NRef, dest: NRef, at: usize) -> usize {
+        let n = self.vault.tree.node(r);
+        let kids = self.vault.tree.resolved_children(dest);
+        kids.iter()
+            .take(at)
+            .filter(|&&c| {
+                let m = self.vault.tree.node(c);
+                c != r && m.title == n.title && m.kind == n.kind
+            })
+            .count()
     }
 
     /// The node an action applies to: a menu's target, else the cursor's.

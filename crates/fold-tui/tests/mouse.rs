@@ -844,3 +844,88 @@ fn edit_from_a_menu_after_cutting_a_block_title_opens_on_the_menus_node() {
     let s = draw(&mut app);
     assert!(s.contains("- task") && s.contains("- sub"), "{}", s);
 }
+
+#[test]
+fn dragging_the_edited_node_before_a_sibling_keeps_the_editor_on_it_among_namesakes() {
+    // editing the first "b" (body "mine"), dragged to the left of t's row:
+    // before t (§10.1). A later sibling is titled "b" too; the editor must
+    // stay on the node it was open on, not follow the namesake
+    let (d, mut app) = app_with("# A\n\n- t\n- b\n  mine\n- b\n  theirs\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    // rows: A, t, b (mine), b (theirs)
+    typing(&mut app, "jje");
+    assert!(draw(&mut app).contains("mine"));
+    let (from, to) = (app.hit_pos(Hit::Row(2)).unwrap(), app.hit_pos(Hit::Row(1)).unwrap());
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), (2, to.1)));
+    draw(&mut app);
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (2, to.1)));
+    assert_eq!(root(&d), "# A\n\n- b\n  mine\n- t\n- b\n  theirs\n");
+    assert_eq!(app.mode_pub(), "edit");
+    // typed at the end of the body line the editor shows
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    typing(&mut app, "!");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(root(&d), "# A\n\n- b\n  mine!\n- t\n- b\n  theirs\n");
+    // dragged before the namesake itself: the key that named the target
+    // before the drop names the moved node after it
+    let (d, mut app) = app_with("# A\n\n- t\n- b\n  theirs\n- b\n  mine\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    typing(&mut app, "jjje");
+    assert!(draw(&mut app).contains("mine"));
+    let (from, to) = (app.hit_pos(Hit::Row(3)).unwrap(), app.hit_pos(Hit::Row(2)).unwrap());
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), (2, to.1)));
+    draw(&mut app);
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (2, to.1)));
+    assert_eq!(root(&d), "# A\n\n- t\n- b\n  mine\n- b\n  theirs\n");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    typing(&mut app, "!");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(root(&d), "# A\n\n- t\n- b\n  mine!\n- b\n  theirs\n");
+}
+
+#[test]
+fn dragging_the_edited_item_into_a_node_keeps_the_editor_on_it_beside_a_section_namesake() {
+    // editing item b, dropped onto T's title: into T, before T's section
+    // "b" (§3.1). The editor stays on the item, not on the section
+    let (d, mut app) = app_with("# A\n\n- b\n  mine\n\n## T\n\n### b\n\ntheirs\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    // rows: A, b (mine), T, b (theirs)
+    typing(&mut app, "je");
+    assert!(draw(&mut app).contains("mine"));
+    let (from, onto) = (app.hit_pos(Hit::Row(1)).unwrap(), app.hit_pos(Hit::Row(2)).unwrap());
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), onto));
+    draw(&mut app);
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), onto));
+    let r = root(&d);
+    assert!(r.find("- b\n  mine\n").is_some_and(|i| i > r.find("## T").unwrap()), "{}", r);
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    typing(&mut app, "!");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(root(&d), r.replace("mine", "mine!"));
+}
+
+#[test]
+fn outdenting_the_edited_node_past_a_namesake_parent_keeps_the_editor_on_it() {
+    // editing the inner "z", Outdent: it lands after its old parent, also
+    // titled "z" (§10.3). The editor stays on the node it was open on
+    let (d, mut app) = app_with("# A\n\n- z\n  theirs\n  - z\n    mine\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    // rows: A, z (theirs), z (mine)
+    typing(&mut app, "jje");
+    assert!(draw(&mut app).contains("mine"));
+    app.run_action(Action::Outdent);
+    assert_eq!(root(&d), "# A\n\n- z\n  theirs\n- z\n  mine\n");
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    typing(&mut app, "!");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(root(&d), "# A\n\n- z\n  theirs\n- z\n  mine!\n");
+}
