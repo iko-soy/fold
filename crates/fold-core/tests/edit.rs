@@ -615,3 +615,36 @@ fn deleting_all_lines_of_nested_block_clears_dirty() {
     assert!(buf.dirty.is_empty(), "still dirty after save: {:?}", buf.dirty);
     assert_eq!(v.tree.files[0].text, "# A\n\nbody\n");
 }
+
+#[test]
+fn one_refused_block_does_not_block_other_saves() {
+    // §5.2: each dirty block is written by its own splice. A block whose file
+    // changed on disk is refused and stays dirty; the other dirty blocks are
+    // still written.
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let task = v.tree.resolved_children(a)[0];
+    ops::make_block(&mut v, task).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    // edit the nested block first, then root.md's heading: dirty = [block, root]
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    assert_eq!(buf.lines[i].owner.file, 1);
+    buf.set_line(i, "- task (mine)".into());
+    assert_eq!(buf.lines[0].owner.file, 0);
+    buf.set_line(0, "# A renamed".into());
+    // another editor changes the block file meanwhile
+    let p = d.path().join(&v.tree.files[1].path);
+    let s = std::fs::read_to_string(&p).unwrap().replace("- task", "- task (theirs)");
+    std::fs::write(&p, &s).unwrap();
+    let err = buf.save_all(&mut v).unwrap_err();
+    assert!(err.to_string().contains("changed on disk"), "{}", err);
+    // the refused block is not overwritten and stays dirty
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), s);
+    assert!(buf.dirty.iter().any(|o| o.file == 1));
+    // root.md's edit is written anyway
+    let disk = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    assert!(disk.starts_with("# A renamed"), "{}", disk);
+    assert!(v.tree.files[0].text.starts_with("# A renamed"), "{}", v.tree.files[0].text);
+    assert!(!buf.dirty.iter().any(|o| o.file == 0));
+}

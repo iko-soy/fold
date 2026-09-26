@@ -527,18 +527,32 @@ impl EditBuffer {
     }
 
     /// Splice every dirty block (§10.6: a commit may write several files,
-    /// one splice per dirty block).
+    /// one splice per dirty block). Each block is written by its own splice
+    /// (§5.2): one that is refused stays dirty, the others are still
+    /// written, and the error names every refusal.
     pub fn save_all(&mut self, vault: &mut Vault) -> std::io::Result<usize> {
         self.settle();
         let dirty = self.dirty.clone();
         let mut n = 0;
+        let mut errs = Vec::new();
         for owner in dirty {
-            if self.write(vault, owner)? {
-                n += 1;
+            match self.write(vault, owner) {
+                Ok(true) => n += 1,
+                Ok(false) => {}
+                Err(e) => errs.push(e),
             }
         }
-        self.trash_dropped(vault)?;
-        Ok(n)
+        if let Err(e) = self.trash_dropped(vault) {
+            errs.push(e);
+        }
+        match errs.len() {
+            0 => Ok(n),
+            1 => Err(errs.remove(0)),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "),
+            )),
+        }
     }
 }
 
