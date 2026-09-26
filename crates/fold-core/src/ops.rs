@@ -842,7 +842,7 @@ pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<bool> {
         }
         guard += 1;
         if guard > 10_000 {
-            break; // embed cycle: a diagnostic elsewhere
+            break; // embed cycle: `check` reports it (§6.2)
         }
         anc = resolved_parent(&vault.tree, a);
     }
