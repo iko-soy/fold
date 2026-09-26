@@ -339,3 +339,40 @@ fn deleting_a_selected_line_above_a_block_keeps_the_block() {
     assert!(r.starts_with("# A\n\n![[") && !r.contains("- "), "{}", r);
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
 }
+
+#[test]
+fn helix_x_tilde_keeps_line_owners() {
+    // §5.2: the tag travels with the line; a case change over "- one\n"
+    // must not re-tag the block's title line below it
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjx~:w⏎");
+    assert!(root(&d).starts_with("# A\n\n- ONE\n![["), "{}", root(&d));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
+#[test]
+fn vim_visual_line_tilde_keeps_line_owners() {
+    // the case of each line changes in place, in the block that owns it
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjVj~:w⏎");
+    assert!(root(&d).starts_with("# A\n\n- ONE\n![["), "{}", root(&d));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before.replace("- two", "- TWO"));
+}
+
+#[test]
+fn helix_tilde_from_mid_line_across_a_block_title_keeps_line_owners() {
+    // a range that starts inside "- one" and ends inside the block's title
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjllvjl~:w⏎");
+    assert!(root(&d).starts_with("# A\n\n- ONE\n![["), "{}", root(&d));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before.replace("- two", "- TWo"));
+}

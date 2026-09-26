@@ -1217,22 +1217,32 @@ impl Editor {
         }
     }
 
+    /// Replace each character of `[a, b)` by `f` of it, one line at a time:
+    /// line ends stay where they are and every line keeps its tag (§5.2).
+    pub fn map_chars(&mut self, a: Pos, b: Pos, f: impl Fn(char) -> char) {
+        let (a, mut b) = order(a, b);
+        if b.line >= self.lines() {
+            b = Pos::new(self.lines() - 1, self.len(self.lines() - 1));
+        }
+        for l in a.line..=b.line {
+            let s = if l == a.line { a.col } else { 0 };
+            let e = if l == b.line { b.col } else { usize::MAX };
+            let new: String = self.line(l).chars().enumerate().map(|(i, c)| if i >= s && i < e { f(c) } else { c }).collect();
+            if new != self.line(l) {
+                self.changes += 1;
+                self.buf.set_line(l, new);
+            }
+        }
+    }
+
     /// Change the case of `[a, b)`: `u` lower, `U` upper, `~` swap.
     pub fn change_case(&mut self, a: Pos, b: Pos, how: char) {
-        let t = self.text(a, b);
-        let n: String = t
-            .chars()
-            .map(|c| match how {
-                'u' => c.to_lowercase().next().unwrap_or(c),
-                'U' => c.to_uppercase().next().unwrap_or(c),
-                _ if c.is_uppercase() => c.to_lowercase().next().unwrap_or(c),
-                _ => c.to_uppercase().next().unwrap_or(c),
-            })
-            .collect();
-        if n != t {
-            self.delete(a, b);
-            self.insert(a, &n);
-        }
+        self.map_chars(a, b, |c| match how {
+            'u' => c.to_lowercase().next().unwrap_or(c),
+            'U' => c.to_uppercase().next().unwrap_or(c),
+            _ if c.is_uppercase() => c.to_lowercase().next().unwrap_or(c),
+            _ => c.to_uppercase().next().unwrap_or(c),
+        });
     }
 
     // -------------------------------------------------------------- search
