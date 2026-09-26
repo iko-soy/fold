@@ -472,3 +472,50 @@ fn render_keeps_child_sections_under_items_nested() {
     assert_eq!(t2.node(notes2).title, "Notes");
     assert_eq!(t2.resolved_children(notes2).len(), 1, "{r}");
 }
+
+#[test]
+fn inline_triple_backticks_do_not_open_a_fence() {
+    // CommonMark: a backtick fence's info string may not contain backticks,
+    // so "```npm i``` first" is a paragraph with inline code, not a fence.
+    let t = tree_of("# A\n\n```npm i``` first\n\n## B\n\n- item\n");
+    let a = t.resolved_children(t.root)[0];
+    let kids = t.resolved_children(a);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(t.node(kids[0]).title, "B");
+    assert_eq!(t.resolved_children(kids[0]).len(), 1);
+}
+
+#[test]
+fn fence_line_with_info_string_does_not_close_a_fence() {
+    // CommonMark: a closing fence may be followed only by spaces or tabs,
+    // so "```rust" inside an open ``` fence is code, not a closer.
+    let t = tree_of("# A\n\n```\n```rust\n# not a heading\n```\n\n## B\n");
+    let top = t.resolved_children(t.root);
+    assert_eq!(top.len(), 1);
+    let kids = t.resolved_children(top[0]);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(t.node(kids[0]).title, "B");
+}
+
+#[test]
+fn shifting_keeps_code_after_a_fence_line_with_info_string() {
+    // the re-levelling passes of paste/refile and of splice read fences as
+    // the parser does: the code line stays as written
+    let doc = "# B\n\n```\n```rust\n# not a heading\n```\n";
+    assert_eq!(
+        fold_core::ops::shift_document(doc, 1, 0),
+        "## B\n\n```\n```rust\n# not a heading\n```\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let text = "# Top\n\n## B\n\n```\n```rust\n# not a heading\n```\n";
+    std::fs::write(dir.path().join("root.md"), text).unwrap();
+    let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+    let top = v.tree.resolved_children(v.tree.root)[0];
+    let b = v.tree.resolved_children(top)[0];
+    let mut buf = fold_core::edit::open_editor(&v, b);
+    for o in buf.owners.keys().copied().collect::<Vec<_>>() {
+        buf.mark_dirty(o);
+    }
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, text);
+}

@@ -382,29 +382,8 @@ fn hash(text: &str) -> String {
 }
 
 fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
-    let t = raw.trim_start();
-    let first = match t.chars().next() {
-        Some(c) if c == '`' || c == '~' => c,
-        _ => return false,
-    };
-    let count = t.chars().take_while(|&c| c == first).count();
-    if count < 3 {
-        return false;
-    }
-    match open {
-        None => {
-            *open = Some((first, count));
-            true
-        }
-        Some((c, n)) => {
-            if *c == first && count >= *n {
-                *open = None;
-                true
-            } else {
-                false
-            }
-        }
-    }
+    // fences as the parser reads them, so splice re-levels what it does
+    crate::parse::fence_transition(raw, open)
 }
 
 /// What the editor needs to know when it opens: the buffer plus a render of

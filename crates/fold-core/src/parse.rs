@@ -360,7 +360,11 @@ fn classify_title(raw: &str) -> Option<(usize, TitleInfo)> {
     ))
 }
 
-fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
+/// Track fenced code blocks (§3.3) one line at a time: true when `raw` opens
+/// or closes one. Fences are CommonMark's: a backtick fence's info string
+/// holds no backtick (a line that starts with inline code is text), and a
+/// closing fence is followed by nothing but spaces or tabs.
+pub(crate) fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
     let t = raw.trim_start_matches([' ', '\t']);
     let first = match t.chars().next() {
         Some(c) if c == '`' || c == '~' => c,
@@ -370,13 +374,17 @@ fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
     if count < 3 {
         return false;
     }
+    let rest = &t[count..]; // '`' and '~' are one byte each
     match open {
         None => {
+            if first == '`' && rest.contains('`') {
+                return false;
+            }
             *open = Some((first, count));
             true
         }
         Some((c, n)) => {
-            if *c == first && count >= *n {
+            if *c == first && count >= *n && rest.trim_matches([' ', '\t']).is_empty() {
                 *open = None;
                 true
             } else {
