@@ -1567,15 +1567,17 @@ impl App {
                 use fold_core::reading::LineRef;
                 match fold_core::reading::node_at(&doc, self.read_cursor) {
                     Some(LineRef::Title(r)) => {
+                        // a heading zooms, a task heading too (`x` toggles
+                        // it); a task item toggles (§10.4)
                         let n = self.vault.tree.node(r);
-                        if n.task.is_some() {
-                            self.act_on_node(r, |app, r| {
-                                let _ = ops::toggle_task(&mut app.vault, r);
-                            });
-                        } else if n.kind == Kind::Section {
+                        if n.kind == Kind::Section {
                             self.set_zoom(Some(r));
                             self.read_cursor = 0;
                             self.scroll_reading = 0;
+                        } else if n.task.is_some() {
+                            self.act_on_node(r, |app, r| {
+                                let _ = ops::toggle_task(&mut app.vault, r);
+                            });
                         }
                     }
                     Some(LineRef::Embed(e)) => {

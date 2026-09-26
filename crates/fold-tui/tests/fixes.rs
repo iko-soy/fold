@@ -413,3 +413,23 @@ fn backspace_from_a_zoomed_block_goes_to_its_outline_parent() {
     app.handle_key(key(KeyCode::Backspace));
     assert_eq!(titles(&app), ["NAS", "ZFS", "snapshots"]);
 }
+
+#[test]
+fn enter_on_a_task_heading_in_the_reading_pane_zooms() {
+    // SPEC §10.4: Enter on a heading zooms into it; `x` toggles a task heading
+    let (d, mut app) = app_with("# A\n\n## [ ] T\n\nbody\n\n- [ ] i\n");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jj");
+    assert!(app.reading_doc_pub().lines[app.read_cursor_pub()].contains("[ ] T"));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(root(&d), "# A\n\n## [ ] T\n\nbody\n\n- [ ] i\n", "Enter must not toggle the task");
+    let doc = app.reading_doc_pub();
+    assert!(doc.lines[0].contains("T"), "zoomed into T: {:?}", doc.lines);
+    // on a task item, Enter still toggles
+    let i = doc.lines.iter().position(|l| l.contains("[ ] i")).unwrap();
+    for _ in 0..i {
+        press(&mut app, "j");
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(root(&d), "# A\n\n## [ ] T\n\nbody\n\n- [x] i\n");
+}
