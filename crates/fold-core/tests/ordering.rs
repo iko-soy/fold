@@ -837,3 +837,22 @@ fn refile_into_a_section_followed_by_an_indented_setext_heading() {
     assert_eq!(parents(&v), parents(&vault_with("# Top\n\n- i\n\n  # Sub\n").1));
     assert!(parents(&v).contains(&("Sub".into(), "i".into())));
 }
+
+#[test]
+fn drop_second_of_two_loose_items_before_the_first_keeps_the_list_loose() {
+    // §4.2: loose/tight lists are preserved as found
+    let (_d, mut v) = vault_with("# A\n\n- a\n\n- b\n");
+    let (b, a) = (at(&v, "A/b"), at(&v, "A/a"));
+    ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- b\n\n- a\n");
+    // and dropping the first before the second, where it is, changes nothing
+    let (_d, mut v) = vault_with("# A\n\n- a\n\n- b\n");
+    let (a, b) = (at(&v, "A/a"), at(&v, "A/b"));
+    ops::move_node(&mut v, a, b, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- a\n\n- b\n");
+    // a tight list stays tight
+    let (_d, mut v) = vault_with("# A\n\n- a\n- b\n");
+    let (b, a) = (at(&v, "A/b"), at(&v, "A/a"));
+    ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- b\n- a\n");
+}

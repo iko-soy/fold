@@ -1092,18 +1092,29 @@ fn place(
         None => pnode.kind == Kind::Item,
     };
     // inserting before an item: after another item, the list is as tight as
-    // the text there says (read below); starting the list, it is read
-    // between `next` and the item after it, if any
+    // the text there says (read below); starting the list, it is read in
+    // the list as found, the moving node still in it: between `next` and
+    // the item after it, or else between the moving node and `next` right
+    // after it. A list of one item is tight.
     let is_item = |c: Option<&crate::parse::Content>| {
         matches!(c, Some(crate::parse::Content::Node(k)) if tree.files[file].nodes[*k].kind == Kind::Item)
     };
     let next_at = next.and_then(|k| content.iter().position(|c| *c == crate::parse::Content::Node(k.1)));
     let starts_run = next_at.is_some_and(|i| i == 0 || !is_item(content.get(i - 1)));
-    let run_tight = match (next, next_at) {
-        (Some(k), Some(i)) if is_item(content.get(i + 1)) => {
-            let sp = tree.node(k).span;
-            !text[sp.start..sp.end.min(text.len())].ends_with("\n\n")
-        }
+    let found = &pnode.content;
+    let found_at = next.and_then(|k| found.iter().position(|c| *c == crate::parse::Content::Node(k.1)));
+    let no_blank_after = |k: NRef| {
+        let sp = tree.node(k).span;
+        !text[sp.start..sp.end.min(text.len())].ends_with("\n\n")
+    };
+    let run_tight = match (next, found_at) {
+        (Some(k), Some(i)) if is_item(found.get(i + 1)) => no_blank_after(k),
+        (Some(_), Some(i)) => match moving {
+            Some(m) if i > 0 && m.0 == file && found[i - 1] == crate::parse::Content::Node(m.1) => {
+                no_blank_after(m)
+            }
+            _ => true,
+        },
         _ => true,
     };
     let next_kind = next.map(|k| tree.node(k).kind);
