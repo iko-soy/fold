@@ -866,3 +866,21 @@ fn deleting_a_duplicate_embed_removes_only_its_line() {
     assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
     assert!(v.find_by_path(&["A".into(), "S".into()]).is_some());
 }
+
+#[test]
+fn make_block_on_a_file_changed_on_disk_leaves_no_block_file() {
+    // the write guard refuses to replace the node with its embed in a file
+    // that changed on disk since it was read; the block file must not be
+    // left behind either, orphaned and in no undo entry (§10.10)
+    let (d, mut v) = vault_with("# A\n\n- x\n");
+    std::fs::write(d.path().join("root.md"), "# A\n\n- x\n- synced\n").unwrap();
+    let x = at(&v, &["A", "x"]);
+    let err = ops::make_block(&mut v, x).unwrap_err();
+    assert!(err.to_string().contains("changed on disk"), "{}", err);
+    let names: Vec<String> = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["root.md"]);
+    assert_eq!(read(&d, "root.md"), "# A\n\n- x\n- synced\n");
+}

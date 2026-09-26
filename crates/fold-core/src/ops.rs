@@ -1238,10 +1238,14 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     file_text.push_str(&body);
     let prefix = vault.unique_prefix(&id);
     let fname = crate::ident::filename(&prefix, &slug(&n.title));
-    crate::vault::atomic_write(&vault.dir.join(&fname), &file_text)?;
+    // the embed cannot be written into a file changed on disk (§11.2), and
+    // a block file without it would be embedded nowhere: check first
+    let file = r.0;
+    vault.check_unchanged(file)?;
+    let full = vault.dir.join(&fname);
+    crate::vault::atomic_write(&full, &file_text)?;
     // replace the node's span with an embed in the node's form (§6.1.3,
     // §4.7), keeping the blank lines that separated it from what follows
-    let file = r.0;
     let span = n.span;
     let indent = " ".repeat(n.indent);
     let mut embed = match n.kind {
@@ -1253,7 +1257,12 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     for _ in 1..trailing {
         embed.push('\n');
     }
-    vault.write_span(file, span, &embed)?;
+    if let Err(e) = vault.write_span(file, span, &embed) {
+        // changed in between after all: nothing refers to the new file yet,
+        // and the node is still in its parent
+        let _ = std::fs::remove_file(&full);
+        return Err(e);
+    }
     vault.reload()?;
     Ok(id)
 }
