@@ -1473,3 +1473,23 @@ fn deleting_a_blocks_title_and_body_whole_deletes_the_block() {
         assert!(!block.exists(), "vim {}: the deleted block's file is still in the vault", vim);
     }
 }
+
+#[test]
+fn review_reverting_after_a_saved_cut_then_a_copy_leaves_no_block_file_embedded_nowhere() {
+    // the cut title line is in transit across the save (§5.2): A is written
+    // without the embed. Copying another line replaces the clipboard, so the
+    // block can no longer be pasted back; Revert (`:q!`) must then delete it,
+    // as leaving any other way does, never leave a file that nothing embeds
+    let (d, mut app, embed, block) = editing_task_block_with_body();
+    ctrl(&mut app, 'k');
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    assert!(block.exists(), "in transit");
+    // the cursor is on "  body": copy it over the cut line
+    ctrl(&mut app, 'c');
+    ctrl(&mut app, 'e');
+    keys(&mut app, "q!⏎");
+    assert_eq!(app.mode_pub(), "normal");
+    let r = root(&d);
+    assert!(!block.exists() || r.contains(&embed), "{} exists, root.md is {:?}", block.display(), r);
+}
