@@ -61,6 +61,8 @@ pub struct App {
     status_time: Instant,
     undo: Vec<ops::Inverse>,
     redo: Vec<ops::Inverse>,
+    // snapshot taken when a verb started, settled into `undo` after it
+    pending_undo: Option<ops::Snapshot>,
     filter: String,
     filter_rows: Vec<NRef>,
     palette: String,
@@ -144,6 +146,7 @@ impl App {
             status_time: Instant::now(),
             undo: Vec::new(),
             redo: Vec::new(),
+            pending_undo: None,
             filter: String::new(),
             filter_rows: Vec::new(),
             palette: String::new(),
@@ -467,12 +470,11 @@ impl App {
     fn act_make_block(&mut self) {
         let Some(r) = self.current() else { return };
         self.push_undo("act_make_block");
-        let path = self.vault.tree.path(r);
         match ops::make_block(&mut self.vault, r) {
             Ok(id) => {
                 self.say(format!("block {}", id));
-                // cursor lands on the embed, which resolves to the block
-                if let Some(nr) = self.vault.find_by_path(&path) {
+                // the cursor stays on the node, now a block
+                if let Some(nr) = self.vault.tree.block_by_id(&id) {
                     self.move_cursor_to(nr);
                 }
             }
@@ -505,7 +507,7 @@ impl App {
         self.push_undo("act_paste");
         let text = self.register.clone();
         match ops::paste(&mut self.vault, r, &text, after) {
-            Ok(()) => self.refresh_after("pasted"),
+            Ok(moved) => self.refresh_after(&with_rule_note("pasted", moved)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -540,9 +542,12 @@ impl App {
         self.push_undo("act_spelling");
         let key = self.vault.key_of(r);
         match ops::toggle_spelling(&mut self.vault, r) {
-            Ok(()) => {
+            Ok(moved) => {
                 if let Some(nr) = self.vault.find_by_key(&key) {
                     self.move_cursor_to(nr);
+                }
+                if moved {
+                    self.say(with_rule_note("respelled", true));
                 }
             }
             Err(e) => self.say(format!("error: {}", e)),
@@ -554,9 +559,12 @@ impl App {
         self.push_undo("act_demote");
         let key = self.vault.key_of(r);
         match ops::demote(&mut self.vault, r) {
-            Ok(()) => {
+            Ok(moved) => {
                 if let Some(nr) = self.vault.find_by_key(&key) {
                     self.move_cursor_to(nr);
+                }
+                if moved {
+                    self.say(with_rule_note("demoted", true));
                 }
             }
             Err(e) => self.say(format!("error: {}", e)),
@@ -568,9 +576,12 @@ impl App {
         self.push_undo("act_promote");
         let key = self.vault.key_of(r);
         match ops::promote(&mut self.vault, r) {
-            Ok(()) => {
+            Ok(moved) => {
                 if let Some(nr) = self.vault.find_by_key(&key) {
                     self.move_cursor_to(nr);
+                }
+                if moved {
+                    self.say(with_rule_note("promoted", true));
                 }
             }
             Err(e) => self.say(format!("error: {}", e)),
@@ -581,7 +592,7 @@ impl App {
         let Some(r) = self.current() else { return };
         self.push_undo("act_archive");
         match ops::archive(&mut self.vault, r) {
-            Ok(()) => self.refresh_after("archived"),
+            Ok(moved) => self.refresh_after(&with_rule_note("archived", moved)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -600,7 +611,7 @@ impl App {
         self.push_undo("act_refile");
         match self.vault.resolve_target(dest_text) {
             Ok(dest) => match ops::refile(&mut self.vault, r, dest) {
-                Ok(()) => self.refresh_after("refiled"),
+                Ok(moved) => self.refresh_after(&with_rule_note("refiled", moved)),
                 Err(e) => self.say(format!("error: {}", e)),
             },
             Err(e) => self.say(e),
@@ -632,7 +643,7 @@ impl App {
             let key = self.vault.key_of(r);
             let depth = self.rows().get(self.cursor).map(|row| row.depth).unwrap_or(0);
             match ops::paste(&mut self.vault, r, &format!("{}\n", line), true) {
-                Ok(()) => {
+                Ok(_) => {
                     // move to the new sibling: the first row after the
                     // cursor node's subtree, at its depth, with an empty title
                     if let Some(nr) = self.vault.find_by_key(&key) {
@@ -677,11 +688,12 @@ impl App {
 
     fn save_editor(&mut self, why: &str) {
         let Some(mut buf) = self.edit_buf.take() else { return };
-        let snap = self.snapshot("edit");
+        self.settle_undo();
+        let snap = ops::Snapshot::take(&self.vault, "edit");
         match buf.save_all(&mut self.vault) {
             Ok(n) => {
+                self.record_undo(snap);
                 if n > 0 {
-                    self.record_undo(snap);
                     self.say(format!("saved {} block(s) ({})", n, why));
                 }
                 self.edit_saved_dot = false;
@@ -804,7 +816,8 @@ impl App {
         if new_owner != old_owner {
             if let (Some(old), Some(buf2)) = (old_owner, self.edit_buf.as_mut()) {
                 if buf2.dirty.contains(&old) {
-                    let snap = self.snapshot("edit");
+                    self.settle_undo();
+                    let snap = ops::Snapshot::take(&self.vault, "edit");
                     let mut tmp = self.edit_buf.take().unwrap();
                     if tmp.splice(&mut self.vault, old).is_ok() {
                         self.record_undo(snap);
@@ -1106,6 +1119,11 @@ impl App {
         if !self.mouse_enabled {
             return;
         }
+        self.handle_mouse_inner(m);
+        self.settle_undo();
+    }
+
+    fn handle_mouse_inner(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
         match m.kind {
             MouseEventKind::ScrollDown => self.mouse_scroll(x, y, 3),
@@ -1443,6 +1461,11 @@ impl App {
     /// Dispatch a key press by mode, including the two-key sequences
     /// (`zd`/`zr`/`za`, `gg`, `[[`/`]]`).
     pub fn handle_key(&mut self, key: KeyEvent) {
+        self.handle_key_inner(key);
+        self.settle_undo();
+    }
+
+    fn handle_key_inner(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') && self.mode != Mode::Edit {
             self.quit = true;
@@ -1693,72 +1716,68 @@ impl App {
     }
 
     fn act_undo(&mut self) {
-        if let Some(inv) = self.undo.pop() {
-            let redo_snapshot = self.snapshot("redo point");
-            match self.restore(inv) {
-                Ok(()) => {
-                    self.redo.push(redo_snapshot);
-                    self.clamp_cursor();
-                    self.say("undone");
-                }
-                Err(e) => self.say(format!("undo failed: {}", e)),
-            }
-        } else {
+        self.settle_undo();
+        let Some(inv) = self.undo.pop() else {
             self.say("nothing to undo");
+            return;
+        };
+        self.mark_self_write();
+        match inv.undo(&mut self.vault) {
+            Ok(()) => {
+                self.say(format!("undone: {}", inv.description));
+                self.redo.push(inv);
+                self.clamp_cursor();
+            }
+            Err(e) => {
+                // refused: an external change since; the entry stays
+                self.say(format!("undo refused: {}", e));
+                self.undo.push(inv);
+            }
         }
     }
 
     fn act_redo(&mut self) {
-        if let Some(inv) = self.redo.pop() {
-            let undo_snapshot = self.snapshot("undo point");
-            match self.restore(inv) {
-                Ok(()) => {
-                    self.undo.push(undo_snapshot);
-                    self.clamp_cursor();
-                    self.say("redone");
-                }
-                Err(e) => self.say(format!("redo failed: {}", e)),
-            }
-        } else {
+        self.settle_undo();
+        let Some(inv) = self.redo.pop() else {
             self.say("nothing to redo");
-        }
-    }
-
-    fn push_undo(&mut self, desc: &str) {
-        let snap = self.snapshot(desc);
-        self.record_undo(snap);
-    }
-
-    /// Record a snapshot taken before a mutation as one op-log entry.
-    fn record_undo(&mut self, snap: ops::Inverse) {
-        self.undo.push(snap);
-        self.redo.clear();
+            return;
+        };
         self.mark_self_write();
-    }
-
-    /// Bring the vault back to a snapshot: rewrite its files and remove
-    /// files created since it was taken (new blocks), so undo of a
-    /// file-creating op leaves no orphan (§10.11).
-    fn restore(&mut self, mut inv: ops::Inverse) -> std::io::Result<()> {
-        for f in &self.vault.tree.files {
-            if !inv.files.iter().any(|(p, _)| *p == f.path) {
-                inv.files.push((f.path.clone(), None));
+        match inv.redo(&mut self.vault) {
+            Ok(()) => {
+                self.say(format!("redone: {}", inv.description));
+                self.undo.push(inv);
+                self.clamp_cursor();
+            }
+            Err(e) => {
+                self.say(format!("redo refused: {}", e));
+                self.redo.push(inv);
             }
         }
-        self.mark_self_write();
-        inv.apply(&mut self.vault)
     }
 
-    fn snapshot(&self, desc: &str) -> ops::Inverse {
-        ops::Inverse {
-            files: self
-                .vault
-                .tree
-                .files
-                .iter()
-                .map(|f| (f.path.clone(), Some(f.text.clone())))
-                .collect(),
-            description: desc.into(),
+    /// Start an op-log entry: remember the files as they are before a verb
+    /// runs. The entry is settled after the key or click that ran it.
+    fn push_undo(&mut self, desc: &str) {
+        self.settle_undo();
+        self.pending_undo = Some(ops::Snapshot::take(&self.vault, desc));
+        self.mark_self_write();
+    }
+
+    /// Turn the pending snapshot into an op-log entry holding exactly the
+    /// files the verb changed (§10.11); a verb that changed nothing leaves
+    /// no entry and keeps the redo stack.
+    fn settle_undo(&mut self) {
+        if let Some(snap) = self.pending_undo.take() {
+            self.record_undo(snap);
+        }
+    }
+
+    fn record_undo(&mut self, snap: ops::Snapshot) {
+        if let Some(inv) = ops::Inverse::since(snap, &self.vault) {
+            self.undo.push(inv);
+            self.redo.clear();
+            self.mark_self_write();
         }
     }
 
@@ -2768,6 +2787,16 @@ impl App {
         }
         let block = WBlock::default().borders(Borders::ALL).title(" commands ");
         f.render_widget(Paragraph::new(lines).block(block), rect);
+    }
+}
+
+/// A status message, noting when the ordering rule placed the node other
+/// than asked (§3.1: items before sections).
+fn with_rule_note(what: &str, moved: bool) -> String {
+    if moved {
+        format!("{} — placed at the item/section boundary (§3.1)", what)
+    } else {
+        what.to_string()
     }
 }
 

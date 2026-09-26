@@ -1,5 +1,6 @@
 //! Structural operations on the tree (§5.2, §6, §7, §8). Every op mutates
-//! files through the vault and returns an inverse for the undo log (§10.11).
+//! files through the vault; the undo log records what each one changed as
+//! an `Inverse` (§10.11).
 
 use crate::ident::{slug, Id};
 use crate::parse::{Kind, Span, TaskState};
@@ -7,43 +8,105 @@ use crate::render::render;
 use crate::tree::NRef;
 use crate::vault::Vault;
 
-/// An inverse snapshot for undo (§10.11): file path → prior text. Files that
-/// did not exist are recorded as None.
+/// Every vault file's text at one moment, taken before an operation.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    files: Vec<(String, String)>,
+    description: String,
+}
+
+impl Snapshot {
+    pub fn take(vault: &Vault, description: &str) -> Snapshot {
+        Snapshot {
+            files: vault
+                .tree
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), f.text.clone()))
+                .collect(),
+            description: description.into(),
+        }
+    }
+}
+
+/// One file an operation touched: its text before and after (`None`:
+/// absent — created or deleted by the operation).
+#[derive(Debug, Clone)]
+pub struct Change {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// One entry of the session op log (§10.11): exactly the files an operation
+/// changed, created or deleted, before and after.
 #[derive(Debug, Clone)]
 pub struct Inverse {
-    pub files: Vec<(String, Option<String>)>,
+    pub changes: Vec<Change>,
     pub description: String,
 }
 
 impl Inverse {
-    pub fn apply(self, vault: &mut Vault) -> std::io::Result<()> {
-        for (path, text) in self.files {
-            match text {
-                Some(t) => {
-                    let full = vault.dir.join(&path);
-                    // untouched files keep their bytes and mtime (§11.1)
-                    if std::fs::read_to_string(&full).ok().as_deref() != Some(t.as_str()) {
-                        crate::vault::atomic_write(&full, &t)?;
-                    }
-                }
-                None => {
-                    let _ = std::fs::remove_file(vault.dir.join(&path));
-                }
+    /// What changed since `snap` was taken; `None` if nothing did, so an
+    /// operation that did nothing leaves no entry.
+    pub fn since(snap: Snapshot, vault: &Vault) -> Option<Inverse> {
+        let mut changes = Vec::new();
+        for (path, before) in &snap.files {
+            let after = vault.tree.files.iter().find(|f| f.path == *path).map(|f| &f.text);
+            if after != Some(before) {
+                changes.push(Change {
+                    path: path.clone(),
+                    before: Some(before.clone()),
+                    after: after.cloned(),
+                });
+            }
+        }
+        for f in &vault.tree.files {
+            if !snap.files.iter().any(|(p, _)| *p == f.path) {
+                changes.push(Change {
+                    path: f.path.clone(),
+                    before: None,
+                    after: Some(f.text.clone()),
+                });
+            }
+        }
+        (!changes.is_empty()).then(|| Inverse {
+            changes,
+            description: snap.description,
+        })
+    }
+
+    /// Undo: put every touched file back as it was before. Refuses, writing
+    /// nothing, if any of them is no longer as the operation left it — an
+    /// external change since then (§10.11).
+    pub fn undo(&self, vault: &mut Vault) -> std::io::Result<()> {
+        self.swap(vault, false)
+    }
+
+    /// Redo: the reverse, with the same check against the `before` side.
+    pub fn redo(&self, vault: &mut Vault) -> std::io::Result<()> {
+        self.swap(vault, true)
+    }
+
+    fn swap(&self, vault: &mut Vault, forward: bool) -> std::io::Result<()> {
+        for c in &self.changes {
+            let expect = if forward { &c.before } else { &c.after };
+            let now = std::fs::read_to_string(vault.dir.join(&c.path)).ok();
+            if now != *expect {
+                return Err(io_err(&format!(
+                    "{} changed since {}; not overwriting",
+                    c.path, self.description
+                )));
+            }
+        }
+        for c in &self.changes {
+            let full = vault.dir.join(&c.path);
+            match if forward { &c.after } else { &c.before } {
+                Some(t) => crate::vault::atomic_write(&full, t)?,
+                None => std::fs::remove_file(&full)?,
             }
         }
         vault.reload()
-    }
-}
-
-fn snapshot(vault: &Vault, description: &str) -> Inverse {
-    Inverse {
-        files: vault
-            .tree
-            .files
-            .iter()
-            .map(|f| (f.path.clone(), Some(f.text.clone())))
-            .collect(),
-        description: description.into(),
     }
 }
 
@@ -55,10 +118,7 @@ fn today() -> String {
 
 /// Append an item under today's day section of `Inbox` (§7).
 pub fn capture(vault: &mut Vault, text: &str, task: bool) -> std::io::Result<NRef> {
-    let inv = snapshot(vault, "capture");
-    let r = capture_inner(vault, text, task, None)?;
-    let _ = inv;
-    Ok(r)
+    capture_inner(vault, text, task, None)
 }
 
 pub fn capture_to(
@@ -137,10 +197,11 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
         "#".repeat(level),
         day
     );
+    let inbox_key = vault.key_of(inbox);
     append_structural_line(vault, inbox, &heading)?;
     vault.reload()?;
     let inbox = vault
-        .find_by_path(&vault_inbox_path(vault))
+        .find_by_key(&inbox_key)
         .ok_or_else(|| io_err("inbox lost after reload"))?;
     for c in vault.tree.resolved_children(inbox) {
         if vault.tree.node(c).title == day {
@@ -150,15 +211,6 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
     Err(io_err("day section not created"))
 }
 
-fn vault_inbox_path(vault: &Vault) -> Vec<String> {
-    let root = vault.tree.root;
-    for c in vault.tree.resolved_children(root) {
-        if vault.tree.node(c).title.eq_ignore_ascii_case("inbox") {
-            return vault.tree.path(c);
-        }
-    }
-    vec!["Inbox".into()]
-}
 
 fn append_top_section(vault: &mut Vault, title: &str) -> std::io::Result<NRef> {
     let root_file = 0;
@@ -231,7 +283,6 @@ fn append_child_line(
     line: &str,
     section_ok: bool,
 ) -> std::io::Result<NRef> {
-    let parent_path = vault.tree.path(parent);
     let parent_key = vault.key_of(parent);
     let node = vault.tree.node(parent);
     let file = parent.0;
@@ -297,7 +348,6 @@ fn append_child_line(
     vault.reload()?;
     let parent = vault
         .find_by_key(&parent_key)
-        .or_else(|| vault.find_by_path(&parent_path))
         .ok_or_else(|| io_err("parent lost after reload"))?;
     vault
         .tree
@@ -309,72 +359,69 @@ fn append_child_line(
 
 // ---------------------------------------------------------------- tasks
 
-/// Toggle task open/done (§8.1, §8.2).
+/// Toggle task open/done (§8.1, §8.2). The state is the checkbox on the
+/// title line for every node; a block also gets `done:` stamped or removed.
 pub fn toggle_task(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
-    let n = vault.tree.node(r);
-    if n.is_block() {
-        let new_state = match n.task {
-            Some(TaskState::Open) | None => TaskState::Done,
-            Some(TaskState::Done) => TaskState::Open,
-        };
-        set_block_todo(vault, r, Some(new_state))
-    } else if n.is_embed() {
-        let target = vault.tree.resolved_child(r);
-        if target != r {
-            return toggle_task(vault, target);
-        }
-        Ok(())
-    } else {
-        // checkbox on the title line
-        let file = r.0;
-        let ts = n.title_span;
-        let line = ts.text(&vault.tree.files[file].text).to_string();
-        let to = match n.task {
-            Some(TaskState::Open) => "[x]",
-            Some(TaskState::Done) => "[ ]", // also rewrites `[X]` / `[-]`
-            None => return Ok(()), // not a task; `t` makes it one
-        };
-        let Some((start, _)) = checkbox_span(&line) else {
-            return Ok(());
-        };
-        let mut new_line = line.clone();
-        new_line.replace_range(start..start + 3, to);
-        vault.write_span(file, ts, &new_line)
-    }
+    let r = vault.tree.resolved_child(r);
+    let new_state = match vault.tree.node(r).task {
+        Some(TaskState::Open) => TaskState::Done,
+        Some(TaskState::Done) => TaskState::Open,
+        None => return Ok(()), // not a task; `t` makes it one
+    };
+    set_task(vault, r, Some(new_state))
 }
 
 /// Toggle task-ness itself (§10.3 `t`).
 pub fn toggle_taskness(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
+    let r = vault.tree.resolved_child(r);
+    let state = match vault.tree.node(r).task {
+        Some(_) => None,
+        None => Some(TaskState::Open),
+    };
+    set_task(vault, r, state)
+}
+
+/// Write a node's task state (§4.5, §8.1): the checkbox on its title line
+/// (`None` removes it). For a block, `done:` is stamped when it is checked
+/// and removed otherwise, and a legacy `todo:` key is dropped.
+pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io::Result<()> {
     let n = vault.tree.node(r);
-    if n.is_block() {
-        if n.task.is_some() {
-            set_block_todo(vault, r, None)
-        } else {
-            set_block_todo(vault, r, Some(TaskState::Open))
+    let is_block = n.is_block();
+    let file = r.0;
+    let ts = n.title_span;
+    let line = ts.text(&vault.tree.files[file].text).to_string();
+    let mark = |st: TaskState| match st {
+        TaskState::Open => "[ ]",
+        TaskState::Done => "[x]", // also rewrites `[X]` / `[-]`
+    };
+    let new_line = match (checkbox_span(&line), state) {
+        (Some((start, _)), Some(st)) => {
+            let mut l = line.clone();
+            l.replace_range(start..start + 3, mark(st));
+            l
         }
-    } else if n.is_embed() {
-        let target = vault.tree.resolved_child(r);
-        if target != r {
-            return toggle_taskness(vault, target);
-        }
-        Ok(())
-    } else {
-        let file = r.0;
-        let ts = n.title_span;
-        let line = ts.text(&vault.tree.files[file].text).to_string();
-        let new_line = match n.task {
-            Some(_) => match checkbox_span(&line) {
-                Some((start, end)) => format!("{}{}", &line[..start], &line[end..]),
-                None => line.clone(),
-            },
-            // insert `[ ] ` right after the marker, whatever the indent
-            None => match marker_end(&line) {
-                Some(idx) => format!("{}[ ] {}", &line[..idx], &line[idx..]),
-                None => line.clone(),
-            },
-        };
-        vault.write_span(file, ts, &new_line)
+        (Some((start, end)), None) => format!("{}{}", &line[..start], &line[end..]),
+        // insert right after the marker, whatever the indent
+        (None, Some(st)) => match marker_end(&line) {
+            Some(idx) => format!("{}{} {}", &line[..idx], mark(st), &line[idx..]),
+            None => format!("{} {}", line.trim_end(), mark(st)),
+        },
+        (None, None) => line.clone(),
+    };
+    if new_line != line {
+        vault.write_span(file, ts, &new_line)?;
     }
+    if is_block {
+        let done = match state {
+            Some(TaskState::Done) => Some(today()),
+            _ => None,
+        };
+        set_frontmatter_key(vault, file, "done", done.as_deref())?;
+        if vault.tree.files[file].nodes.iter().any(|n| n.block.as_ref().and_then(|b| b.prop("todo")).is_some()) {
+            set_frontmatter_key(vault, file, "todo", None)?;
+        }
+    }
+    Ok(())
 }
 
 /// Byte offset just past a title line's marker: `#…` plus its spaces, or
@@ -411,29 +458,6 @@ fn checkbox_span(line: &str) -> Option<(usize, usize)> {
         Some((me, end))
     } else {
         None
-    }
-}
-
-/// Write `todo:`/`done:` for a task block (§8.2).
-pub fn set_block_todo(
-    vault: &mut Vault,
-    r: NRef,
-    state: Option<TaskState>,
-) -> std::io::Result<()> {
-    let file = r.0;
-    match state {
-        Some(TaskState::Done) => {
-            set_frontmatter_key(vault, file, "todo", Some("done"))?;
-            set_frontmatter_key(vault, file, "done", Some(&today()))
-        }
-        Some(TaskState::Open) => {
-            set_frontmatter_key(vault, file, "todo", Some("open"))?;
-            set_frontmatter_key(vault, file, "done", None)
-        }
-        None => {
-            set_frontmatter_key(vault, file, "todo", None)?;
-            set_frontmatter_key(vault, file, "done", None)
-        }
     }
 }
 
@@ -656,7 +680,7 @@ pub fn yank(vault: &Vault, r: NRef) -> String {
 
 /// Paste rendered text after/before a node as siblings (§10.3 `p`/`P`),
 /// clamped by the ordering rule (§3.1).
-pub fn paste(vault: &mut Vault, at: NRef, text: &str, after: bool) -> std::io::Result<()> {
+pub fn paste(vault: &mut Vault, at: NRef, text: &str, after: bool) -> std::io::Result<bool> {
     if vault.tree.node(at).kind == Kind::Root {
         return Err(io_err("cannot paste beside the root"));
     }
@@ -667,7 +691,7 @@ pub fn paste(vault: &mut Vault, at: NRef, text: &str, after: bool) -> std::io::R
     };
     let pos = vault.tree.raw_children(parent).iter().position(|&k| k == at).unwrap_or(0);
     let shifted = shift_document(text, vault.tree.level(parent), child_indent(&vault.tree, parent));
-    place(vault, None, parent, pos + after as usize, &shifted).map(|_| ())
+    place(vault, None, parent, pos + after as usize, &shifted)
 }
 
 /// Parse a standalone document and re-emit it as children of a node whose
@@ -782,7 +806,7 @@ fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
 }
 
 /// Refile: move a subtree under a new parent as its last child (§6.5).
-pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<()> {
+pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<bool> {
     let dest = vault.tree.resolved_child(dest);
     let n = vault.tree.node(r);
     // guard: cannot refile into own subtree — ancestry followed through
@@ -809,7 +833,7 @@ pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<()> {
     }
     let rendered = render(&vault.tree, moving, 1, false);
     let shifted = shift_document(&rendered, vault.tree.level(dest), child_indent(&vault.tree, dest));
-    place(vault, Some(moving), dest, usize::MAX, &shifted).map(|_| ())
+    place(vault, Some(moving), dest, usize::MAX, &shifted)
 }
 
 // ---------------------------------------------------------------- placement
@@ -865,15 +889,15 @@ fn clamp_index(tree: &crate::tree::Tree, kids: &[NRef], want: usize, kinds: &[Ki
 /// `want`-th child node of `parent`, clamped by the ordering rule (§3.1).
 /// With `moving`, that node's own lines are removed in the same edit: text
 /// children around it stay where they are. The insertion is written before
-/// any removal in another file, so a failure never loses text. Returns the
-/// index the document landed at among `parent`'s child nodes.
+/// any removal in another file, so a failure never loses text. Returns
+/// whether the ordering rule moved it from the wanted index.
 fn place(
     vault: &mut Vault,
     moving: Option<NRef>,
     parent: NRef,
     want: usize,
     doc: &str,
-) -> std::io::Result<usize> {
+) -> std::io::Result<bool> {
     let tree = &vault.tree;
     let pnode = tree.node(parent);
     let kids: Vec<NRef> = tree
@@ -958,11 +982,11 @@ fn place(
         }
     }
     vault.reload()?;
-    Ok(idx)
+    Ok(idx != want.min(kids.len()))
 }
 
 /// Archive: refile under the top-level `Archive` section (§6.5).
-pub fn archive(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
+pub fn archive(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let root = vault.tree.root;
     let mut dest = None;
     for c in vault.tree.resolved_children(root) {
@@ -1066,36 +1090,9 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     let id = Id::generate();
     // the file: render(node, 1, false) with frontmatter (§6.1.2)
     let body = render(&vault.tree, r, 1, false);
-    let mut file_text = format!("---\nid: {}\n", id);
-    // checkbox becomes todo: (§6.1.3)
-    if let Some(state) = n.task {
-        file_text.push_str(&format!(
-            "todo: {}\n",
-            match state {
-                TaskState::Open => "open",
-                TaskState::Done => "done",
-            }
-        ));
-    }
-    file_text.push_str("---\n\n");
-    // strip the checkbox from the root title line (§4.5)
-    let body_lines: Vec<&str> = body.lines().collect();
-    let mut stripped = String::new();
-    for (i, l) in body_lines.iter().enumerate() {
-        if i == 0 && n.task.is_some() {
-            match checkbox_span(l) {
-                Some((start, end)) => {
-                    stripped.push_str(&l[..start]);
-                    stripped.push_str(&l[end..]);
-                }
-                None => stripped.push_str(l),
-            }
-        } else {
-            stripped.push_str(l);
-        }
-        stripped.push('\n');
-    }
-    file_text.push_str(&stripped);
+    // the checkbox stays on the title line: it is the state (§4.5)
+    let mut file_text = format!("---\nid: {}\n---\n\n", id);
+    file_text.push_str(&body);
     let prefix = vault.unique_prefix(&id);
     let fname = crate::ident::filename(&prefix, &slug(&n.title));
     crate::vault::atomic_write(&vault.dir.join(&fname), &file_text)?;
@@ -1214,11 +1211,11 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
 /// and the subtree is re-indented and re-levelled for the new spelling. The
 /// node moves to its parent's boundary if it has to (§3.1), so no sibling
 /// changes parent; a block's embed changes form and moves with it (§4.7).
-pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
+pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let r = vault.tree.resolved_child(r);
     let n = vault.tree.node(r);
     if n.kind == Kind::Root {
-        return Ok(());
+        return Ok(false);
     }
     let to_section = n.kind == Kind::Item;
     let stand = stand_in(&vault.tree, r);
@@ -1231,21 +1228,22 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
         let id = n.block.as_ref().and_then(|b| b.id.clone());
         vault.write_span(file, span, &respelled)?;
         let Some(e) = id.and_then(|id| vault.tree.embed_of(&id)) else {
-            return vault.reload();
+            vault.reload()?;
+            return Ok(false);
         };
         return respell_embed(vault, e, to_section);
     }
-    let Some(parent) = n.parent.map(|p| (file, p)) else { return Ok(()) };
+    let Some(parent) = n.parent.map(|p| (file, p)) else { return Ok(false) };
     let respelled = respell(span.text(&text), to_section, vault.tree.level(parent) + 1);
     reposition(vault, r, parent, respelled, to_section)
 }
 
 /// Rewrite an embed in the other form (§4.7) — heading for a section-spelled
 /// block, bare for an item — moving it to its parent's boundary if needed.
-pub fn respell_embed(vault: &mut Vault, e: NRef, to_section: bool) -> std::io::Result<()> {
+pub fn respell_embed(vault: &mut Vault, e: NRef, to_section: bool) -> std::io::Result<bool> {
     let en = vault.tree.node(e);
-    let Some(id) = en.embed.clone() else { return Ok(()) };
-    let Some(parent) = en.parent.map(|p| (e.0, p)) else { return Ok(()) };
+    let Some(id) = en.embed.clone() else { return Ok(false) };
+    let Some(parent) = en.parent.map(|p| (e.0, p)) else { return Ok(false) };
     let text = &vault.tree.files[e.0].text;
     let old = Span { start: en.span.start, end: en.span.end.min(text.len()) }.text(text);
     let rest = old.find('\n').map(|i| &old[i..]).unwrap_or("\n");
@@ -1267,7 +1265,7 @@ fn reposition(
     parent: NRef,
     new: String,
     to_section: bool,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let tree = &vault.tree;
     let kids = tree.raw_children(parent);
     let pos = kids.iter().position(|&k| k == r).unwrap_or(0);
@@ -1276,9 +1274,10 @@ fn reposition(
     if clamp_index(tree, &others, pos, &[kind]) == pos {
         let span = tree.node(r).span;
         vault.write_span(r.0, span, &new)?;
-        return vault.reload();
+        vault.reload()?;
+        return Ok(false);
     }
-    place(vault, Some(r), parent, pos, &new).map(|_| ())
+    place(vault, Some(r), parent, pos, &new).map(|_| true)
 }
 
 
@@ -1317,13 +1316,13 @@ fn respell(span_text: &str, to_section: bool, level: usize) -> String {
 
 /// Demote: become the last child of the previous sibling node (§10.3 `>`),
 /// clamped by the ordering rule (§3.1).
-pub fn demote(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
+pub fn demote(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let m = stand_in(&vault.tree, r);
-    let Some(parent) = vault.tree.node(m).parent.map(|p| (m.0, p)) else { return Ok(()) };
+    let Some(parent) = vault.tree.node(m).parent.map(|p| (m.0, p)) else { return Ok(false) };
     let kids = vault.tree.raw_children(parent);
-    let Some(pos) = kids.iter().position(|&k| k == m) else { return Ok(()) };
+    let Some(pos) = kids.iter().position(|&k| k == m) else { return Ok(false) };
     if pos == 0 {
-        return Ok(());
+        return Ok(false);
     }
     let prev = vault.tree.resolved_child(kids[pos - 1]);
     refile(vault, r, prev)
@@ -1333,16 +1332,16 @@ pub fn demote(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
 /// ordering rule (§3.1): an item leaving a section lands before the first
 /// section among the parent's siblings. Out of a block's root, the node moves
 /// to the parent file beside the block's embed.
-pub fn promote(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
+pub fn promote(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let m = stand_in(&vault.tree, r);
-    let Some(parent) = vault.tree.node(m).parent.map(|p| (m.0, p)) else { return Ok(()) };
+    let Some(parent) = vault.tree.node(m).parent.map(|p| (m.0, p)) else { return Ok(false) };
     if vault.tree.node(parent).kind == Kind::Root {
-        return Ok(());
+        return Ok(false);
     }
     // the parent's own position: its embed if it is a block root
     let pstand = stand_in(&vault.tree, parent);
     let Some(grand) = vault.tree.node(pstand).parent.map(|p| (pstand.0, p)) else {
-        return Ok(());
+        return Ok(false);
     };
     if vault.tree.node(grand).kind == Kind::Root && pstand.0 != vault.tree.root.0 {
         return Err(io_err("block has no embed"));
@@ -1350,7 +1349,7 @@ pub fn promote(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
     let pos = vault.tree.raw_children(grand).iter().position(|&k| k == pstand).unwrap_or(0);
     let rendered = render(&vault.tree, m, 1, false);
     let shifted = shift_document(&rendered, vault.tree.level(grand), child_indent(&vault.tree, grand));
-    place(vault, Some(m), grand, pos + 1, &shifted).map(|_| ())
+    place(vault, Some(m), grand, pos + 1, &shifted)
 }
 
 /// Rename a node's title (used by the editor when it detects a title change,
@@ -1384,13 +1383,10 @@ pub fn rename_title(vault: &mut Vault, r: NRef, new_title: &str) -> std::io::Res
     if !checkbox.is_empty() {
         prefix.push_str(checkbox);
     }
+    // the file keeps its name: names are set once, and `check --fix`
+    // brings them up to date on request (§6.4)
     let new_line = format!("{}{}", prefix, new_title);
-    let is_block_root = n.is_block();
-    vault.write_span(file, ts, &new_line)?;
-    if is_block_root {
-        vault.rename_block_file(file, new_title)?;
-    }
-    Ok(())
+    vault.write_span(file, ts, &new_line)
 }
 
 /// Append a plain item child titled `title` under `parent`; returns the new

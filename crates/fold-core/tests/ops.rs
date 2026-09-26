@@ -58,10 +58,11 @@ fn make_block_writes_file_and_embed() {
     // the block file round-trips
     assert_eq!(v.tree.files.len(), 2);
     let bf = &v.tree.files[1];
-    assert!(bf.text.starts_with(&format!("---\nid: {}\ntodo: open\n---\n\n", id)));
-    assert!(bf.text.contains("- Order new switch"), "{}", bf.text);
+    // the checkbox stays on the title line: it is the state (§4.5)
+    assert!(bf.text.starts_with(&format!("---\nid: {}\n---\n\n", id)), "{}", bf.text);
+    assert!(bf.text.contains("- [ ] Order new switch"), "{}", bf.text);
     assert!(bf.text.contains("Two options."), "{}", bf.text);
-    assert!(!bf.text.contains("[ ]"));
+    assert!(!bf.text.contains("todo:"));
     // filename: <prefix>~<name>.md
     assert!(bf.path.ends_with("~order-new-switch.md"), "{}", bf.path);
 }
@@ -76,8 +77,13 @@ fn task_block_toggle_stamps_done() {
     let block = v.tree.resolved_child(embed);
     ops::toggle_task(&mut v, block).unwrap();
     let bf = &v.tree.files[1];
-    assert!(bf.text.contains("todo: done"), "{}", bf.text);
+    assert!(bf.text.contains("- [x] Order new switch"), "{}", bf.text);
     assert!(bf.text.contains("done: 20"), "{}", bf.text);
+    assert!(!bf.text.contains("todo:"), "{}", bf.text);
+    ops::toggle_task(&mut v, block).unwrap();
+    let bf = &v.tree.files[1];
+    assert!(bf.text.contains("- [ ] Order new switch"), "{}", bf.text);
+    assert!(!bf.text.contains("done:"), "{}", bf.text);
 }
 
 #[test]
@@ -218,17 +224,23 @@ fn demote_and_promote() {
 }
 
 #[test]
-fn rename_block_title_renames_file() {
+fn rename_block_title_keeps_the_filename_until_fix() {
     let (_d, mut v) = vault_with("# A\n\n- task\n");
     let a = v.tree.resolved_children(v.tree.root)[0];
     let task = v.tree.resolved_children(a)[0];
     ops::make_block(&mut v, task).unwrap();
     let embed = v.tree.resolved_children(v.tree.resolved_children(v.tree.root)[0])[0];
     let block = v.tree.resolved_child(embed);
+    let old_path = v.tree.files[1].path.clone();
     ops::rename_title(&mut v, block, "renamed title").unwrap();
     assert_eq!(v.tree.files.len(), 2);
-    assert!(v.tree.files[1].path.ends_with("~renamed-title.md"), "{}", v.tree.files[1].path);
+    // names are set once (§6.4): the file keeps its name ...
+    assert_eq!(v.tree.files[1].path, old_path);
     assert!(v.tree.files[1].text.contains("- renamed title"));
+    // ... check calls it stale, and --fix renames it on request
+    assert!(fold_core::check::check(&v).iter().any(|d| d.message.contains("does not match the title")));
+    fold_core::check::fix(&mut v).unwrap();
+    assert!(v.tree.files[1].path.ends_with("~renamed-title.md"), "{}", v.tree.files[1].path);
 }
 
 #[test]
@@ -525,7 +537,9 @@ fn capture_to_a_node_with_sections_stays_an_item() {
 }
 
 #[test]
-fn check_fix_keeps_root_frontmatter_intro_and_malformed_files() {
+fn check_fix_keeps_root_frontmatter_intro_and_adopted_nodes() {
+    // a second column-0 node is adopted by the block's root (§4.9): --fix
+    // writes it as the root's child and loses nothing
     let malformed = format!("---\nid: {}\n---\n\n# One\n\n# Two\n\nprecious\n", ID_A);
     let fm_only = format!("---\nid: {}\n---\n", ID_B);
     let (d, mut v) = vault_files(
@@ -534,7 +548,10 @@ fn check_fix_keeps_root_frontmatter_intro_and_malformed_files() {
     );
     fold_core::check::fix(&mut v).unwrap();
     assert_eq!(read(&d, "root.md"), "---\nvault: x\n---\n\nIntro text.\n\n# Inbox\n");
-    assert_eq!(read(&d, "racfer~one.md"), malformed);
+    assert_eq!(
+        read(&d, "racfer~one.md"),
+        format!("---\nid: {}\n---\n\n# One\n\n## Two\n\nprecious\n", ID_A)
+    );
 }
 
 #[test]

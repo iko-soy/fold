@@ -206,12 +206,12 @@ fn sync_conflict_on_block_places_embed_after_its_embed() {
     std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n\n# B\n", BID)).unwrap();
     std::fs::write(
         dir.path().join("racfer~t.md"),
-        format!("---\nid: {}\ntodo: open\n---\n\n- t\n", BID),
+        format!("---\nid: {}\n---\n\n- [ ] t\n", BID),
     )
     .unwrap();
     std::fs::write(
         dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
-        format!("---\nid: {}\ntodo: done\n---\n\n- t\n", BID),
+        format!("---\nid: {}\n---\n\n- [x] t\n", BID),
     )
     .unwrap();
     let mut v = Vault::open(dir.path()).unwrap();
@@ -290,7 +290,7 @@ fn keep_ours_handles_multibyte_text_before_embed() {
 }
 
 #[test]
-fn retitled_block_root_conflicts_and_keep_theirs_renames_file() {
+fn retitled_block_root_conflicts_and_keep_theirs_keeps_the_filename() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
     std::fs::write(dir.path().join("racfer~old.md"), format!("---\nid: {}\n---\n\n- old\n", BID)).unwrap();
@@ -306,8 +306,8 @@ fn retitled_block_root_conflicts_and_keep_theirs_renames_file() {
     let pairs = merge::conflict_pairs(&v);
     assert_eq!(pairs.len(), 1);
     merge::resolve_keep_theirs(&mut v, pairs[0].0, pairs[0].1).unwrap();
-    assert!(!dir.path().join("racfer~old.md").exists());
-    let text = std::fs::read_to_string(dir.path().join("racfer~new.md")).unwrap();
+    // the title changed, the filename did not (§6.4)
+    let text = std::fs::read_to_string(dir.path().join("racfer~old.md")).unwrap();
     assert!(text.contains(&format!("id: {}", BID)) && text.contains("- new"), "{}", text);
     assert!(merge::conflict_pairs(&v).is_empty());
 }

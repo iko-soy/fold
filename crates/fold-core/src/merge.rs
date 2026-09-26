@@ -402,20 +402,11 @@ fn merge_pair(
                 block_text.push_str(&format!("{}: {}\n", k, v));
             }
         }
-        None => {
-            if let Some(ts) = ttask {
-                block_text.push_str(&format!(
-                    "todo: {}\n",
-                    match ts {
-                        TaskState::Open => "open",
-                        TaskState::Done => "done",
-                    }
-                ));
-            }
-        }
+        // T's task state travels as the checkbox on its title line (§4.5)
+        None => {}
     }
     block_text.push_str("---\n\n");
-    block_text.push_str(&emit_subtree_with_state(t, b, 1, 0));
+    block_text.push_str(&emit_subtree(t, b, 1, 0));
     ctx.conflict_blocks.push((fname, block_text));
     if is_file_block {
         // a block file has one column-0 node: the embed goes after this
@@ -439,41 +430,22 @@ fn merge_pair(
 
 /// Render a node at (level, indent) with given already-rendered children.
 fn emit_node_with(o: &Tree, a: NRef, level: usize, indent: usize, kids: &str) -> String {
-    emit_node_with_impl(o, a, level, indent, kids, false)
-}
-
-fn emit_node_with_impl(
-    o: &Tree,
-    a: NRef,
-    level: usize,
-    indent: usize,
-    kids: &str,
-    show_block_state: bool,
-) -> String {
     let n = o.node(a);
     let mut out = String::new();
     let ind = " ".repeat(indent);
-    // A block root's task state normally lives only in frontmatter (§4.9);
-    // when emitting for resolution we surface it as a checkbox so the
-    // receiving side parses it back as state.
-    let is_block_root = n.is_block() && !show_block_state;
     match n.kind {
         Kind::Section => {
             out.push_str(&ind);
             out.push_str(&"#".repeat(level.max(1)));
             out.push(' ');
-            if !is_block_root {
-                push_task(n.task, &mut out);
-            }
+            push_task(n.task, &mut out);
             out.push_str(&n.title);
             out.push('\n');
         }
         Kind::Item => {
             out.push_str(&ind);
             out.push_str("- ");
-            if !is_block_root {
-                push_task(n.task, &mut out);
-            }
+            push_task(n.task, &mut out);
             out.push_str(&n.title);
             out.push('\n');
         }
@@ -506,16 +478,6 @@ fn emit_node_with_impl(
 }
 
 fn emit_subtree(t: &Tree, r: NRef, level: usize, indent: usize) -> String {
-    emit_subtree_impl(t, r, level, indent, false)
-}
-
-/// Emit with the block root's `todo:` shown as a checkbox — used for
-/// conflict blocks so resolution can lift their state back (§12.5).
-fn emit_subtree_with_state(t: &Tree, r: NRef, level: usize, indent: usize) -> String {
-    emit_subtree_impl(t, r, level, indent, true)
-}
-
-fn emit_subtree_impl(t: &Tree, r: NRef, level: usize, indent: usize, show_block_state: bool) -> String {
     let kids = t.resolved_children(r);
     let child_level = match t.node(r).kind {
         Kind::Section => level + 1,
@@ -532,13 +494,13 @@ fn emit_subtree_impl(t: &Tree, r: NRef, level: usize, indent: usize, show_block_
     for (j, &k) in kids.iter().enumerate() {
         pieces.push(Piece::Node(
             t.node(k).kind,
-            emit_subtree_impl(t, k, child_level, child_indent, show_block_state),
+            emit_subtree(t, k, child_level, child_indent),
         ));
         for (_, sp) in trailing.iter().filter(|(pos, _)| *pos == j) {
             pieces.push(Piece::Text(emit_text(t, r, *sp, child_indent)));
         }
     }
-    emit_node_with_impl(t, r, level, indent, &join_pieces(pieces), show_block_state)
+    emit_node_with(t, r, level, indent, &join_pieces(pieces))
 }
 
 fn push_task(task: Option<TaskState>, out: &mut String) {
@@ -780,48 +742,9 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
     let tb = vault.tree.node(theirs).block.clone();
     let Some(tb) = tb else { return Ok(()) };
     // 1. replace ours' subtree text with theirs' (re-levelled to ours' spot)
-    let mut theirs_body = crate::render::render(&vault.tree, theirs, 1, true);
-    // The conflict block's state lives in its frontmatter (§4.9); surface it
-    // as a checkbox so the receiving side parses it back as task state.
-    // A block's state is `todo:`, never a checkbox in its file (§4.9).
-    let ours_is_block = vault.tree.node(ours).is_block();
-    let ours_block_id = vault.tree.node(ours).block.as_ref().and_then(|b| b.id.clone());
-    let state = if ours_is_block { None } else { vault.tree.node(theirs).task };
-    if let Some(state) = state {
-        let marker = match state {
-            TaskState::Open => "[ ] ",
-            TaskState::Done => "[x] ",
-        };
-        let mut lines = theirs_body.lines();
-        if let Some(first) = lines.next() {
-            // the title line is `#… ` or `- ` after its indent; the checkbox
-            // goes right after that marker, never inside the title
-            let lead = first.len() - first.trim_start().len();
-            let rest = &first[lead..];
-            let marker_end = if rest.starts_with('#') {
-                let hashes = rest.len() - rest.trim_start_matches('#').len();
-                rest[hashes..].starts_with(' ').then_some(lead + hashes + 1)
-            } else if rest.starts_with("- ") {
-                Some(lead + 2)
-            } else {
-                None
-            };
-            let inserted = match marker_end {
-                Some(m) if !is_checkbox(&first[m..]) => {
-                    let mut s = first.to_string();
-                    s.insert_str(m, marker);
-                    s
-                }
-                _ => first.to_string(),
-            };
-            let rest: Vec<&str> = lines.collect();
-            theirs_body = if rest.is_empty() {
-                format!("{}\n", inserted)
-            } else {
-                format!("{}\n{}\n", inserted, rest.join("\n"))
-            };
-        }
-    }
+    let theirs_body = crate::render::render(&vault.tree, theirs, 1, true);
+    // theirs' task state is the checkbox on its title line, already in the
+    // rendered text (§4.5)
     let on = vault.tree.node(ours);
     if on.is_block() {
         // ours is a block: rewrite its file (after frontmatter) with theirs'
@@ -864,20 +787,13 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
         for (k, v) in tprops {
             crate::ops::set_frontmatter_key(vault, file, &k, Some(&v))?;
         }
-        // rename the file if the title changed (§6.4)
+        // a title change does not rename the file (§6.4)
         vault.reload()?;
-        let file = ours_block_id
-            .as_ref()
-            .and_then(|id| vault.tree.block_by_id(id))
-            .map(|r| (r.0, vault.tree.node(r).title.clone()));
-        if let Some((file, title)) = file {
-            vault.rename_block_file(file, &title)?;
-        }
     } else {
         // plain node: replace its span with theirs' re-levelled text
-        let level = vault.tree.level(ours);
+        let parent_level = on.parent.map(|p| vault.tree.level((ours.0, p))).unwrap_or(0);
         let indent = vault.tree.indent(ours);
-        let shifted = crate::ops::shift_document(&theirs_body, level, indent);
+        let shifted = crate::ops::shift_document(&theirs_body, parent_level, indent);
         let file = ours.0;
         let span = on.span;
         vault.write_span(file, span, &shifted)?;
@@ -888,11 +804,6 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
         delete_embed_and_block(vault, &tb, t)?;
     }
     Ok(())
-}
-
-fn is_checkbox(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() >= 3 && b[0] == b'[' && b[2] == b']' && (b.len() == 3 || b[3] == b' ')
 }
 
 /// keep both: drop the `conflict` key; the block stays as an ordinary

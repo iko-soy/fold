@@ -123,20 +123,14 @@ impl Walk<'_> {
                 let mut s = " ".repeat(dindent);
                 s.push_str(&"#".repeat(dlevel.max(1)));
                 s.push(' ');
-                // A block's task state is frontmatter-only (§4.9): no
-                // checkbox on its own title line.
-                if !n.is_block() {
-                    push_checkbox(n.task, &mut s);
-                }
+                push_checkbox(n.task, &mut s);
                 s.push_str(&n.title);
                 Some((s.trim_end().to_string(), LineKind::Title))
             }
             Kind::Item => {
                 let mut s = " ".repeat(dindent);
                 s.push_str("- ");
-                if !n.is_block() {
-                    push_checkbox(n.task, &mut s);
-                }
+                push_checkbox(n.task, &mut s);
                 s.push_str(&n.title);
                 Some((s.trim_end().to_string(), LineKind::Title))
             }
@@ -205,13 +199,19 @@ impl Walk<'_> {
         }
         let tree = self.tree;
         let cols = tree.node(r).indent;
+        // an item's text sits two columns in; a line left of that (adopted
+        // column-0 text in a block file, §4.9) is written there
+        let min_rel: usize = if tree.node(r).kind == Kind::Item { 2 } else { 0 };
         for l in tree.text_of(r)[span.start..span.end].split_inclusive('\n') {
             let l = l.strip_suffix('\n').unwrap_or(l);
             let l = l.strip_suffix('\r').unwrap_or(l);
             if l.trim().is_empty() {
                 self.push(String::new(), LineKind::Blank, r, owner, outer, dlevel, dindent);
             } else {
-                let text = format!("{}{}", " ".repeat(dindent), dedent(l, cols));
+                let rel = dedent(l, cols);
+                let lead = rel.len() - rel.trim_start_matches(' ').len();
+                let pad = min_rel.saturating_sub(lead);
+                let text = format!("{}{}", " ".repeat(dindent + pad), rel);
                 self.push(text, LineKind::Body, r, owner, outer, dlevel, dindent);
             }
         }

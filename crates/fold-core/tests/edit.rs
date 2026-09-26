@@ -247,14 +247,14 @@ fn noop_splice_of_spec_example_vault() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.md"), "# Homelab\n\nTwo boxes in the closet, one at Hetzner.\n\n## NAS\n\n![[dozzod-binwes-talsun-worbec]]\n\n## Networking\n\n- [ ] Replace the flaky switch\n![[racfer-hattes-mislup-nodrys]]\n\n# Inbox\n\n## 2026-09-10\n\n- Talked to Anya about the venue.\n  ### Options\n  Warehouse on Ligovsky, or the old bakery. Both need a licence.\n- [x] Send the deposit\n").unwrap();
     std::fs::write(dir.path().join("dozzod~zfs-layout.md"), "---\nid: dozzod-binwes-talsun-worbec\nsince: 2024-03\ntags: [storage, homelab]   # user-defined\n---\n\n# ZFS layout\n\nMirrored pairs, no raidz. Snapshots hourly via sanoid.\n\n## [ ] Snapshot policy\n\n- hourly, keep 24\n- [x] Move scratch to its own dataset\n").unwrap();
-    std::fs::write(dir.path().join("racfer~order-new-switch.md"), "---\nid: racfer-hattes-mislup-nodrys\ntodo: open\ndue: 2026-09-20\n---\n\n- Order new switch\n  Two options, noted under Networking.\n").unwrap();
+    std::fs::write(dir.path().join("racfer~order-new-switch.md"), "---\nid: racfer-hattes-mislup-nodrys\ndue: 2026-09-20\n---\n\n- [ ] Order new switch\n  Two options, noted under Networking.\n").unwrap();
     let mut v = Vault::open(dir.path()).unwrap();
     let root = v.tree.root;
     let buf = open_editor(&v, root);
     let texts: Vec<&str> = buf.lines.iter().map(|l| l.text.as_str()).collect();
     assert!(texts.contains(&"### ZFS layout"), "{:#?}", texts);
     assert!(texts.contains(&"#### [ ] Snapshot policy"), "{:#?}", texts);
-    assert!(texts.contains(&"- Order new switch"), "{:#?}", texts);
+    assert!(texts.contains(&"- [ ] Order new switch"), "{:#?}", texts);
     assert!(!texts.iter().any(|t| t.contains("![[")), "{:#?}", texts);
     assert_noop_splice(&mut v, root);
     let homelab = v.tree.resolved_children(v.tree.root)[0];

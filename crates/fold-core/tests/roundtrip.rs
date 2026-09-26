@@ -237,7 +237,7 @@ fn resolved_render_has_no_boundaries() {
 #[test]
 fn bullet_root_block_file() {
     // A block whose root is an item: the file starts with a bullet (§4.9).
-    let text = "---\nid: racfer-hattes-mislup-nodrys\ntodo: open\ndue: 2026-09-20\n---\n\n- Order new switch\n  Two options, noted under Networking.\n";
+    let text = "---\nid: racfer-hattes-mislup-nodrys\ndue: 2026-09-20\n---\n\n- [ ] Order new switch\n  Two options, noted under Networking.\n";
     let fm = fold_core::parse::parse_frontmatter(text).unwrap();
     let id = Id::parse("racfer-hattes-mislup-nodrys").unwrap();
     let block = Block {

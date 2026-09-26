@@ -44,8 +44,8 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
         }
     }
     // embeds: broken, duplicate, cyclic, with children (§6.2, §15.7)
-    for f in &t.files {
-        for n in &f.nodes {
+    for (fi, f) in t.files.iter().enumerate() {
+        for (ni, n) in f.nodes.iter().enumerate() {
             if let Some(id) = &n.embed {
                 match t.block_by_id(id) {
                     None => out.push(Diagnostic {
@@ -60,6 +60,17 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                         ),
                     }),
                     Some(_) => {}
+                }
+                if let Some(w) = embed_level_mismatch(t, (fi, ni)) {
+                    out.push(Diagnostic {
+                        file: f.path.clone(),
+                        message: format!(
+                            "heading embed at level {} where its position gives {}: {} (§4.7)",
+                            w,
+                            t.derived_level((fi, ni)),
+                            id
+                        ),
+                    });
                 }
                 if !n.children.is_empty() {
                     out.push(Diagnostic {
@@ -118,7 +129,10 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                 if name != want {
                     out.push(Diagnostic {
                         file: b.path.clone(),
-                        message: format!("filename name {} does not match the title ({})", name, want),
+                        message: format!(
+                            "filename name {} does not match the title ({}): stale, harmless; --fix renames",
+                            name, want
+                        ),
                     });
                 }
             }
@@ -183,6 +197,16 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
     out
 }
 
+/// A heading embed's written level, when it is not the level its position
+/// gives (§4.7). Levels are honoured as written, like any heading's, so a
+/// stale one is reported rather than trusted to mean something.
+fn embed_level_mismatch(t: &crate::tree::Tree, e: NRef) -> Option<usize> {
+    let n = t.node(e);
+    let written = n.level?;
+    (n.embed.is_some() && n.kind == Kind::Section && written != t.derived_level(e))
+        .then_some(written)
+}
+
 /// A heading embed must embed a section, a bare one an item (§4.7).
 fn form_mismatch(embed: Kind, block: Kind) -> bool {
     (embed == Kind::Section) != (block == Kind::Section)
@@ -205,6 +229,25 @@ pub fn is_iso_date(v: &str) -> bool {
 /// malformed (§4.9: read-only until fixed by hand) is left alone.
 pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
     let mut count = 0;
+    // a blank line before every text child that follows a child node (§4.2)
+    for i in 0..vault.tree.files.len() {
+        let f = &vault.tree.files[i];
+        let mut at: Vec<usize> = f
+            .nodes
+            .iter()
+            .flat_map(|n| crate::parse::unseparated_text(n, &f.text))
+            .collect();
+        if at.is_empty() {
+            continue;
+        }
+        at.sort_unstable();
+        let mut text = f.text.clone();
+        for &p in at.iter().rev() {
+            text.insert(p, '\n');
+        }
+        vault.write_file_text(i, &text)?;
+        count += 1;
+    }
     for i in 0..vault.tree.files.len() {
         let f = &vault.tree.files[i];
         let top: Vec<usize> = f.nodes[f.root_node].children.clone();
@@ -267,6 +310,19 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             count += 1;
         }
     }
+    // legacy `todo:` keys: the canonical render above wrote the state as the
+    // title line's checkbox, so the key goes (§4.5)
+    for i in 0..vault.tree.files.len() {
+        let f = &vault.tree.files[i];
+        let migrated = f.nodes.iter().any(|n| {
+            n.block.as_ref().and_then(|b| b.prop("todo")).is_some()
+                && crate::parse::title_has_checkbox(n.title_span.text(&f.text))
+        });
+        if migrated {
+            crate::ops::set_frontmatter_key(vault, i, "todo", None)?;
+            count += 1;
+        }
+    }
     // embeds in the form of their block's spelling (§4.7), one at a time:
     // each respell may move an embed and re-parse its file
     for _ in 0..vault.tree.blocks.len() {
@@ -278,6 +334,27 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         });
         let Some((e, to_section)) = wrong else { break };
         crate::ops::respell_embed(vault, e, to_section)?;
+        count += 1;
+    }
+    // heading embeds at the level of their position (§4.7); only ever
+    // shallower than written, so no line changes parent
+    for _ in 0..10_000 {
+        let t = &vault.tree;
+        let wrong = t.files.iter().enumerate().find_map(|(fi, f)| {
+            (0..f.nodes.len())
+                .find(|&ni| embed_level_mismatch(t, (fi, ni)).is_some())
+                .map(|ni| (fi, ni))
+        });
+        let Some(e) = wrong else { break };
+        let n = vault.tree.node(e);
+        let line = format!(
+            "{}{} ![[{}]]",
+            " ".repeat(n.indent),
+            "#".repeat(vault.tree.derived_level(e)),
+            n.embed.as_ref().unwrap()
+        );
+        let span = n.title_span;
+        vault.write_span(e.0, span, &line)?;
         count += 1;
     }
     // repair filenames (§6.4): an existing prefix that is a leading run of

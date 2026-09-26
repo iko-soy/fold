@@ -467,13 +467,19 @@ fn read_if_exists(path: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-/// A node reference that survives reloads: block id if the node is a block,
-/// else its path of titles (§11.2).
+/// A node reference that survives reloads (§3.4, §11.2): a block by its id;
+/// any other node by its steps from the root of the file it lives in, each
+/// step a title and the node's ordinal among same-titled siblings, so two
+/// siblings with one title (or none) are never confused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKey {
     Root,
     Id(Id),
-    Path(Vec<String>),
+    Path {
+        /// The block whose file holds the node; `None` for root.md.
+        block: Option<Id>,
+        steps: Vec<(String, usize)>,
+    },
 }
 
 impl Vault {
@@ -487,22 +493,60 @@ impl Vault {
                 return NodeKey::Id(id.clone());
             }
         }
-        NodeKey::Path(self.tree.path(r))
+        let f = &self.tree.files[r.0];
+        let mut steps = Vec::new();
+        let mut cur = r.1;
+        let mut block = None;
+        while let Some(p) = f.nodes[cur].parent {
+            let title = &f.nodes[cur].title;
+            let ordinal = f.nodes[p]
+                .children
+                .iter()
+                .take_while(|&&c| c != cur)
+                .filter(|&&c| f.nodes[c].title == *title)
+                .count();
+            steps.push((title.clone(), ordinal));
+            if let Some(id) = f.nodes[p].block.as_ref().and_then(|b| b.id.clone()) {
+                block = Some(id);
+                break;
+            }
+            cur = p;
+        }
+        steps.reverse();
+        NodeKey::Path { block, steps }
     }
 
-    /// Re-attach a cursor after reload: by id, then path, then nearest
-    /// surviving ancestor (§11.2).
+    /// Re-attach a node after a reload: by id, else by its steps, falling
+    /// back to the deepest step that still exists (§11.2).
     pub fn find_by_key(&self, key: &NodeKey) -> Option<NRef> {
         match key {
             NodeKey::Root => Some(self.tree.root),
             NodeKey::Id(id) => self.tree.block_by_id(id),
-            NodeKey::Path(segs) => {
-                for n in (1..=segs.len()).rev() {
-                    if let Some(r) = self.find_by_path(&segs[..n]) {
-                        return Some(r);
+            NodeKey::Path { block, steps } => {
+                let mut cur = match block {
+                    Some(id) => self.tree.block_by_id(id)?,
+                    None => self.tree.root,
+                };
+                let mut found = None;
+                for (title, ordinal) in steps {
+                    let f = &self.tree.files[cur.0];
+                    let next = f.nodes[cur.1]
+                        .children
+                        .iter()
+                        .filter(|&&c| f.nodes[c].title == *title)
+                        .nth(*ordinal);
+                    match next {
+                        Some(&c) => {
+                            cur = (cur.0, c);
+                            found = Some(cur);
+                        }
+                        None => break,
                     }
                 }
-                None
+                found.or(match block {
+                    Some(id) => self.tree.block_by_id(id),
+                    None => None,
+                })
             }
         }
     }

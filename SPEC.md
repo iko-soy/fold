@@ -1,8 +1,19 @@
 # SPEC — a tree-shaped plain-text notes and task manager for the terminal
 
-Status: draft 0.39 · 2026-09-26
+Status: draft 0.40 · 2026-09-26
 Working name: not chosen yet. This document uses `notes` as the binary name; rename freely.
 Language: Rust · TUI: ratatui · Sync: Syncthing · History: file versioning on one node
+
+Changes in 0.40: one spelling of task state. A block's state is the checkbox on its own
+title line, like any node's; `todo:` is gone (read on legacy files, migrated on the next
+toggle or `check --fix`), so `rg '\[ \]'` is the whole open-task list (§4.5, §8). Block
+files keep their names when titles change; `check --fix` renames on request (§6.4). A block
+file's later column-0 lines are adopted by its root instead of making it read-only (§4.9).
+Verbs track nodes by key — titles plus ordinals among same-titled siblings — never by title
+path (§3.4). Undo records exactly the files an operation touched and refuses if one changed
+since (§10.11). Text after a child node is always preceded by a blank line (§4.2), and a
+heading embed's level is checked against its position (§4.7). §3.1 states what the ordering
+rule costs.
 
 Changes in 0.39: a node's children are an ordered list of **text children** and **child
 nodes**, interleaved as they are in the file; the body is just the leading text (§3.1, §3.3).
@@ -237,7 +248,7 @@ Principles, in priority order:
 | Section | A node spelled as an ATX heading `#`, `##`, … (no upper bound). |
 | Item | A node spelled as a `- ` bullet. |
 | Spelling | Whether a node is written as a heading or a bullet. Presentation only (§3.1). |
-| Task | A non-block node with a checkbox after its marker, or a block with a `todo` key. |
+| Task | A node with a checkbox after its marker — block or not. |
 | Block | A node with its own identity and file. Only blocks have properties; every edit changes exactly one block. |
 | Id | A random four-word phonemic name (`racfer-hattes-dozzod-binwes`) in a block's `id:` frontmatter; its stable identity. |
 | Name | The slug of a block's title. With a prefix of the id in front, its filename. Decoration, not identity. |
@@ -292,6 +303,17 @@ Rules:
   before its new parent's first section child, and a section no earlier than just after its
   last item child. The *boundary* of a node's children is the position between its last
   item or text child and its first section child.
+
+  **What the rule costs.** A node cannot have items or text after a section child: under
+  `# Trip` with a `## Budget` subsection, there is no way to put another bullet or paragraph
+  back under Trip after Budget. Everything written there is Budget's. Plain Markdown cannot
+  express it either, so the format accepts the limit rather than invent a closing syntax
+  no other tool would read. The practical consequences are that `>`, `<`, paste, refile and
+  capture sometimes place an item earlier than asked (before the first section), `J` / `K`
+  refuse to move an item past a section, and `~` moves the node it respells. The TUI says
+  so in the status line whenever the rule, not the user, chose the position; none of these
+  is a bug. The workaround is the obvious one:
+  put the later items in a section of their own (`## Also`), or keep sections last.
 - **Text children are content, not outline.** They are not rows in the outline pane, not
   targets, never blocks or tasks, and are never moved on their own. A verb that moves,
   deletes or refiles a node moves exactly that node's own lines; the text children around it
@@ -307,8 +329,10 @@ Rules:
   moves to its parent's boundary, so its siblings keep their parent.
 - Sibling order is block order and is meaningful.
 - Any node may be a **block** (the root of its own file). Its file starts with the node
-  as it is spelled — a heading or a bullet — so the file is the only place its spelling
-  lives (§4.9).
+  as it is spelled — a heading or a bullet — and that is where its spelling is defined
+  (§4.9). The embed repeats it in its form (§4.7) so the parent file parses into the right
+  shape on its own; the app keeps the two in step (`~` rewrites both), and where they
+  disagree the file wins and `notes check` reports the embed.
 
 ### 3.2 Properties
 
@@ -332,7 +356,7 @@ Reserved keys (the app assigns semantics; users may still read/write them by han
 | Key | Value | Meaning |
 |---|---|---|
 | `id` | four `@p` words | The block's identity (§3.4). Present on every managed file; never on `root.md`. |
-| `todo` | `open` \| `done` | Makes the block a task and holds its state (§4.5). Absent means not a task. |
+| `todo` | `open` \| `done` | **Legacy.** Before 0.40 it held a block's task state. Read only when the block's title line has no checkbox, reported by `notes check`, and removed on the next toggle or `check --fix`, which write the checkbox instead (§4.5). The app never writes it. |
 | `due` | `YYYY-MM-DD` | Task due date; shown in the outline. |
 | `done` | `YYYY-MM-DD` | Written when a task block is checked; removed when unchecked. |
 | `conflict` | `<device> <timestamp>` | Marks a "theirs" copy written by the merge engine (§12.4). |
@@ -361,8 +385,8 @@ A text line belongs to the deepest open node whose region it reaches:
 
 So a line at column 0 after `- b` under `# Trip` is Trip's text, not b's: it ends the list.
 (CommonMark would read an unindented line right after a list item with no blank line between
-as a lazy continuation of that item; this format does not. Write a blank line before it and
-both agree.)
+as a lazy continuation of that item; this format does not. Canonical form therefore always
+writes a blank line there (§4.2), and then both agree.)
 
 A blank line belongs to the text run it is in, or — between nodes — to the deepest open node
 before it: the blank line after `- a` is `a`'s trailing separator. Blank lines are therefore
@@ -382,7 +406,19 @@ when the block is created and stored as the `id` key of its frontmatter. Its fil
 directory uses as its prefix — usually one — then the slug of its title
 (`racfer~order-new-switch.md`). The prefix alone identifies the file; the name is for humans. The filename is decoration that any tool may change and the
 app will repair (§6.4). The one exception is `root.md`, which has no
-id. A non-block node's identity is its **path**.
+id. A non-block node has no stored identity. Two things stand in for one, and they are
+different on purpose:
+
+- **Typed targets** (below) name a node by titles. Titles are what a person can type, and a
+  title that matches twice is an ambiguity error, never a guess.
+- **Tracking** — re-attaching the cursor, folds and a verb's result across a re-parse —
+  uses the node's **key**: the block whose file holds it (none for `root.md`), then one step
+  per level down from that file's root, each step the title *and the node's ordinal among
+  same-titled siblings*. Two siblings with one title, or two empty new nodes, have
+  different keys. Keys are never shown and never typed.
+
+Verbs never find a node again by its title path: a verb that re-parses finds its result by
+key, by id, or by position.
 
 Embeds reference the id alone (`![[racfer-hattes-dozzod-binwes]]`), so nothing in the vault
 depends on a filename and a rename touches only the renamed file.
@@ -399,7 +435,8 @@ Resolution order for a command target (the *refile*, *go to* and *make block* pr
 Ambiguous or missing targets are an error for the command that named them; broken or
 duplicate embeds are diagnostics in `notes check` (§15.7).
 
-Renaming a block's title renames its file (§6.4). Nothing else references the filename.
+Renaming a block's title does not rename its file (§6.4); a stale name is harmless, since
+nothing references the filename.
 
 Titles may not contain `/` (the path separator). `[` and `]` are discouraged.
 
@@ -465,6 +502,8 @@ The app **reads** any CommonMark it can make sense of and **writes** this subset
   or bullets alike. `[X]` is accepted on read; `[-]` is read as `[x]`.
 - Exactly one blank line between a node's body and its first child, and between sibling
   sections. Loose/tight lists are preserved as found.
+- A blank line before any text child that follows a child node (§3.3), so that CommonMark
+  readers agree the text is not part of that node.
 
 Canonicalization is **lazy**: a node is rewritten in canonical form only when it is touched
 (edited, spliced, moved). `notes check --fix` (or *canonicalize* in the palette) rewrites
@@ -508,21 +547,31 @@ was designed for an external editor and is set aside with it, §17.)
 
 ### 4.5 Tasks
 
-Any node can be a task. Where the state is written depends on whether the node is a file:
+Any node can be a task, and there is one way to write it: a **checkbox after the marker on
+its title line**. `- [ ]` and `## [ ]` are both open tasks; `[x]` is done. A block is no
+different — its checkbox is on its own title line, in its file:
 
-- A node that is **not** a block is a task iff it has a checkbox after its marker.
-  `- [ ]` and `## [ ]` are both open tasks; `[x]` is done. That is all the state it has.
-- A **block** is a task iff its frontmatter has `todo:`, whose value is the state:
-  `open` or `done`. Its title line in the file carries no checkbox. Checking writes
-  `todo: done` and `done: <date>`; reverting sets `todo: open` and removes the date.
+```markdown
+---
+id: racfer-hattes-mislup-nodrys
+due: 2026-09-20
+---
+
+- [ ] Order new switch
+```
+
+What a block adds is a completion record: checking it writes `done: <date>` to its
+frontmatter, and unchecking removes the date. A plain task has no frontmatter and so no
+date; that is the whole difference. Because the state is always on the title line,
+`rg '\[ \]'` over the vault is the complete open-task list.
 
 There is no cancelled state. A task that will never be done is either checked off or
 deleted.
 
-Embeds carry no state. Cutting a checkbox task turns the checkbox into `todo:` (§6.1). A
-checkbox on a block's own title line is
-accepted on read as `todo` and rewritten on the next touch. A task section has its own
-state *and* the derived count of its subtree. See §8.
+Embeds carry no state: the checkbox travels with the title line into the block's file when
+it is made (§6.1). A legacy `todo:` key (§3.2) is read as the state when the title line has
+no checkbox; if both are present the checkbox wins. A task section has its own state *and*
+the derived count of its subtree. See §8.
 
 ### 4.6 Links
 
@@ -554,11 +603,19 @@ there, belong to that section (§3.1). Either form is read anywhere; an embed wh
 does not match its block's spelling is a diagnostic (§15.7) that `notes check --fix`
 rewrites, and it is placed where its form puts it.
 
-The embed names the block by id and nothing else; title, checkbox or `todo`, properties,
-text and children all live in the file. The embed's form repeats the block's spelling so
-that the parent file parses into the right shape without opening the block. An embed line
-has no children in the parent file; lines indented under a bare embed, or nested under a
-heading embed, are a diagnostic.
+The embed names the block by id and nothing else; title, checkbox, properties, text and
+children all live in the file. The embed's form repeats the block's spelling so that the
+parent file parses into the right shape without opening the block. An embed line has no
+children in the parent file; lines indented under a bare embed, or nested under a heading
+embed, are a diagnostic.
+
+A heading embed's **level** is read like any heading's: honoured as written, and it
+decides the embed's parent the same way. The level its position gives is `1 +` its section
+ancestors (§3.1), and that is the level the app writes. A written level deeper than that —
+left by another editor, or by moving text around by hand — still parses under the same
+parent (a shallower one would parse elsewhere and is simply a different position), so
+`notes check` reports it and `check --fix` rewrites it to the positional level; the
+structure does not change.
 
 `![[` anywhere else is body text. The app does not implement general transclusion.
 
@@ -572,7 +629,7 @@ for a later query language (§17); leave such blocks alone and they will start w
 A block's file is exactly `render(node, 1, resolve_blocks = false)`:
 
 ```
-[frontmatter, always beginning with id; todo: if the block is a task]
+[frontmatter, always beginning with id; done: if the block is a checked task]
 [the node's title line, as spelled: "# Title" or "- Title"]
 [its children: text and nodes, in order]
 ```
@@ -580,11 +637,18 @@ A block's file is exactly `render(node, 1, resolve_blocks = false)`:
 - The root is written as it is spelled in the tree. A block that is a heading is a `#` at column 0; one
   that is a bullet is a `- ` at column 0, with its body and children indented under it exactly
   as they would be in the parent. The file is the only place the spelling is recorded.
-- The block's task state is `todo:` in its frontmatter, with a `done:` date beside it
-  when done; there is no checkbox in the file. Toggling the node — from the outline,
-  or the embed — writes to the file.
-- A file with text before the root other than frontmatter, or with more than one node at
-  column 0, is a diagnostic; the app treats the file as read-only until fixed.
+- The block's task state is the checkbox on its title line, with a `done:` date in the
+  frontmatter when it is checked. Toggling the node — from the outline, or the embed —
+  writes to the file.
+- The first node at column 0 is the block's root. **Anything after it at column 0 — more
+  nodes, or text — is adopted as the root's children**, in order, as if it were indented
+  under it. That is what a phone editor produces by appending `- new thing` to a block
+  spelled as a bullet, and it must never make the block unusable. Adopted lines are
+  non-canonical (`notes check` notes them); the next write of the block, or `check --fix`,
+  writes them in place under the root (indented under a bullet root, re-levelled under a
+  heading root).
+- Text before the root other than frontmatter, or an embed before it, is a diagnostic; the
+  app treats that file as read-only until fixed, since it cannot tell what the block is.
 - `root.md` is the file of the implicit Root node; its frontmatter holds vault-level
   properties (rarely needed) and never an `id`.
 
@@ -640,19 +704,18 @@ Mirrored pairs, no raidz. Snapshots hourly via sanoid.
 ```markdown
 ---
 id: racfer-hattes-mislup-nodrys
-todo: open
 due: 2026-09-20
 ---
 
-- Order new switch
+- [ ] Order new switch
   Two options, noted under Networking.
 ```
 
 Note that "Replace the flaky switch" is a one-line task with no file; "ZFS layout" is a
 section block, so its embed is a heading at the level it has under NAS, while "Order new
 switch" is an item block and is embedded bare. "Order new switch" became a block the moment
-it got a due date, its checkbox became `todo: open`, and its
-file starts with a bullet because that is what it is. "Options" is
+it got a due date; its checkbox moved into the file with its title line, and its file starts
+with a bullet because that is what it is. "Options" is
 a section nested under an item, and "Snapshot policy" is a section that is itself a task.
 
 ---
@@ -725,7 +788,7 @@ each block is written by its own splice, and the law holds per block.
 Edge cases follow from the tags, not from rules:
 
 - Renaming a nested block is editing its title line; it is that block's line, so its file
-  is rewritten and renamed (§6.4). No second step.
+  is rewritten (and keeps its name, §6.4). No second step.
 - Deleting a nested block's title line deletes the block: the file goes to trash, and any
   lines it still owned are re-tagged to the enclosing block — they become plain text of the
   parent, which is what deleting a heading does to its content in any editor. This is the
@@ -762,7 +825,7 @@ demotes anything. The level-overflow rule of earlier drafts is gone.
 3. Replace the node's span in its parent file with an embed at the node's position: a
    heading embed at its level for a section, a bare `![[id]]` at its indent for an item
    (§4.7). The text children around the node stay in the parent. A checkbox on the node
-   becomes `todo: <state>` in the frontmatter (§4.5).
+   stays on its title line, now in the block's file (§4.5).
 4. Update the index.
 
 There is no inverse. A block stays a file until it is deleted (`d`, *clear done*, or
@@ -777,7 +840,8 @@ or on `s` / *make block*. There is no other way.
 
 - Every block is embedded from **exactly one** embed. A second embed for the same id is
   a diagnostic and renders as broken. Cycles are a diagnostic.
-- A block file has exactly one node at column 0 (§4.9) and its frontmatter has a valid
+- A block file has one root, its first node at column 0; later column-0 lines are adopted
+  under it (§4.9). Its frontmatter has a valid
   `id`.
 - Blocks may be nested: a block's file may itself contain embeds.
 - Embed lines have no children in the parent file.
@@ -834,11 +898,14 @@ the same way (§12.2). The filename carries no identity: a file is parsed becaus
 check` asks for the prefix) while `racfer~order-new-switch.md` without one is ignored.
 Safe on APFS, ext4, Android storage and Windows; case-insensitive-safe because lowercase.
 
-Renaming a block's title renames the file to the new name (temp-and-rename). Nothing
-else in the vault references the filename, so nothing else is rewritten. A file renamed or
-titled by another tool is still found by its id; `notes check` reports filenames whose
-prefix is not a leading run of the id or whose name no longer matches the title, and
-`notes check --fix` fixes them.
+**Names are set once.** The name is the slug of the title when the block is made, and a
+later title change does not rename the file. Under Syncthing a rename arrives on other
+devices as a delete plus a create; a phone that edits the old name meanwhile turns that
+into a sync conflict or an orphan, for nothing — the prefix alone identifies the file and
+nothing references the filename. A file renamed or titled by another tool is still found by
+its id. `notes check` reports filenames whose prefix is not a leading run of the id (a
+problem) and names that no longer match the title (stale, harmless); `notes check --fix`
+renames both, which is the one moment the app renames a file.
 
 ### 6.5 Refile
 
@@ -891,7 +958,7 @@ delete it. Nothing in the archive is hidden or dimmed.
 | Node | open | done |
 |---|---|---|
 | not a block | `- [ ] Title` / `## [ ] Title` | `[x]` |
-| block | `todo: open` | `todo: done` + `done: <date>` |
+| block | `- [ ] Title` / `## [ ] Title` | `[x]` + `done: <date>` in frontmatter |
 
 Any node can be a task. A checkbox task has exactly this much state and nothing else. Its
 completion date is not recorded; if you need one, make the task a block so toggling
@@ -900,9 +967,9 @@ writes `done:` (§8.2).
 ### 8.2 Task blocks
 
 A task that needs a date, a property, a completion record, or a body with structure becomes
-a block (§6.1). Its checkbox becomes `todo:` in the frontmatter; the embed in the parent
-is `![[id]]` and the title line in the file is plain. Toggling from anywhere
-(outline or embed) rewrites `todo:` and stamps or removes `done:`.
+a block (§6.1). Its checkbox moves into the block's file with its title line; the embed in
+the parent is `![[id]]`. Toggling from anywhere (outline or embed) rewrites that checkbox and
+stamps or removes `done:`.
 The reading pane renders a resolved task embed on one line:
 
 ```
@@ -1009,8 +1076,8 @@ aside (§17, open decision 16); the ```` ```query ```` fence is reserved for it 
 | `n` / `N` | new sibling after cursor / new last child, spelled like the cursor node / like the last child node (a section if the parent has section children): inserts an empty node and opens it with `e` |
 | `e` | edit the subtree's Markdown in the built-in editor; saves as you go (§10.6) |
 | `a` | property editor: a form over the node's properties (§10.6); first property on a plain node makes it a block |
-| `x` | toggle task open / done (checkbox, or `todo:` plus `done:` on a block) |
-| `t` | toggle task-ness: adds or removes the checkbox, or the `todo` key on a block |
+| `x` | toggle task open / done: the checkbox, plus `done:` on a block |
+| `t` | toggle task-ness: adds or removes the checkbox (and a block's `done:`) |
 | `s` | make the node a block |
 | `y` / `d` | yank / delete subtree into the register (delete goes to trash too) |
 | `p` / `P` | paste register after / before cursor as sibling, clamped by the ordering rule (§3.1) |
@@ -1114,8 +1181,15 @@ Every mutation is an operation with an inverse (span edits, file create/move/del
 including making blocks). The session op log powers `u` / `U`. Outline verbs write
 immediately and atomically; the built-in editor writes each dirty block within 750 ms of the
 last keystroke, or sooner when the cursor leaves it (§10.6), so the only unsaved text at any
-moment is under a second of typing in one block. Undo after an external change re-checks
-span hashes and refuses with a message if the target moved.
+moment is under a second of typing in one block.
+
+An op-log entry records **exactly the files the operation touched**: for each, its text
+before and after, where *absent* stands for a file the operation created or deleted (making
+a block, trashing one). An operation that changed nothing leaves no entry, so it does not
+clear the redo stack. Undo checks every touched file against its *after* text, and redo
+against its *before* text; if any differs — another editor or a sync changed it since — it
+refuses with a message naming the file, writes nothing, and keeps the entry. Files the
+operation did not touch are never written by undo, so an external edit to them survives.
 
 ---
 
@@ -1138,7 +1212,7 @@ span hashes and refuses with a message if the target moved.
 §11.4.
 
 - A changed file that the user is not editing is re-parsed; the cursor is re-attached by
-  id, then path, then nearest surviving ancestor.
+  id, then key (§3.4), then the deepest step of the key that still exists.
 - A changed file with a built-in edit in progress: the editor saves its dirty blocks first;
   a block whose span hash no longer matches is merged two-way (§5.2 step 5), then the file
   is re-parsed and the buffer re-rendered around the cursor.
@@ -1216,7 +1290,7 @@ never deletes, so this is the safe failure; delete the copy you don't want.
 
 **Per matched node**, for each of title, checkbox state, text (all its text children, with
 their positions among its child nodes, as one field), and — for the file's block — each
-frontmatter key independently (`todo` included): `O == T → take O`, otherwise **conflict**. A conflict pair is raised for every field that differs, even when
+frontmatter key independently: `O == T → take O`, otherwise **conflict**. A conflict pair is raised for every field that differs, even when
 only one side touched it; the cost of having no per-device state is paid here, in
 resolution clicks, never in lost text.
 
@@ -1324,7 +1398,7 @@ pub enum TaskState { Open, Done }
 pub struct Node {
     kind: Kind,
     title: String,
-    task: Option<TaskState>,                    // any node; from the checkbox, or `todo` for a block
+    task: Option<TaskState>,                    // any node, block or not: the checkbox on its title line
     content: Vec<Content>,                      // ordered children: text runs and nodes (§3.1)
     parent: Option<NodeId>,
     file: FileId,
@@ -1334,7 +1408,7 @@ pub struct Node {
 
 pub struct Block {
     id: Option<Id>,                             // None only for root.md
-    name: String,                               // slug of the title at last rename
+    name: String,                               // slug of the title when made (or at the last `check --fix`)
     path: RelPath,                              // e.g. "racfer~order-new-switch.md"
     props: IndexMap<String, String>,            // top-level `key: value` lines, order-preserving; includes `id`
     frontmatter_raw: String,                    // verbatim, for lossless rewrite
@@ -1347,6 +1421,11 @@ pub struct Span { start: usize, end: usize }
 
 pub struct Tree { nodes: Vec<Node>, root: NodeId, files: Vec<FileState> }
 pub struct Cursor { path: Vec<NodeId> }         // zipper-style focus; all outline verbs are cursor ops
+pub enum NodeKey {                              // survives re-parses (§3.4)
+    Root,
+    Id(Id),
+    Path { block: Option<Id>, steps: Vec<(String, usize)> }, // title + ordinal among same-titled siblings
+}
 ```
 
 Levels and indents are computed from ancestry, never stored.
@@ -1409,7 +1488,9 @@ of real-world Markdown (Obsidian, Logseq, FSNotes exports) that must parse witho
 
 `notes check` reports, with `ariadne`-rendered source spans: non-canonical syntax, empty
 titles, titles containing `/`, broken, duplicate or cyclic embeds, embeds with children in the
-parent file, embeds whose form (bare or heading) does not match their block's spelling, malformed block files, invalid or duplicate `id` keys, ignored `.md` files,
+parent file, embeds whose form (bare or heading) does not match their block's spelling,
+heading embeds whose level is not the level of their position, text directly after a child
+node with no blank line, column-0 lines adopted by a block's root, malformed block files, invalid or duplicate `id` keys, ignored `.md` files,
 filenames whose prefix or name no longer match their id or title, frontmatter outside
 byte 0, `due` or `done` values that are not ISO dates, and unresolved conflict blocks.
 The TUI
@@ -1424,8 +1505,8 @@ gets wrong. What other tools see:
 
 | Tool | What it sees | Notes |
 |---|---|---|
-| `rg`, `fd`, Helix | plain text | `rg '\[ \]'` and `rg '^todo: open'` together are the open task list; `rg '^done: 2026-09'` the blocks finished this month; `rg '^due:'` the dated ones |
-| Any phone editor | plain text | capture by appending a `- ` line to the inbox block's file; the app adds nothing to it |
+| `rg`, `fd`, Helix | plain text | `rg '\[ \]'` is the open task list; `rg '^done: 2026-09'` the blocks finished this month; `rg '^due:'` the dated ones |
+| Any phone editor | plain text | capture by appending a `- ` line to the inbox block's file, at any indent: a column-0 line is adopted by the block's root (§4.9); the app adds nothing to it |
 | Obsidian, Logseq, FSNotes | mostly readable, structurally wrong | frontmatter as properties and `- [ ]` bullets render; `![[id]]` shows as a broken embed (a heading embed as a heading holding one), `## [ ]` as a literal heading, `#######` as a paragraph, indented headings as code. Fine for reading a file; do not edit structure there |
 
 ---
@@ -1451,7 +1532,7 @@ task state; wiki-links between nodes and backlinks
 | M0 | `notes-core`: parser incl. frontmatter, tree, render/splice, canonicalize, ids and names | round-trip laws pass under proptest; `notes check` works |
 | M1 | TUI: outline + reading panes, zoom, fold, move, promote/demote, refile, filter box, subtree editing (`e`), undo | daily-drivable on a single `root.md` |
 | M2 | Blocks and properties: `s`, property-triggered blocks, task blocks | a task can be given a due date in the editor and its file round-trips |
-| M3 | Tasks: toggling on any node, `todo:` and `done:` stamping, dates, clear-done, filter box | replaces a TaskPaper file |
+| M3 | Tasks: toggling on any node, `done:` stamping, dates, clear-done, filter box | replaces a TaskPaper file |
 | M4 | Inbox and capture; watcher and reload | safe to edit in Helix and the TUI at once |
 | M5 | Sync: conflict detection, two-way node-level merge, `conflict:` blocks, conflict view, `notes merge` | phone + laptop + homelab over Syncthing for two weeks without data loss |
 | M6 | CLI polish, diagnostics, docs | 1.0 |
@@ -1464,10 +1545,9 @@ task state; wiki-links between nodes and backlinks
 2. **Dated inbox, ISO titles, fixed.** Capture creates `## YYYY-MM-DD` under `Inbox`. There
    is no format choice and no way to turn it off except `--to`. Days append oldest-first; a
    long-lived inbox is a long section, which is what `s` (make block) and *clear done* are for.
-3. **Filenames follow titles, always.** A title change is a file rename (Syncthing handles
-   renames by block reuse, so cheap but visible) and nothing else, since the id lives in the
-   file. The id prefix stays in front through renames, so it is the one part of a filename
-   that never moves.
+3. **Filenames are named once.** A title change does not rename the file: renames sync as
+   delete-plus-create and race with edits on other devices. The id prefix identifies the
+   file; the name is a hint that `notes check --fix` refreshes on request.
 3b. **Id format.** Four-word `@p` names (64 bits). Two words (32 bits) were enough for
    identity but left the one-word filename prefix with only 16 bits of room to grow; four
    words make the id collision-free in practice and give the prefix three words of slack.
@@ -1475,10 +1555,10 @@ task state; wiki-links between nodes and backlinks
    syllable tables; nobody is expected to type all four.
 4. **Task sections.** Any node can be a task, so a project heading can be checked off. The
    derived count is still shown beside it; there is no roll-up in either direction (§8.3).
-4b. **Two spellings of task state.** A checkbox for nodes that have no file, `todo:` for
-   nodes that do. One mechanism was considered twice: all-frontmatter would make every task
-   a file, all-checkbox puts structure on a title line the frontmatter already describes.
-   The split costs one conversion when a block is made and nothing else.
+4b. **One spelling of task state.** The checkbox, for every node. Until 0.39 blocks used
+   `todo:` in frontmatter instead; that hid block tasks from `rg '\[ \]'` and cost a
+   conversion every time a task became a block. All-frontmatter was never an option (it
+   would make every task a file). A block keeps one thing a plain task lacks: `done:`.
 5. **Two task states.** Open and done. Cancelled was removed: it was a third value in every
    table, a second date key, and a key binding, for a distinction between "done" and
    "won't do" that a deleted line or a done line expresses well enough. `[-]` is read as

@@ -456,6 +456,10 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
     let mut fence: Option<(char, usize)> = None;
     let mut root_title_seen = !is_block_file;
     let mut root_level_nodes = 0usize;
+    // A block file's root node, once seen: later column-0 nodes and text
+    // are adopted as its children (§4.9) — what a phone appending to the
+    // file produces.
+    let mut block_root: Option<usize> = None;
 
     // Pending setext: (title line index, title line indent) — a plain body
     // line that may become a section if the next line is an underline.
@@ -470,12 +474,12 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
 
         if fence_transition(&raw, &mut fence) {
             pending_setext = None;
-            push_body(&mut nodes, &mut stack, &lines, i);
+            push_body(&mut nodes, &mut stack, &lines, i, block_root);
             i += 1;
             continue;
         }
         if fence.is_some() {
-            push_body(&mut nodes, &mut stack, &lines, i);
+            push_body(&mut nodes, &mut stack, &lines, i, block_root);
             i += 1;
             continue;
         }
@@ -495,7 +499,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                 continue;
             }
             // Not a setext: a `---` after a blank or structure is a break (body).
-            push_body(&mut nodes, &mut stack, &lines, i);
+            push_body(&mut nodes, &mut stack, &lines, i, block_root);
             i += 1;
             continue;
         }
@@ -557,7 +561,14 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     }
                     stack.pop();
                 }
-                let parent = stack.last().unwrap().node;
+                let mut parent = stack.last().unwrap().node;
+                let mut adopted = false;
+                if parent == root_idx {
+                    if let Some(br) = block_root {
+                        parent = br;
+                        adopted = true;
+                    }
+                }
                 let mut node = Node {
                     kind: match info.kind {
                         TitleKind::Section { .. } | TitleKind::Embed(_, Some(_)) => Kind::Section,
@@ -591,10 +602,16 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     },
                     noncanonical: info.noncanonical,
                 };
+                if adopted {
+                    node.noncanonical
+                        .push("column-0 node in a block file, adopted by its root".into());
+                }
+                let first_root = parent == root_idx && is_block_file && !root_title_seen
+                    && node.embed.is_none();
                 if parent == root_idx {
                     root_level_nodes += 1;
                     if is_block_file {
-                        if !root_title_seen && node.embed.is_none() {
+                        if first_root {
                             root_title_seen = true;
                         } else if root_level_nodes > 1 {
                             diagnostics.push(Diag {
@@ -618,6 +635,9 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     });
                 }
                 let idx = nodes.len();
+                if first_root {
+                    block_root = Some(idx);
+                }
                 nodes[parent].children.push(idx);
                 nodes[parent].content.push(Content::Node(idx));
                 nodes.push(node);
@@ -647,9 +667,21 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                         message: "text before the block's root node".into(),
                     });
                 }
-                push_body(&mut nodes, &mut stack, &lines, i);
+                push_body(&mut nodes, &mut stack, &lines, i, block_root);
                 i += 1;
             }
+        }
+    }
+
+    // A text child right after a child node, with no blank line between,
+    // reads here as the parent's text but in CommonMark as a continuation of
+    // that node: canonical form separates them (§4.2).
+    for n in 0..nodes.len() {
+        let tight = unseparated_text(&nodes[n], text);
+        if !tight.is_empty() {
+            nodes[n]
+                .noncanonical
+                .push("text right after a child node without a blank line".into());
         }
     }
 
@@ -665,28 +697,21 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         if is_block_file {
             // The block root is the first top-level node.
             if let Some(&first) = pf.nodes[root_idx].children.first() {
-                // A checkbox on a block's own title line reads as `todo` (§4.5).
-                if let Some(task) = pf.nodes[first].task {
+                // Task state is the checkbox on the block's own title line,
+                // as for any node (§4.5). A legacy `todo:` key is read only
+                // when there is no checkbox, and is non-canonical either way.
+                if b.prop("todo").is_some() {
                     pf.nodes[first]
                         .noncanonical
-                        .push("checkbox on a block's own title line".into());
-                    // frontmatter todo: wins; else checkbox reads as state
-                    if b.prop("todo").is_none() {
-                        b.props.insert(
-                            "todo".into(),
-                            match task {
-                                TaskState::Open => "open".into(),
-                                TaskState::Done => "done".into(),
-                            },
-                        );
-                    }
+                        .push("todo: key (the state belongs on the title line)".into());
                 }
-                // Task state from `todo:` (§4.5).
-                pf.nodes[first].task = match b.prop("todo") {
-                    Some("open") => Some(TaskState::Open),
-                    Some("done") => Some(TaskState::Done),
-                    _ => None,
-                };
+                if pf.nodes[first].task.is_none() {
+                    pf.nodes[first].task = match b.prop("todo") {
+                        Some("open") => Some(TaskState::Open),
+                        Some("done") => Some(TaskState::Done),
+                        _ => None,
+                    };
+                }
                 if matches!(b.prop("todo"), Some(v) if v != "open" && v != "done") {
                     let d = Diag {
                         span: b.frontmatter_span.unwrap_or_default(),
@@ -706,11 +731,31 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
     pf
 }
 
+/// Whether a title line carries a checkbox right after its marker (§4.3).
+pub fn title_has_checkbox(line: &str) -> bool {
+    classify_title(line).map(|(_, info)| info.task.is_some()).unwrap_or(false)
+}
+
+/// Starts of the text children that follow a child node with no blank line
+/// between them (§4.2): where canonical form inserts one.
+pub fn unseparated_text(n: &Node, text: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for w in n.content.windows(2) {
+        if let [Content::Node(_), Content::Text(sp)] = w {
+            if sp.start > 0 && !text[..sp.start].ends_with("\n\n") {
+                out.push(sp.start);
+            }
+        }
+    }
+    out
+}
+
 fn push_body(
     nodes: &mut Vec<Node>,
     stack: &mut Vec<Frame>,
     lines: &[Line],
     i: usize,
+    block_root: Option<usize>,
 ) {
     let line = &lines[i];
     // A body line belongs to the deepest node whose region it reaches
@@ -751,7 +796,18 @@ fn push_body(
         }
         stack.pop();
     }
-    let top = stack.last().unwrap().node;
+    let mut top = stack.last().unwrap().node;
+    // column-0 text after a block file's root belongs to that root (§4.9)
+    if top == 0 {
+        if let Some(br) = block_root {
+            if !line.raw.trim().is_empty() {
+                nodes[br]
+                    .noncanonical
+                    .push("column-0 text in a block file, adopted by its root".into());
+            }
+            top = br;
+        }
+    }
     // consecutive lines extend the node's last text child; a line after a
     // child node starts a new one, so text never spans a child (§3.3)
     match nodes[top].content.last_mut() {

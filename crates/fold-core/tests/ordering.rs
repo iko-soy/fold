@@ -218,7 +218,8 @@ fn refile_item_keeps_nested_section_levels() {
 fn paste_item_after_a_section_is_clamped() {
     let (_d, mut v) = vault_with("# P\n\n- a\n\n## S\n");
     let r = at(&v, "P/S");
-    ops::paste(&mut v, r, "- new\n", true).unwrap();
+    // clamped, and reported as such
+    assert!(ops::paste(&mut v, r, "- new\n", true).unwrap());
     assert!(v.find_by_path(&["P".into(), "new".into()]).is_some(), "{}", root_text(&v));
     assert!(v.find_by_path(&["P".into(), "S".into(), "new".into()]).is_none());
     assert_ordered(&v);
@@ -412,4 +413,143 @@ fn promote_out_of_a_block_root_lands_beside_its_embed() {
         .collect();
     assert_eq!(kids, ["x", "s", "kid", "y"], "{}", root_text(&v));
     assert!(v.tree.resolved_children(at(&v, "A/s")).is_empty());
+}
+
+// ------------------------------------------------------------- adoption
+
+#[test]
+fn phone_appends_to_an_item_block_are_adopted() {
+    // a phone editor appends `- new` at column 0 to an Inbox block spelled
+    // as a bullet (§4.9): it becomes the root's child, not a second root
+    let (_d, mut v) = vault_with_block(
+        "# A\n\n![[racfer-hattes-mislup-nodrys]]\n",
+        "- Inbox\n  - old\n- new\nloose text\n",
+    );
+    let kids: Vec<String> = v
+        .tree
+        .resolved_children(at(&v, "A/Inbox"))
+        .iter()
+        .map(|&c| v.tree.node(c).title.clone())
+        .collect();
+    assert_eq!(kids, ["old", "new"]);
+    let inbox = at(&v, "A/Inbox");
+    let text = v.tree.node(inbox).text_lines(&v.tree.files[inbox.0].text);
+    assert!(text.contains(&"loose text"), "{:?}", text);
+    let diags = check::check(&v);
+    assert!(diags.iter().all(|d| !d.message.contains("exactly one node")));
+    assert!(diags.iter().any(|d| d.message.contains("adopted")));
+    // --fix writes it canonical: the adopted lines nest under the root
+    check::fix(&mut v).unwrap();
+    let inbox = at(&v, "A/Inbox");
+    assert!(
+        v.tree.files[inbox.0].text.ends_with("- Inbox\n  - old\n  - new\n\n  loose text\n"),
+        "{}",
+        v.tree.files[inbox.0].text
+    );
+}
+
+#[test]
+fn a_second_heading_in_a_section_block_is_adopted() {
+    let (_d, v) = vault_with_block(
+        "# A\n\n## ![[racfer-hattes-mislup-nodrys]]\n",
+        "# S\n\nbody\n\n# T\n",
+    );
+    assert!(v.find_by_path(&["A".into(), "S".into(), "T".into()]).is_some());
+}
+
+// ------------------------------------------------------------- node keys
+
+#[test]
+fn keys_tell_same_titled_siblings_apart() {
+    let (_d, mut v) = vault_with("# P\n\n- same\n- same\n- \n- \n");
+    let kids = v.tree.resolved_children(at(&v, "P"));
+    let keys: Vec<_> = kids.iter().map(|&k| v.key_of(k)).collect();
+    for (i, k) in keys.iter().enumerate() {
+        assert_eq!(v.find_by_key(k), Some(kids[i]));
+        assert!(keys.iter().filter(|o| *o == k).count() == 1);
+    }
+    // the second "same" survives an edit to the first by key
+    let first = kids[0];
+    ops::toggle_task(&mut v, first).unwrap();
+    let second = v.find_by_key(&keys[1]).unwrap();
+    assert_eq!(v.tree.node(second).task, None);
+    assert_eq!(v.tree.resolved_children(at(&v, "P"))[1], second);
+}
+
+#[test]
+fn keys_of_nodes_inside_nested_blocks_resolve() {
+    let (_d, v) = vault_with_block(
+        "# A\n\n## B\n\n### ![[racfer-hattes-mislup-nodrys]]\n",
+        "# S\n\n- deep\n",
+    );
+    let deep = at(&v, "A/B/S/deep");
+    let key = v.key_of(deep);
+    assert_eq!(v.find_by_key(&key), Some(deep));
+}
+
+#[test]
+fn check_reports_and_fixes_heading_embed_levels() {
+    let (_d, mut v) = vault_with_block(
+        "# A\n\n#### ![[racfer-hattes-mislup-nodrys]]\n\n## B\n",
+        "# S\n",
+    );
+    let before = parents(&v);
+    assert!(check::check(&v).iter().any(|d| d.message.contains("level 4 where its position gives 2")));
+    check::fix(&mut v).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n## ![[racfer-hattes-mislup-nodrys]]\n\n## B\n");
+    assert_eq!(parents(&v), before);
+    assert!(check::check(&v).iter().all(|d| !d.message.contains("heading embed at level")));
+}
+
+#[test]
+fn placement_as_asked_is_not_reported_as_moved() {
+    let (_d, mut v) = vault_with("# P\n\n- a\n- b\n");
+    let r = at(&v, "P/a");
+    assert!(!ops::paste(&mut v, r, "- new\n", true).unwrap());
+    let kids: Vec<String> = v
+        .tree
+        .resolved_children(at(&v, "P"))
+        .iter()
+        .map(|&c| v.tree.node(c).title.clone())
+        .collect();
+    assert_eq!(kids, ["a", "new", "b"]);
+}
+
+// ------------------------------------------------------------- task state
+
+#[test]
+fn legacy_todo_key_is_read_then_migrated_on_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\ntodo: open\ndue: 2026-09-20\n---\n\n- t\n",
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let t = at(&v, "t");
+    assert_eq!(v.tree.node(t).task, Some(fold_core::TaskState::Open));
+    assert!(check::check(&v).iter().any(|d| d.message.contains("todo: key")));
+    ops::toggle_task(&mut v, t).unwrap();
+    let text = &v.tree.files[t.0].text;
+    assert!(text.contains("- [x] t") && !text.contains("todo:") && text.contains("due: 2026-09-20"), "{}", text);
+}
+
+#[test]
+fn check_fix_migrates_legacy_todo_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "### ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\ntodo: done\ndone: 2026-09-01\n---\n\n# t\n",
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    check::fix(&mut v).unwrap();
+    let t = at(&v, "t");
+    assert_eq!(
+        v.tree.files[t.0].text,
+        "---\nid: racfer-hattes-mislup-nodrys\ndone: 2026-09-01\n---\n\n# [x] t\n"
+    );
+    assert_eq!(v.tree.node(t).task, Some(fold_core::TaskState::Done));
 }

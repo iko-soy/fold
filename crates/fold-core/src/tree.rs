@@ -63,6 +63,20 @@ impl Tree {
         }
     }
 
+    /// The level a section has by position alone: 1 + its section ancestors
+    /// (§3.1), whatever level is written.
+    pub fn derived_level(&self, r: NRef) -> usize {
+        let mut level = 1;
+        let mut cur = self.node(r).parent;
+        while let Some(p) = cur {
+            if self.node((r.0, p)).kind == Kind::Section {
+                level += 1;
+            }
+            cur = self.node((r.0, p)).parent;
+        }
+        level
+    }
+
     /// indent(n) = 2 × number of item ancestors (§3.1).
     pub fn indent(&self, r: NRef) -> usize {
         let mut n = 0usize;
