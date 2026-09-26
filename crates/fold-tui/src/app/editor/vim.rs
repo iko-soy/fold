@@ -201,9 +201,10 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
         '}' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, true)), 0), Kind::Excl),
         '{' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, false)), 0), Kind::Excl),
         '%' => (e.match_bracket(p)?, Kind::Incl),
+        // `n` the way the last search went, `N` the other way
         'n' | 'N' => {
             let pat = e.search.clone()?;
-            (e.find(&pat, p, c == 'n')?, Kind::Excl)
+            (e.find(&pat, p, (c == 'n') == e.search_fwd)?, Kind::Excl)
         }
         ';' | ',' => {
             let (kind, ch) = e.vim.last_find?;
@@ -510,6 +511,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             let w = e.text(s, en);
             if !w.trim().is_empty() {
                 e.search = Some(w);
+                e.search_fwd = c == '*';
                 e.set_cursor(s);
                 e.search_next(c == '*');
             }

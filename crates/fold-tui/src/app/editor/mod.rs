@@ -125,6 +125,9 @@ pub struct Editor {
     pub clip: Clip,
     pub cmdline: Option<CmdLine>,
     pub search: Option<String>,
+    /// Whether the last search went forward (`/`, Vim's `*`) or back (`?`,
+    /// `#`): Vim's `n` goes on the same way.
+    search_fwd: bool,
     /// A one-line message for the editor's status (a failed search, …).
     pub message: Option<String>,
     /// Lines on screen, for paging (set by the renderer).
@@ -167,6 +170,7 @@ impl Editor {
             clip,
             cmdline: None,
             search: None,
+            search_fwd: true,
             message: None,
             page: 20,
             copied: None,
@@ -1406,6 +1410,7 @@ impl Editor {
                     self.search = Some(t.to_string());
                 }
                 let fwd = cl.kind == '/';
+                self.search_fwd = fwd;
                 if let Some(p) = self.search_next(fwd) {
                     if self.keys == Keys::Helix || self.keys == Keys::Normal {
                         // select the match
