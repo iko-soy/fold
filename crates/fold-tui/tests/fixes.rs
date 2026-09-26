@@ -380,3 +380,36 @@ fn filter_pick_inside_a_block_unfolds_the_embedding_ancestors() {
     // §10.5: the pick unfolds its ancestors (through the embed) and selects it
     assert_eq!(current_title(&app), "snapshots");
 }
+
+#[test]
+fn backspace_from_a_zoomed_block_goes_to_its_outline_parent() {
+    // §10.3 `Backspace`: zoom out to parent. A block root's parent in the
+    // outline is the node that embeds it (as the breadcrumbs show), not
+    // its own file's root.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "- Homelab\n  - NAS\n    ![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~zfs.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- ZFS\n  - snapshots\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    let titles = |app: &App| -> Vec<String> { app.rows().iter().map(|r| app.title_of(r.nref)).collect() };
+    press(&mut app, "jj");
+    assert_eq!(current_title(&app), "ZFS");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(titles(&app), ["ZFS", "snapshots"]);
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(titles(&app), ["NAS", "ZFS", "snapshots"]);
+    assert_eq!(current_title(&app), "ZFS");
+    // the same from the reading pane
+    app.show_reading = true;
+    app.handle_key(key(KeyCode::Enter)); // zoom into ZFS; the pane takes focus
+    assert_eq!(titles(&app), ["ZFS", "snapshots"]);
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(titles(&app), ["NAS", "ZFS", "snapshots"]);
+}

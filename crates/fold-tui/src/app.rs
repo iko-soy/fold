@@ -1593,16 +1593,7 @@ impl App {
             }
             KeyCode::Backspace => {
                 if let Some(z) = self.zoom() {
-                    if let Some(p) = self.vault.tree.node(z).parent {
-                        let pr = (z.0, p);
-                        self.set_zoom(if self.vault.tree.node(pr).kind != Kind::Root {
-                            Some(pr)
-                        } else {
-                            None
-                        });
-                    } else {
-                        self.set_zoom(None);
-                    }
+                    self.set_zoom(self.outline_parent(z));
                     self.read_cursor = 0;
                     self.scroll_reading = 0;
                 } else {
@@ -2057,12 +2048,12 @@ impl App {
         }
     }
 
+    /// Zoom out to the parent (§10.3 `Backspace`): the outline parent,
+    /// so a zoomed block goes to the node that embeds it.
     fn zoom_out(&mut self) {
         if let Some(z) = self.zoom() {
             let key = self.vault.key_of(z);
-            self.set_zoom(self.vault.tree.node(z).parent.map(|p| (z.0, p)).filter(|&p| {
-                self.vault.tree.node(p).kind != Kind::Root
-            }));
+            self.set_zoom(self.outline_parent(z));
             self.cursor = 0;
             if let Some(r) = self.vault.find_by_key(&key) {
                 self.move_cursor_to(r);
