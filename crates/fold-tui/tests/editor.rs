@@ -376,3 +376,13 @@ fn helix_tilde_from_mid_line_across_a_block_title_keeps_line_owners() {
     assert!(root(&d).starts_with("# A\n\n- ONE\n![["), "{}", root(&d));
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before.replace("- two", "- TWo"));
 }
+
+#[test]
+fn vim_case_toggle_keeps_sharp_s() {
+    // 'ß' has no one-letter capital: like Vim, it stays as it is rather than
+    // turning into the first letter of "SS"
+    let (d, mut app) = app_with("# A\n\nstraße ﬁx\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjv$~:w⏎");
+    assert_eq!(root(&d), "# A\n\nSTRAßE ﬁX\n");
+}

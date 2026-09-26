@@ -1235,13 +1235,21 @@ impl Editor {
         }
     }
 
-    /// Change the case of `[a, b)`: `u` lower, `U` upper, `~` swap.
+    /// Change the case of `[a, b)`: `u` lower, `U` upper, `~` swap. A
+    /// character whose other case is not one character ('ß' is "SS") stays
+    /// as it is, as in Vim.
     pub fn change_case(&mut self, a: Pos, b: Pos, how: char) {
+        fn one(c: char, mut other: impl Iterator<Item = char>) -> char {
+            match (other.next(), other.next()) {
+                (Some(x), None) => x,
+                _ => c,
+            }
+        }
         self.map_chars(a, b, |c| match how {
-            'u' => c.to_lowercase().next().unwrap_or(c),
-            'U' => c.to_uppercase().next().unwrap_or(c),
-            _ if c.is_uppercase() => c.to_lowercase().next().unwrap_or(c),
-            _ => c.to_uppercase().next().unwrap_or(c),
+            'u' => one(c, c.to_lowercase()),
+            'U' => one(c, c.to_uppercase()),
+            _ if c.is_uppercase() => one(c, c.to_lowercase()),
+            _ => one(c, c.to_uppercase()),
         });
     }
 
