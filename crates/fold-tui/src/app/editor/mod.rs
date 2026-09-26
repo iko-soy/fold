@@ -422,7 +422,10 @@ impl Editor {
         Pos::new(l + 1, last.chars().count())
     }
 
-    /// Delete `[a, b)`; returns what was deleted.
+    /// Delete `[a, b)`; returns what was deleted. A line deleted whole takes
+    /// its tag with it (§5.2): what is left of a joined line keeps the tag of
+    /// line `a`, unless the range starts at column 0, when line `b` is what
+    /// is left (unless nothing of it is, at the end of the text).
     pub fn delete(&mut self, a: Pos, b: Pos) -> String {
         let (a, mut b) = order(a, b);
         if b.line >= self.lines() {
@@ -435,7 +438,15 @@ impl Editor {
         self.changes += 1;
         let first = self.line(a.line).to_string();
         let last = self.line(b.line).to_string();
-        let joined = format!("{}{}", &first[..byte(&first, a.col)], &last[byte(&last, b.col)..]);
+        let rest = &last[byte(&last, b.col)..];
+        if a.col == 0 && a.line < b.line && (!rest.is_empty() || b.line + 1 < self.lines()) {
+            for l in (a.line..b.line).rev() {
+                self.buf.delete_line(l);
+            }
+            self.buf.set_line(a.line, rest.to_string());
+            return gone;
+        }
+        let joined = format!("{}{}", &first[..byte(&first, a.col)], rest);
         for l in (a.line + 1..=b.line).rev() {
             self.buf.delete_line(l);
         }

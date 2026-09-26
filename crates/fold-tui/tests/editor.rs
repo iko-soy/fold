@@ -291,3 +291,51 @@ fn vim_search_after_dotted_capital_i_lands_on_the_match() {
     keys(&mut app, "ejj/ab⏎x:wq⏎");
     assert_eq!(root(&d), "# A\n\nİİ xb\n");
 }
+
+#[test]
+fn helix_xd_above_a_block_keeps_the_block() {
+    // §5.2: a deleted line takes its tag with it; "- two" keeps its block's tag
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjxd:w⏎");
+    let r = root(&d);
+    assert!(r.contains("![[") && !r.contains("- two"), "{}", r);
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
+#[test]
+fn vim_d_paragraph_above_a_block_keeps_the_block() {
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjd}:w⏎");
+    let r = root(&d);
+    assert!(r.contains("![[") && !r.contains("- two"), "{}", r);
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
+#[test]
+fn deleting_a_selected_line_above_a_block_keeps_the_block() {
+    // normal keymap: Shift-Down selects "- one" and its line end; Delete
+    // takes that line away and leaves the block's title line as it was
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    for k in [
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+    ] {
+        app.handle_key(k);
+    }
+    keys(&mut app, "⎋");
+    let r = root(&d);
+    assert!(r.starts_with("# A\n\n![[") && !r.contains("- "), "{}", r);
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
