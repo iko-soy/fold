@@ -74,7 +74,8 @@ pub struct App {
     pub(crate) vault: Vault,
     mode: Mode,
     focus: Focus,
-    /// Read it through `zoom()` and set it through `set_zoom()`.
+    /// The zoom root (§10.3). While a verb runs it may be stale: read it
+    /// through `zoom()`, and set it through `set_zoom()`.
     zoom_root: Option<NRef>,
     /// The zoom root's key while a verb or undo runs: the files it writes
     /// are re-parsed and their nodes renumbered, so until the verb settles
