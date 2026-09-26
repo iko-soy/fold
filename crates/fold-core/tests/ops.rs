@@ -690,3 +690,63 @@ fn respelling_keeps_code_in_a_fence_as_written() {
     ops::toggle_spelling(&mut v, s).unwrap();
     assert_eq!(v.tree.files[0].text, src);
 }
+
+// Nesting written with 4 spaces or a tab is accepted on read (§4.2); a child
+// written under such an item must still nest under it, not beside it.
+#[test]
+fn refile_under_a_four_space_nested_item_nests_under_it() {
+    let (_d, mut v) = vault_with("- a\n    - b\n- c\n");
+    let (c, b) = (at(&v, &["c"]), at(&v, &["a", "b"]));
+    ops::refile(&mut v, c, b).unwrap();
+    assert!(
+        v.find_by_path(&["a".into(), "b".into(), "c".into()]).is_some(),
+        "{}",
+        v.tree.files[0].text
+    );
+}
+
+#[test]
+fn demote_among_four_space_siblings_nests_the_node() {
+    let (_d, mut v) = vault_with("- a\n    - b\n    - c\n");
+    let c = at(&v, &["a", "c"]);
+    ops::demote(&mut v, c).unwrap();
+    assert!(
+        v.find_by_path(&["a".into(), "b".into(), "c".into()]).is_some(),
+        "{}",
+        v.tree.files[0].text
+    );
+}
+
+#[test]
+fn new_child_of_a_tab_nested_item() {
+    let (_d, mut v) = vault_with("- a\n\t- b\n");
+    let b = at(&v, &["a", "b"]);
+    let r = ops::append_child_public(&mut v, b, "x");
+    let text = v.tree.files[0].text.clone();
+    let r = r.unwrap_or_else(|e| panic!("{e}\n{text:?}"));
+    assert_eq!(v.tree.node(r).title, "x");
+    assert!(v.find_by_path(&["a".into(), "b".into(), "x".into()]).is_some(), "{:?}", text);
+}
+
+#[test]
+fn new_section_child_beside_a_deeper_written_section() {
+    // N on b, whose section child is written further in than b's derived
+    // child indent: the new section must still land under b
+    let (_d, mut v) = vault_with("- a\n    - b\n      ## S\n");
+    let b = at(&v, &["a", "b"]);
+    ops::append_child_public(&mut v, b, "x").unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert!(v.find_by_path(&["a".into(), "b".into(), "x".into()]).is_some(), "{:?}", text);
+    assert!(v.find_by_path(&["a".into(), "b".into(), "S".into()]).is_some(), "{:?}", text);
+}
+
+#[test]
+fn capture_to_a_four_space_nested_item_nests_under_it() {
+    let (_d, mut v) = vault_with("- a\n    - b\n");
+    let b = at(&v, &["a", "b"]);
+    let r = ops::capture_to(&mut v, "x\nmore", false, b).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert!(v.find_by_path(&["a".into(), "b".into(), "x".into()]).is_some(), "{:?}", text);
+    let body = v.tree.node(r).text_lines(&text).join("\n");
+    assert!(body.contains("more"), "{:?}", text);
+}

@@ -156,12 +156,7 @@ fn capture_inner(
     };
     let mut line = format!("- {}", title);
     if !rest.trim().is_empty() {
-        let dn = vault.tree.node(dest);
-        let item_indent = if dn.kind == Kind::Item {
-            vault.tree.indent(dest) + 2
-        } else {
-            vault.tree.indent(dest)
-        };
+        let item_indent = child_indent(&vault.tree, dest);
         let level = vault.tree.level(dest) as isize;
         let body = shift_lines(rest.trim_end(), level, item_indent as isize + 2);
         line.push('\n');
@@ -287,11 +282,7 @@ fn append_child_line(
     let file = parent.0;
     // Items under a section sit at the section's own indent; items under an
     // item nest one level deeper (§3.1, §4.10).
-    let indent = if node.kind == Kind::Item {
-        vault.tree.indent(parent) + 2
-    } else {
-        vault.tree.indent(parent)
-    };
+    let indent = child_indent(&vault.tree, parent);
     let text = vault.tree.files[file].text.clone();
     let kids = vault.tree.raw_children(parent);
     let is_section = |r: NRef| vault.tree.node(r).kind == Kind::Section;
@@ -307,9 +298,10 @@ fn append_child_line(
                 *kids.iter().rev().find(|&&c| is_section(c)).unwrap()
             };
             let title = line.trim_start().strip_prefix("- ").unwrap_or(line.trim_start());
+            // at the last section's written indent, which its parent reaches
             let heading = format!(
                 "{}{} {}",
-                " ".repeat(vault.tree.indent(last)),
+                " ".repeat(vault.tree.node(last).indent),
                 "#".repeat(vault.tree.level(last)),
                 title
             );
@@ -924,11 +916,15 @@ fn stand_in(tree: &crate::tree::Tree, r: NRef) -> NRef {
 }
 
 /// Indent of a child of `parent` (§3.1): items nest under items, everything
-/// under a section stays at the section's own indent.
+/// under a section stays at the section's own indent. Measured from the
+/// parent's written indent, not its derived one: nesting written with tabs
+/// or 4 spaces is read (§4.2), and a line at the derived child indent could
+/// fall short of such a parent and parse as its sibling.
 fn child_indent(tree: &crate::tree::Tree, parent: NRef) -> usize {
-    match tree.node(parent).kind {
-        Kind::Item => tree.indent(parent) + 2,
-        Kind::Section => tree.indent(parent),
+    let n = tree.node(parent);
+    match n.kind {
+        Kind::Item => n.indent + 2,
+        Kind::Section => n.indent,
         Kind::Root => 0,
     }
 }
