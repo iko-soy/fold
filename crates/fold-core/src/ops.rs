@@ -831,6 +831,60 @@ pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<bool> {
     place(vault, Some(moving), dest, usize::MAX, &shifted)
 }
 
+/// Where a dragged node is dropped (§10.3): before a node, as its sibling,
+/// or into it, as its last child. Both are clamped by the ordering rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drop {
+    Before,
+    Into,
+}
+
+/// Move `r` relative to `target` (§10.3 drag and drop). Refuses a move into
+/// `r`'s own subtree. Returns whether the ordering rule changed the place.
+pub fn move_node(vault: &mut Vault, r: NRef, target: NRef, drop: Drop) -> std::io::Result<bool> {
+    let target = vault.tree.resolved_child(target);
+    if target == vault.tree.resolved_child(r) {
+        return Ok(false);
+    }
+    match drop {
+        Drop::Into => refile(vault, r, target),
+        Drop::Before => {
+            let t = stand_in(&vault.tree, target);
+            let Some(parent) = vault.tree.node(t).parent.map(|p| (t.0, p)) else {
+                return Err(io_err("cannot move beside the root"));
+            };
+            // the destination parent must not sit inside the moving subtree
+            if within(&vault.tree, parent, r) {
+                return Err(io_err("cannot move a node into itself"));
+            }
+            let moving = stand_in(&vault.tree, r);
+            let idx = vault.tree.raw_children(parent).iter().position(|&k| k == t).unwrap_or(0);
+            let rendered = render(&vault.tree, moving, 1, false);
+            let shifted =
+                shift_document(&rendered, vault.tree.level(parent), child_indent(&vault.tree, parent));
+            place(vault, Some(moving), parent, idx, &shifted)
+        }
+    }
+}
+
+/// Whether `a` is `r` or inside its subtree, following embeds up.
+fn within(tree: &crate::tree::Tree, a: NRef, r: NRef) -> bool {
+    let r = tree.resolved_child(r);
+    let mut cur = Some(tree.resolved_child(a));
+    let mut guard = 0;
+    while let Some(c) = cur {
+        if c == r {
+            return true;
+        }
+        guard += 1;
+        if guard > 10_000 {
+            return false;
+        }
+        cur = resolved_parent(tree, c);
+    }
+    false
+}
+
 // ---------------------------------------------------------------- placement
 
 /// The node that stands for `r` among its parent's children in a file: a
@@ -922,11 +976,22 @@ fn place(
         Some(k) => tree.node(k).span.start,
         None => pnode.span.end.min(text.len()),
     };
-    // appending after the last child: is the list there tight?
+    // appending after the last child: is the list there tight? The last
+    // item's own trailing blank may just separate the parent from what
+    // follows it, so looseness is read between the items before it.
+    let item_kids: Vec<&crate::parse::Node> = kids
+        .iter()
+        .map(|&k| tree.node(k))
+        .filter(|n| n.kind == Kind::Item)
+        .collect();
     let tight_after = match content.last() {
         Some(crate::parse::Content::Node(k)) => {
             let kn = &tree.files[file].nodes[*k];
-            kn.kind == Kind::Item && !kn.span.text(&text).ends_with("\n\n")
+            kn.kind == Kind::Item
+                && match item_kids.len() {
+                    0 | 1 => true,
+                    n => !item_kids[n - 2].span.text(&text).ends_with("\n\n"),
+                }
         }
         Some(crate::parse::Content::Text(_)) => false,
         None => pnode.kind == Kind::Item,
@@ -1110,9 +1175,9 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     Ok(id)
 }
 
-/// Set the first property on a plain node: makes it a block, then sets the
-/// key (§3.2, §6.1).
-pub fn set_property(vault: &mut Vault, r: NRef, key: &str, value: &str) -> std::io::Result<()> {
+/// Set a property; on a plain node the first one makes it a block (§3.2,
+/// §6.1). Returns the block that holds the property.
+pub fn set_property(vault: &mut Vault, r: NRef, key: &str, value: &str) -> std::io::Result<NRef> {
     let target = if vault.tree.node(r).is_block() {
         r
     } else if vault.tree.node(r).is_embed() {
@@ -1125,7 +1190,9 @@ pub fn set_property(vault: &mut Vault, r: NRef, key: &str, value: &str) -> std::
             .block_by_id(&id)
             .ok_or_else(|| io_err("block not found after make_block"))?
     };
-    set_frontmatter_key(vault, target.0, key, Some(value))
+    let id = vault.tree.node(target).block.as_ref().and_then(|b| b.id.clone());
+    set_frontmatter_key(vault, target.0, key, Some(value))?;
+    Ok(id.and_then(|id| vault.tree.block_by_id(&id)).unwrap_or(target))
 }
 
 // --------------------------------------------------------------- move/spelling

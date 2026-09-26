@@ -156,8 +156,8 @@ fn question_mark_opens_help() {
     app.key_normal(key(KeyCode::Char('?')));
     assert_eq!(app.mode_pub(), "help");
     let s = screen(&mut app, 100, 40);
-    assert!(s.contains("fold — help"), "{}", s);
-    assert!(s.contains("command palette"), "{}", s);
+    assert!(s.contains("Help") && s.contains("MOUSE"), "{}", s);
+    assert!(s.contains("right-click"), "{}", s);
     assert!(s.contains("make block"), "{}", s);
     // Esc closes
     app.key_normal(key(KeyCode::Esc));

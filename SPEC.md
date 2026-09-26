@@ -8,7 +8,8 @@ Language: Rust · TUI: ratatui · Sync: Syncthing · History: file versioning on
 
 ## 1. Purpose and principles
 
-A keyboard-driven TUI for a single body of notes stored as Markdown. There is one organizing
+A mouse-first TUI — every action is a click, a drag or the wheel away, and every one also
+has a key — for a single body of notes stored as Markdown. There is one organizing
 primitive — the **subtree** — and one organizing verb — **refile** (move a subtree under a
 different parent). Everything else (inbox, tasks, projects, index) is a view over the
 same tree.
@@ -818,39 +819,88 @@ the whole vault, live, no syntax. A query language is future work (§17, §19 de
 
 ## 10. TUI
 
-### 10.1 Layout
+### 10.1 Layout and the pointer
 
 ```
-┌ Homelab › NAS › ZFS layout ────────────────────────── 3/7 open ┐
-│ outline pane (titles only)          │ reading pane (zoomed)   │
-│ ▾ Homelab              2/9          │ # ZFS layout             │
-│   ▾ NAS                             │ since 2024-03 · storage  │
-│     ▸ ZFS layout  ▤  1/2 ◀          │                          │
-│     Networking       1/2            │ Mirrored pairs, no raidz…│
-│ ▾ Inbox                             │                          │
-│   2026-09-10        1/2             │ ## Snapshot policy       │
-│                                     │ - hourly, keep 24        │
-│                                     │ ☑ Move scratch to its…   │
-├─────────────────────────────────────┴──────────────────────────┤
-│ :                                      root.md · saved · 12:04 │
-└────────────────────────────────────────────────────────────────┘
+ fold › Homelab › NAS                 ⌕ Filter  + Capture  ↶ Undo  ↷ Redo  ☰ Commands  ? Help
+╭ Outline ───────────────────────╮╭ ZFS layout ▤ ─────────────────────────── ✎ Edit ─ ⋯ ─╮
+│▾ Homelab                  2/4  ││ # ZFS layout                                          │
+│  ▾ NAS                    1/2  ││ ⚑ since 2024-03                                       │
+│    ▾ ZFS layout ▤         1/2 ⋯││                                                       │
+│      ▾ ☐ Snapshot policy       ││ Mirrored pairs, no raidz. Snapshots hourly.           │
+│  ▸ Networking             1/2  ││ ## ☐ Snapshot policy                                  │
+│▾ Inbox                         ││ - hourly, keep 24                                     │
+╰────────────────────────────────╯╰───────────────────────────────────────────────────────╯
+ moved “Label the cables”                          ⚠ 1 conflict  root.md  ✓ saved
 ```
 
-- The **outline pane** shows titles, fold state, task glyphs, derived counts, a block
-  marker (`▤`) and, for blocks, `due` dimmed. Never bodies.
-- The **reading pane** shows `render(cursor, 1, true)` with light Markdown styling; a
-  block's properties appear as a dimmed header under its title, computed from the
-  index, never as text. `zr` (session toggle) shows the text unstyled.
-- The breadcrumb shows ancestors of the zoom root; the status line shows file, save state,
-  pending conflicts, and the last message.
-- Split layout, outline on the left at a third of the width (minimum 30 columns); `Tab`
-  cycles focus. Below 80 columns the panes stack and `Tab` switches between them.
+Four regions, each of them live under the pointer:
+
+- The **top bar**: the breadcrumb of the zoom root (`fold` is the vault root; every
+  segment is a link that zooms there), and buttons for *Filter*, *Capture*, *Undo*,
+  *Redo*, *Commands* and *Help*. Buttons shrink to their icons when the bar is narrow.
+- The **outline pane**: titles, fold markers (`▸ ▾`), task glyphs (`☐ ☑`), the block
+  marker (`▤`), and on the right a due date and the open/total count of the tasks below
+  (a leaf shows no count). Done tasks are dimmed and struck through; sections are bold.
+  Long titles end in `…`. Never bodies.
+- The **reading pane**: `render(target, 1, true)`, the zoom root's or else the selected
+  node's, with light Markdown styling (§10.9); a block's properties appear as a dimmed
+  `⚑` line under its title, never as text. Its border carries the node's title and the
+  buttons *Edit* and `⋯` (the node menu). While editing, the pane is the editor (§10.6) and
+  its buttons are *Done* and *Revert*.
+- The **status bar**: the last message on the left; on the right the unresolved conflicts
+  (click to resolve), *done hidden* when `zd` is on (click to show), the file, and the save
+  state.
+
+Split layout, outline on the left at a third of the width (minimum 30 columns); the border
+between the panes is a handle — drag it to resize. Below 80 columns the panes stack.
+
+**The pointer.** Everything a key does, the pointer does too, and the screen shows where:
+
+| Gesture | Where | Does |
+|---|---|---|
+| click | an outline row | select it (the reading pane follows) |
+| click | `▸` / `▾` | fold / unfold |
+| click | `☐` / `☑`, in either pane | toggle the task |
+| click | `⋯` (shown on the selected and the hovered row) | the node menu |
+| click | a breadcrumb segment | zoom there |
+| click | a link in the reading pane | open it |
+| click | a line in the reading pane / the editor | put the cursor there |
+| double-click | an outline row | zoom into it |
+| double-click | a line in the reading pane | a heading: zoom into it; an embedded block: follow it; anything else: open the editor with the cursor on that line |
+| right-click | a row or a line | the node menu for that node |
+| drag | an outline row onto another row's **title** | move it **into** that node, as its last child |
+| drag | an outline row onto the space **left of** another row's title | move it **before** that node, as its sibling |
+| wheel | either pane, the editor, any list | scroll what is under the pointer; the selection stays put |
+| drag | the border between the panes | resize them |
+| click | outside any popup | close it |
+
+While dragging, the target row is highlighted (*into*) or marked with `▶` and a bar
+(*before*), the row being moved is dimmed, the status bar spells out the move, and the pane
+scrolls when the pointer reaches its edge. Both drops are clamped by the ordering rule
+(§3.1) and say so when they are; a drop into the node's own subtree is refused. One drag is
+one undo step.
+
+**The node menu** (right-click, `⋯`, or `m`) lists every action on a node, each with its key:
+*Edit · Zoom in · Properties… | New sibling · New child | Done / reopen · Task on / off ·
+Heading ↔ bullet · Make block | Move up · Move down · Indent · Outdent · Move to… · Archive |
+Copy · Paste after · Paste before · Delete*. Hovering highlights an item; a click runs it.
+
+**Pickers instead of typing.** Where an action needs a node — *Move to…*, *Go to…* — the
+prompt is a list of every node, title first and path dimmed, narrowed as you type (title
+prefix, then title, then path) and picked with a click or `↑`/`↓` and `Enter`. A typed id,
+path or title (§3.4) still works. *Move to…* leaves out the moving node's own subtree.
+
+Every popup — node menu, prompt, properties, filter, commands, help — has its buttons on
+its bottom border (*OK*, *Close*, …), a list you can click and scroll, and closes on a click
+outside it or `Esc`.
 
 ### 10.2 Modes
 
 `normal` (default), `edit` (the built-in editor over a subtree's Markdown, saving as you go), `filter`
-(`/` box), `picker` (fuzzy lists, the palette included), `conflict` (§12.5).
-`Esc` always returns to normal.
+(`/` box), `picker` (the command palette), `properties` (the property form), `help`,
+`conflict` (§12.5). The node menu and prompts open over any mode. `Esc` — or a click outside
+the popup — closes the topmost thing.
 
 ### 10.3 Outline pane — normal mode
 
@@ -883,6 +933,7 @@ the whole vault, live, no syntax. A query language is future work (§17, §19 de
 | `r` | refile: fuzzy-pick a destination; `Ctrl-Enter` = as first child |
 | `c` / `C` | capture to the inbox as bullet / as task |
 | `/` | filter box (§10.5) |
+| `m` | the node menu (§10.1) |
 | `:` | command palette (§10.8); `?` help |
 | `u` / `U` | undo / redo |
 | `q` | quit (nothing is ever unsaved in normal mode) |
@@ -902,15 +953,16 @@ the whole vault, live, no syntax. A query language is future work (§17, §19 de
 
 ### 10.5 Filter box
 
-`/` opens a single input over the outline. Typing filters the outline live by fuzzy title
-match (nucleo) and, after a 150 ms pause, by full-text match over every text child, showing
-ancestors of hits.
-`Enter` on a highlighted hit zooms to it; `Enter` with no hit does nothing. `Esc` clears.
-Creating nodes is `n` / `N` (§10.3).
+`/`, or *Filter* in the top bar, opens a popup with an input and the hits below it:
+fuzzy title match (nucleo) and full-text match over every text child, each hit shown as its
+title with its path dimmed. Clicking a hit — or `↑`/`↓` and `Enter` — unfolds its
+ancestors and selects it. `Esc` or a click outside closes. Creating nodes is `n` / `N`
+(§10.3).
 
 ### 10.6 Editing
 
-There is one way to change text: edit the Markdown of the selected subtree. `e` shows
+There is one way to change text: edit the Markdown of the selected subtree. `e`, *Edit* on
+the reading pane or in the node menu, or a double-click on a line of text shows
 `render(cursor, 1, true)` — the node's title line, body and children, with every
 nested block inlined so that no embed, id, frontmatter or file boundary appears.
 
@@ -921,16 +973,19 @@ app keeps track. Blocks are saved on their own:
 
 - when the cursor moves out of a block that has changed;
 - after 750 ms without a keystroke;
-- on `Esc` (back to normal mode), on any outline verb, before a reload caused by an
-  external change, and on quit.
+- on `Esc` or *Done* (back to normal mode), on any outline verb, before a reload caused by
+  an external change, and on quit.
 
-The status line shows the title of the block the cursor is in, dimmed, and a dot while
-something is unsaved — the only two hints that blocks exist. `Ctrl-c` discards changes made
-since the last save. Undo inside the editor is the editor's own; each automatic save is one
+The pane's border shows the title of the block the cursor is in and a dot while something
+is unsaved, and lines of other blocks in the subtree are drawn a shade dimmer — the only
+hints that blocks exist. A click puts the cursor where it lands; the wheel scrolls.
+`Ctrl-c` or *Revert* discards changes made since the last save. Undo inside the editor is the editor's own; each automatic save is one
 entry in the session op log (§10.10). The box is not a Markdown editor and stays one.
 
-Properties are not text. `a` opens the **property editor**: a small form listing the
-node's keys and values, where you add, change and delete entries. `due` and `done` accept
+Properties are not text. `a`, or *Properties…* in the node menu, opens the **property
+editor**: a small form listing the
+node's keys and values: click a value to change it (the prompt starts with the current
+value), `✕` deletes an entry, *Add* adds one. `due` and `done` accept
 only ISO dates; `id` is not shown. Setting the first property on a node that is not a
 block makes it one (§6.1), silently except for the `▤` marker; deleting the last one leaves
 the block as it is. Frontmatter lines the app does not understand (nested structure,
@@ -946,29 +1001,32 @@ and each saves the editor first.
 Entered when a `.sync-conflict-*` file is detected or a splice hits a changed span. Shows
 each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
 `t` keeps theirs, `b` keeps both, `e` edits, `n` / `N` next / previous, `Enter` finishes.
+The view's top bar carries the same as buttons — *Previous*, *Next*, *Keep ours*, *Keep
+theirs*, *Keep both*, *Edit ours*, *Close* — and the two versions sit side by side, this
+device's on the left.
 Unresolved pairs remain as `conflict:` blocks and stay listed in the status
 line until resolved (§12.5).
 
 ### 10.8 Command palette
 
-`:` opens a popup listing every action the TUI has, filtered live by fuzzy match (nucleo)
-on the action's name and description, each row showing its key binding if it has one.
-`Enter` runs the highlighted action; if it needs an argument — a target for *refile* or
-*go to*, text for *capture* — a single prompt follows, with the same completion the
-key-bound form has. `Esc` closes.
+`:`, or *Commands* in the top bar, opens a popup listing every action the TUI has — key,
+name, what it does — filtered as you type: names that start with the query first, then
+names and descriptions that contain it, then fuzzy matches. A click or `Enter` runs the
+highlighted action; if it needs an argument — a node for *Move to…* or *Go to…*, text for
+*Capture* — its prompt follows (§10.1). `Esc` or a click outside closes.
 
 There is no command syntax: nothing is typed except the search and the argument. Every
-action reachable by key is in the palette under a readable name (*make block*,
-*toggle task*, *archive*, …), and the four with no key live only there: *clear done*,
-*canonicalize*, *check*, *merge*. `?` is the same popup filtered to show keys, so help and
-palette are one thing.
+action is in the palette under a readable name, and the four that have no key or button
+live only there: *Clear done*, *Canonicalize*, *Merge sync conflicts*, *Resolve
+conflicts*. `?` is help: the pointer gestures first, then the keys.
 
 ### 10.9 Markdown styling in the reading pane
 
-Line-based, not a full renderer: headings by level, task glyphs (`☐ ☑`), resolved blocks'
-properties dimmed at the end of the line, underlined external links, styled code fences,
-`**bold**` / `*em*` / `` `code` `` inline, blockquote bars. Raw text is never hidden;
-`zr` shows exact source, frontmatter included.
+Line-based, not a full renderer: headings coloured by level, task checkboxes shown as `☐ ☑`
+(clickable; done lines dimmed and struck through), links underlined (clickable), code
+fences and `` `code` `` tinted, `**bold**` and `*em*` styled, quotes in colour. Raw text is
+never hidden: `#`, `-`, `**` and link targets stay on screen, dimmed. `zr` shows exact
+source, frontmatter included.
 
 ### 10.10 Undo, redo, saving
 

@@ -514,3 +514,37 @@ fn placement_as_asked_is_not_reported_as_moved() {
         .collect();
     assert_eq!(kids, ["a", "new", "b"]);
 }
+
+// ------------------------------------------------------------- drag and drop
+
+#[test]
+fn drop_before_and_into() {
+    let (_d, mut v) = vault_with("# A\n\n- a1\n- a2\n\n# B\n\n- b1\n");
+    let (r, t) = (at(&v, "B/b1"), at(&v, "A/a2"));
+    ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- a1\n- b1\n- a2\n\n# B\n");
+    let (r, t) = (at(&v, "A/a1"), at(&v, "B"));
+    ops::move_node(&mut v, r, t, ops::Drop::Into).unwrap();
+    assert!(v.find_by_path(&["B".into(), "a1".into()]).is_some(), "{}", root_text(&v));
+    assert_ordered(&v);
+}
+
+#[test]
+fn drop_refuses_own_subtree() {
+    let src = "# A\n\n- a1\n  - deep\n";
+    let (_d, mut v) = vault_with(src);
+    let (r, t) = (at(&v, "A"), at(&v, "A/a1/deep"));
+    assert!(ops::move_node(&mut v, r, t, ops::Drop::Before).is_err());
+    let (r, t) = (at(&v, "A/a1"), at(&v, "A/a1/deep"));
+    assert!(ops::move_node(&mut v, r, t, ops::Drop::Into).is_err());
+    assert_eq!(root_text(&v), src);
+}
+
+#[test]
+fn drop_section_before_an_item_is_clamped() {
+    let (_d, mut v) = vault_with("# P\n\n- a\n- b\n\n# S\n");
+    let (r, t) = (at(&v, "S"), at(&v, "P/a"));
+    assert!(ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap());
+    assert_ordered(&v);
+    assert!(v.find_by_path(&["P".into(), "S".into()]).is_some(), "{}", root_text(&v));
+}
