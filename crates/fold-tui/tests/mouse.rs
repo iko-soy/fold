@@ -600,3 +600,20 @@ fn an_open_property_form_or_move_to_list_survives_an_external_rewrite() {
     app.reload_external();
     assert!(draw(&mut app).contains("Move to"));
 }
+
+#[test]
+fn folding_above_the_selection_keeps_it() {
+    let (_d, mut app) = app_with("# A\n\n- a1\n- a2\n\n# B\n\n# C\n");
+    click(&mut app, Hit::Row(3));
+    assert_eq!(title(&app), "B");
+    click(&mut app, Hit::Fold(0));
+    assert_eq!(app.rows().len(), 3, "A folded");
+    assert_eq!(title(&app), "B", "a fold click above the selection must not move it");
+    click(&mut app, Hit::Fold(0));
+    assert_eq!(title(&app), "B", "nor an unfold click");
+    // folding the node the selection is inside selects the folded node
+    click(&mut app, Hit::Row(2));
+    assert_eq!(title(&app), "a2");
+    click(&mut app, Hit::Fold(0));
+    assert_eq!(title(&app), "A");
+}

@@ -94,7 +94,14 @@ impl App {
             Hit::Fold(i) => {
                 if let Some(row) = self.rows().get(i) {
                     let r = row.nref;
+                    let sel = self.current();
                     self.toggle_fold(r);
+                    // a fold click only folds (§10.1): the selection stays on
+                    // its node, or lands on the folded row that now hides it
+                    self.cursor = i;
+                    if let Some(s) = sel {
+                        self.move_cursor_to(s);
+                    }
                     self.clamp_cursor();
                 }
             }
