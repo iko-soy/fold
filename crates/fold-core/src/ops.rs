@@ -578,11 +578,14 @@ pub fn delete_subtree(vault: &mut Vault, r: NRef) -> std::io::Result<String> {
     }
     if n.is_block() || n.is_embed() {
         let target = if n.is_embed() { vault.tree.resolved_child(r) } else { r };
-        if target == r && n.is_embed() {
+        // a second embed of a block renders as broken (§6.2): the block,
+        // and the embed it is stitched in at, are not this line's
+        let duplicate = target != r && n.embed.as_ref().and_then(|id| vault.tree.embed_of(id)) != Some(r);
+        if n.is_embed() && (target == r || duplicate) {
             // broken embed: just the line
             let span = embed_line_span(&vault.tree, r);
             remove_span_with_separator(vault, r.0, span)?;
-            return Ok("broken embed removed".into());
+            return Ok(if duplicate { "duplicate embed removed" } else { "broken embed removed" }.into());
         }
         let ids = nested_block_ids(vault, target);
         let path = vault.tree.node(target).block.as_ref().unwrap().path.clone();

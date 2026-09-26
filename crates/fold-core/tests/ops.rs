@@ -848,3 +848,21 @@ fn respelling_a_broken_embed_keeps_its_id() {
     assert!(ops::toggle_spelling(&mut v, e).unwrap());
     assert_eq!(read(&d, "root.md"), format!("# A\n\n- b\n\n## ![[{}]]\n", ID_A));
 }
+
+#[test]
+fn deleting_a_duplicate_embed_removes_only_its_line() {
+    // a second embed of a block is a diagnostic and renders as broken
+    // (§6.2): deleting it (from the reading pane) removes that line alone,
+    // as for a broken embed, and neither trashes the block nor takes the
+    // first embed, the one the block is stitched in at
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let dup = v.tree.raw_children(at(&v, &["B"]))[0];
+    assert!(v.tree.node(dup).is_embed());
+    ops::delete_subtree(&mut v, dup).unwrap();
+    assert!(d.path().join("racfer~s.md").exists(), "the block was trashed");
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
+    assert!(v.find_by_path(&["A".into(), "S".into()]).is_some());
+}
