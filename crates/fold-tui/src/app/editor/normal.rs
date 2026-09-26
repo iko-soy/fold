@@ -1,7 +1,7 @@
 //! The normal keymap: a conventional editor in the manner of micro. Always
 //! typing; Shift extends a selection; Ctrl does the rest.
 
-use super::{ctrl, order, Editor, Outcome, Pos};
+use super::{ctrl, order, Editor, Group, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
@@ -9,6 +9,11 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let mut out = Outcome::default();
+    // any other key ends a run of typing: what is typed next is its own undo step
+    let typing = !ctl && !alt && matches!(key.code, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab);
+    if !typing {
+        e.group = Group::None;
+    }
 
     // movement, extending the selection with Shift
     let moved = match key.code {
@@ -174,9 +179,17 @@ fn selection_or_line(e: &Editor) -> (String, bool) {
     }
 }
 
+/// Ctrl-X / Ctrl-K: the selection, or the current line. Whole lines are
+/// cut with their tags, so a nested block's title line pasted back moves
+/// the block (§5.2).
 fn cut(e: &mut Editor) {
     e.checkpoint();
     match e.selection() {
+        Some((s, en)) if s.col == 0 && en.col == 0 && en.line > s.line => {
+            e.anchor = None;
+            e.cut_lines(s.line, en.line - 1);
+            e.set_cursor(s);
+        }
         Some((s, en)) => {
             let t = e.delete(s, en);
             e.copy(t, false);
@@ -185,8 +198,7 @@ fn cut(e: &mut Editor) {
         }
         None => {
             let l = e.cursor.line;
-            let t = e.delete_lines(l, l);
-            e.copy(t, true);
+            e.cut_lines(l, l);
         }
     }
 }
@@ -204,7 +216,7 @@ fn paste(e: &mut Editor) {
     let clip = e.clip.clone();
     if clip.linewise {
         let l = e.cursor.line;
-        let first = e.put_lines(l, &clip.text, false);
+        let first = e.put_clip_lines(l, false);
         e.set_cursor(Pos::new(first + clip.text.matches('\n').count(), e.cursor.col));
     } else {
         let end = e.insert(e.cursor, &clip.text);
@@ -212,7 +224,8 @@ fn paste(e: &mut Editor) {
     }
 }
 
-/// Alt-Up / Alt-Down: move the current line (or the selected lines).
+/// Alt-Up / Alt-Down: move the current line (or the selected lines), each
+/// with its tag, so a nested block's title line takes its embed along (§5.2).
 fn move_lines(e: &mut Editor, down: bool) {
     let (s, en) = e.selection().map(|(s, en)| order(s, en)).unwrap_or((e.cursor, e.cursor));
     let (l1, l2) = (s.line, en.line);
@@ -220,13 +233,7 @@ fn move_lines(e: &mut Editor, down: bool) {
         return;
     }
     e.checkpoint();
-    let t = e.delete_lines(l1, l2);
-    let at = if down { l1 + 1 } else { l1 - 1 };
-    if at >= e.lines() {
-        e.put_lines(e.lines() - 1, &t, true);
-    } else {
-        e.put_lines(at, &t, false);
-    }
+    e.move_lines(l1, l2, down);
     let d: isize = if down { 1 } else { -1 };
     let shift = |p: Pos| Pos::new((p.line as isize + d) as usize, p.col);
     e.cursor = shift(if e.anchor.is_some() { e.cursor } else { Pos::new(l1, 0) });
@@ -283,6 +290,15 @@ mod tests {
         assert!(out[0].close);
         let out = keys(&mut e, "<C-s>");
         assert!(out[0].save);
+    }
+
+    #[test]
+    fn a_click_ends_a_run_of_typing() {
+        let (_d, mut e) = editor("one\ntwo\n", Keys::Normal);
+        keys(&mut e, "A");
+        e.click(Pos::new(3, 0));
+        keys(&mut e, "B<C-z>");
+        assert_eq!(body(&e), "Aone\ntwo");
     }
 
     #[test]

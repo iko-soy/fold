@@ -94,14 +94,21 @@ impl App {
             Hit::Fold(i) => {
                 if let Some(row) = self.rows().get(i) {
                     let r = row.nref;
+                    let sel = self.current();
                     self.toggle_fold(r);
+                    // a fold click only folds (§10.1): the selection stays on
+                    // its node, or lands on the folded row that now hides it
+                    self.cursor = i;
+                    if let Some(s) = sel {
+                        self.move_cursor_to(s);
+                    }
                     self.clamp_cursor();
                 }
             }
             Hit::Check(i) => {
                 self.focus_pane(Focus::Outline);
                 self.cursor = i;
-                self.act_toggle_task();
+                self.run_action(super::Action::ToggleDone);
             }
             Hit::RowMenu(i) => {
                 self.cursor = i;
@@ -148,7 +155,7 @@ impl App {
             Hit::PickRow(i) => {
                 if let Some(mut p) = self.prompt.take() {
                     p.sel = i;
-                    self.accept_prompt(p);
+                    self.accept_prompt_saving_editor(p);
                 }
             }
             Hit::FilterRow(i) => self.pick_filter(i),
@@ -207,12 +214,17 @@ impl App {
             self.outline_scroll += 1;
         }
         let rows = self.rows();
-        let target = self
-            .ui
-            .rows_geom
-            .iter()
-            .find(|(_, gy, _)| *gy == y)
-            .map(|&(j, _, title_x)| (j, if x < title_x { Drop::Before } else { Drop::Into }));
+        // only over an outline row (§10.1): released anywhere else, over the
+        // reading pane or a border, the drag does nothing
+        let target = match self.ui.hit_at(x, y) {
+            Some(Hit::Row(j) | Hit::Fold(j) | Hit::Check(j) | Hit::RowMenu(j)) => self
+                .ui
+                .rows_geom
+                .iter()
+                .find(|(gj, _, _)| *gj == j)
+                .map(|&(j, _, title_x)| (j, if x < title_x { Drop::Before } else { Drop::Into })),
+            _ => None,
+        };
         self.ui.drop = target.filter(|(j, _)| *j != from);
         let name = |i: usize| rows.get(i).map(|r| self.vault.tree.node(r.nref).title.clone()).unwrap_or_default();
         let msg = match self.ui.drop {
@@ -238,38 +250,47 @@ impl App {
         }
         let rows = self.rows();
         let (Some(from), Some(to)) = (press.row.and_then(|i| rows.get(i)), rows.get(j)) else { return };
-        let (r, target) = (from.nref, to.nref);
-        let title = self.vault.tree.node(self.vault.tree.resolved_child(r)).title.clone();
-        let target_key = self.vault.key_of(self.vault.tree.resolved_child(target));
+        // a drop is an outline verb: the editor saves first (§10.6), which
+        // re-parses what it wrote, so both nodes are found again by key
+        let keys = (self.vault.key_of(from.nref), self.vault.key_of(to.nref));
+        let edit = self.editor_before_write("outline verb");
+        let (Some(r), Some(target)) = (self.find_exact(&keys.0), self.find_exact(&keys.1)) else {
+            self.say("can't move: the outline changed");
+            return;
+        };
+        let (rr, rt) = (self.vault.tree.resolved_child(r), self.vault.tree.resolved_child(target));
+        let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
+        let title = self.vault.tree.node(rr).title.clone();
+        // it goes into the target, last, or just before it, under the
+        // target's parent
+        let (dest, rank) = match how {
+            Drop::Into => (rt, None),
+            Drop::Before => {
+                let p = self.outline_parent(rt).unwrap_or(self.vault.tree.root);
+                let at = self.vault.tree.resolved_children(p).iter().position(|&c| c == rt);
+                (p, at.map(|at| self.namesakes_before(rr, p, at)))
+            }
+        };
+        let dest = self.vault.key_of(dest);
+        let on = self.on_node(r);
         self.push_undo("move");
         match ops::move_node(&mut self.vault, r, target, how) {
             Ok(moved) => {
                 self.say(super::with_rule_note(&format!("moved “{}”", title), moved));
-                // find it where it landed: among the target's children, or
-                // its siblings, nearest the target
-                let landed = self.vault.find_by_key(&target_key).and_then(|t| {
-                    let pool = match how {
-                        Drop::Into => self.vault.tree.resolved_children(t),
-                        Drop::Before => self.parent_children(t),
-                    };
-                    pool.into_iter().rev().find(|&c| self.vault.tree.node(c).title == title)
-                });
-                match landed {
-                    Some(n) => self.reveal(n),
+                // find it where it landed, by its kind and place too: a
+                // namesake of it may be there already
+                match self.moved_node(&key, kind, &dest, rank) {
+                    Some(n) => {
+                        // the editor open on it follows it (§10.6)
+                        self.follow(on, n);
+                        self.reveal(n);
+                    }
                     None => self.clamp_cursor(),
                 }
             }
             Err(e) => self.say(format!("can't move: {}", e)),
         }
-    }
-
-    /// A node's siblings (itself included) in the resolved tree.
-    fn parent_children(&self, t: fold_core::tree::NRef) -> Vec<fold_core::tree::NRef> {
-        let chain = self.chain(t);
-        match chain.len() {
-            0 | 1 => self.vault.tree.resolved_children(self.vault.tree.root),
-            n => self.vault.tree.resolved_children(chain[n - 2]),
-        }
+        self.editor_after_write(edit);
     }
 
     fn mouse_right(&mut self, x: u16, y: u16) {

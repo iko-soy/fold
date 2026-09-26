@@ -2,12 +2,13 @@
 //! is drawn, so what the pointer can do is exactly what is on screen.
 
 use super::action::{Action, NODE_MENU};
-use super::markdown::style_line;
+use super::markdown::{fences, style_line, Code};
 use super::{App, Focus, Mode, PromptAction};
 use fold_core::ops::Drop;
 use fold_core::parse::{Kind, TaskState};
 use fold_core::render::render;
 use fold_core::tree::NRef;
+use fold_core::vault::NodeKey;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -71,10 +72,12 @@ pub enum Hit {
     PropDelete(usize),
 }
 
-/// The node menu: which node, where, and the highlighted item.
-#[derive(Debug, Clone, Copy)]
+/// The node menu: which node, where, and the highlighted item. The node is
+/// kept by its key (§3.4), since files can change under an open menu — a
+/// reload, an editor save — and renumber every node (§11.2).
+#[derive(Debug, Clone)]
 pub struct Menu {
-    pub target: NRef,
+    pub target: NodeKey,
     pub x: u16,
     pub y: u16,
     pub sel: usize,
@@ -188,26 +191,35 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// A title as drawn: the terminal drops a tab, so it shows as the spaces
+/// to its next stop, counted from the title's start (raw text is never
+/// hidden, §10.9).
+fn title_text(title: &str) -> String {
+    super::wrap::shown(title, 0, usize::MAX)
+}
+
 /// One screen row of the reading pane.
 struct Drawn {
     doc: Option<usize>,
     line: Line<'static>,
     code: bool,
-    check: Option<u16>,
-    link: Option<(u16, u16)>,
+    check: Option<usize>,
+    link: Option<(usize, usize)>,
 }
 
 /// Break a styled line into screen rows at `cols` columns (§10.1): each row
-/// its own `Line`, continuation rows indented, and code rows that go on
-/// ending in `↪`.
+/// its own `Line`, continuation rows indented, code rows that go on ending
+/// in `↪`, and tabs as the spaces to their tab stop (the terminal would
+/// drop them).
 fn wrap_styled(line: &Line<'static>, cols: usize, hard: bool) -> Vec<(Line<'static>, super::wrap::Row)> {
     let cells: Vec<(char, Style)> = line.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, s.style))).collect();
     let text: String = cells.iter().map(|c| c.0).collect();
     let rows = super::wrap::wrap(&text, cols, hard);
     let n = rows.len();
-    if n == 1 {
+    if n == 1 && !text.contains('\t') {
         return vec![(line.clone(), rows[0])];
     }
+    let xs = super::wrap::columns(&text);
     rows.iter()
         .enumerate()
         .map(|(i, r)| {
@@ -217,12 +229,16 @@ fn wrap_styled(line: &Line<'static>, cols: usize, hard: bool) -> Vec<(Line<'stat
             }
             let mut run = String::new();
             let mut style = None;
-            for &(c, st) in &cells[r.start..r.end] {
+            for (k, &(c, st)) in cells.iter().enumerate().take(r.end).skip(r.start) {
                 if style != Some(st) && !run.is_empty() {
                     spans.push(Span::styled(std::mem::take(&mut run), style.unwrap_or_default()));
                 }
                 style = Some(st);
-                run.push(c);
+                if c == '\t' {
+                    run.push_str(&" ".repeat(xs[k + 1] - xs[k]));
+                } else {
+                    run.push(c);
+                }
             }
             if !run.is_empty() {
                 spans.push(Span::styled(run, style.unwrap_or_default()));
@@ -416,7 +432,8 @@ impl App {
         buf.set_style(area, Style::default().bg(theme::BAR));
         let actions = [Action::Filter, Action::Capture, Action::ReadingPane, Action::Undo, Action::Redo, Action::Palette, Action::Help];
         let crumbs = self.crumbs();
-        let crumb_w: u16 = crumbs.iter().map(|&c| self.vault.tree.node(c).title.width() as u16 + 3).sum::<u16>() + 6;
+        let titles: Vec<String> = crumbs.iter().map(|&c| title_text(&self.vault.tree.node(c).title)).collect();
+        let crumb_w: u16 = titles.iter().map(|t| t.width() as u16 + 3).sum::<u16>() + 6;
         let room = area.width.saturating_sub(crumb_w.min(area.width / 2));
         let right = area.x + area.width;
         let start = self.buttons_right(buf, right, area.y, &actions, None, room);
@@ -428,7 +445,6 @@ impl App {
         self.ui.push(home, Hit::Crumb(None));
         x += 4;
         let limit = start.saturating_sub(1);
-        let titles: Vec<String> = crumbs.iter().map(|&c| self.vault.tree.node(c).title.clone()).collect();
         let total: u16 = titles.iter().map(|t| t.width() as u16 + 3).sum();
         let mut skip = 0;
         let mut need = total;
@@ -608,7 +624,7 @@ impl App {
             if dragging_from == Some(vi) {
                 style = style.add_modifier(Modifier::DIM);
             }
-            let title = if n.title.is_empty() { "(untitled)".to_string() } else { n.title.clone() };
+            let title = if n.title.is_empty() { "(untitled)".to_string() } else { title_text(&n.title) };
             let marker = if n.is_block() || n.is_embed() { " ▤" } else { "" };
             let shown = fit(&format!("{}{}", title, marker), title_room as usize);
             put(buf, title_x, y, &shown, title_room, style);
@@ -679,7 +695,7 @@ impl App {
         }
         if let Some(r) = r {
             let n = self.vault.tree.node(r);
-            let t = if n.kind == Kind::Root { "fold".into() } else { n.title.clone() };
+            let t = if n.kind == Kind::Root { "fold".into() } else { title_text(&n.title) };
             spans.push(Span::styled(t, Style::default().add_modifier(Modifier::BOLD)));
             if n.is_block() {
                 spans.push(Span::styled(" ▤", Style::default().fg(theme::DIM)));
@@ -733,7 +749,8 @@ impl App {
         self.ui.reading_view = view;
         // every line styled, then laid out in screen rows (§10.1)
         let texts: Vec<&str> = shown.iter().map(|(_, t)| t.as_str()).collect();
-        let code = self.code_lines(&texts);
+        let fenced = fences(texts.iter().copied());
+        let code = self.code_lines(&texts, &fenced);
         let cols = if self.wrap { inner.width as usize } else { usize::MAX / 2 };
         let mut rows: Vec<Drawn> = Vec::new();
         for (si, (doc_line, text)) in shown.iter().enumerate() {
@@ -746,19 +763,28 @@ impl App {
             } else {
                 match &code[si] {
                     Some(spans) => super::markdown::Styled { line: Line::from(spans.clone()), check: None, link: None },
-                    None => style_line(text, false),
+                    None => style_line(text, fenced[si]),
                 }
             };
             let parts = wrap_styled(&styled.line, cols, code[si].is_some());
+            // where each character is drawn: the clickable parts are
+            // character columns, and wide characters and tabs take more
+            let xs = if styled.check.is_some() || styled.link.is_some() {
+                super::wrap::columns(&styled.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            } else {
+                Vec::new()
+            };
             for (line, row) in parts {
-                let within = |c: u16| (c as usize) >= row.start && (c as usize) < row.end.max(row.start + 1);
-                let at = |c: u16| (row.indent + c as usize - row.start) as u16;
+                let within = |c: usize| c >= row.start && c < row.end.max(row.start + 1);
+                // a link wrapped onto the next row is a link there too
+                let on = |(a, b): (usize, usize)| within(a) || (a < row.start && b > row.start);
+                let at = |c: usize| row.indent + xs[c.clamp(row.start, row.end)] - xs[row.start];
                 rows.push(Drawn {
                     doc: *doc_line,
                     line,
                     code: code[si].is_some(),
                     check: styled.check.filter(|c| within(*c)).map(at),
-                    link: styled.link.filter(|(a, _)| within(*a)).map(|(a, b)| (at(a), at((b as usize).min(row.end) as u16))),
+                    link: styled.link.filter(|l| on(*l)).map(|(a, b)| (at(a), at(b))),
                 });
             }
         }
@@ -791,11 +817,13 @@ impl App {
             buf.set_line(inner.x, y, &d.line, inner.width);
             let Some(di) = d.doc else { continue };
             self.ui.push(line_rect, Hit::DocLine(di));
-            if let Some(c) = d.check {
-                self.ui.push(Rect { x: inner.x + c, y, width: 1, height: 1 }, Hit::DocCheck(di));
+            // only what is on screen: a line cut at the edge can be far wider
+            let w = inner.width as usize;
+            if let Some(c) = d.check.filter(|c| *c < w) {
+                self.ui.push(Rect { x: inner.x + c as u16, y, width: 1, height: 1 }, Hit::DocCheck(di));
             }
-            if let Some((a, b)) = d.link {
-                self.ui.push(Rect { x: inner.x + a, y, width: b.saturating_sub(a).max(1), height: 1 }, Hit::Link(di));
+            if let Some((a, b)) = d.link.filter(|(a, _)| *a < w) {
+                self.ui.push(Rect { x: inner.x + a as u16, y, width: b.min(w).saturating_sub(a).max(1) as u16, height: 1 }, Hit::Link(di));
             }
         }
         if rows.len() > view {
@@ -810,33 +838,23 @@ impl App {
 
     /// The lines inside fenced code blocks, styled: highlighted by the
     /// fence's language (§10.9), else in the plain code colour. `None` for
-    /// every line that is not code, fences included.
-    fn code_lines(&mut self, texts: &[&str]) -> Vec<Option<Vec<Span<'static>>>> {
+    /// every line that is not code, fences included. `fences` is where
+    /// each line stands to fenced code, as the parser reads it.
+    fn code_lines(&mut self, texts: &[&str], fences: &[Code]) -> Vec<Option<Vec<Span<'static>>>> {
         let mut out: Vec<Option<Vec<Span<'static>>>> = vec![None; texts.len()];
         let mut i = 0;
         while i < texts.len() {
-            let t = texts[i].trim_start();
-            let indent = texts[i].len() - t.len();
-            let fc = match t.chars().next() {
-                Some(c @ ('`' | '~')) => c,
-                _ => {
-                    i += 1;
-                    continue;
-                }
-            };
-            let n = t.chars().take_while(|&c| c == fc).count();
-            if n < 3 {
+            if fences[i] != Code::Fence {
                 i += 1;
                 continue;
             }
+            let t = texts[i].trim_start();
+            let indent = texts[i].len() - t.len();
+            let fc = t.chars().next();
+            let n = t.chars().take_while(|&c| Some(c) == fc).count();
             let info = t[n..].trim().to_string();
-            // the block runs to a fence of the same character, at least as long
-            let end = (i + 1..texts.len())
-                .find(|&j| {
-                    let u = texts[j].trim_start();
-                    u.chars().take_while(|&c| c == fc).count() >= n && u.trim_end().chars().all(|c| c == fc)
-                })
-                .unwrap_or(texts.len());
+            // the block runs to its closing fence, or to the end
+            let end = (i + 1..texts.len()).find(|&j| fences[j] != Code::Inside).unwrap_or(texts.len());
             let body: Vec<&str> = texts[i + 1..end]
                 .iter()
                 .map(|l| {
@@ -881,7 +899,7 @@ impl App {
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
         let Some(ed) = &self.editor else { return };
         let owner = ed.buf.owner_at(ed.cursor.line);
-        let owner_title = ed.buf.owners.get(&owner).map(|o| o.title.clone()).unwrap_or_default();
+        let owner_title = ed.buf.owners.get(&owner).map(|o| title_text(&o.title)).unwrap_or_default();
         let mut title = vec![
             Span::styled(" Editing ", Style::default().fg(theme::ACCENT)),
             Span::styled(owner_title, Style::default().add_modifier(Modifier::BOLD)),
@@ -921,7 +939,8 @@ impl App {
             (None, Some(m)) => Some((m.clone(), false)),
             _ => None,
         };
-        let view = inner.height as usize - bottom.is_some() as usize;
+        // a short terminal can leave the pane no inner rows at all
+        let view = (inner.height as usize).saturating_sub(bottom.is_some() as usize);
         let (sel, block_cur) = (ed.selection(), ed.block_cursor());
         let wrap = self.wrap;
         let ed = self.editor.as_mut().unwrap();
@@ -952,7 +971,7 @@ impl App {
             // context
             let style = if *own { Style::default() } else { Style::default().fg(ratatui::style::Color::Gray) };
             let chars: Vec<char> = text.chars().collect();
-            let part: String = chars[row.start..row.end].iter().collect();
+            let part = super::wrap::shown(text, row.start, row.end);
             let x0 = inner.x + row.indent as u16;
             put(buf, x0, y, &part, inner.width.saturating_sub(row.indent as u16), style);
             if codes[*l] && !last {
@@ -963,17 +982,18 @@ impl App {
                     let from = if *l == s.line { s.col } else { 0 }.max(row.start);
                     // a selected line end shows as one cell, on the last row
                     let to = if *l == e.line { e.col } else { chars.len() + 1 };
-                    let to = if *last { to } else { to.min(row.end) };
-                    for col in from..to {
-                        let x = x0 + (col - row.start) as u16;
-                        if x < inner.x + inner.width {
-                            buf[(x, y)].set_style(Style::default().bg(theme::SEL));
-                        }
+                    let to = if *last { to } else { to.min(row.end) }.max(from);
+                    // every cell those characters are drawn over: a wide
+                    // character or a tab takes more than one
+                    let (xs, n) = (super::wrap::columns(text), chars.len());
+                    let x = |c: usize| x0 as usize + xs[c.min(n)] - xs[row.start] + c.saturating_sub(n);
+                    for cx in x(from)..x(to).min((inner.x + inner.width) as usize) {
+                        buf[(cx as u16, y)].set_style(Style::default().bg(theme::SEL));
                     }
                 }
             }
         }
-        if let Some((text, input)) = bottom {
+        if let Some((text, input)) = bottom.filter(|_| inner.height > 0) {
             let y = inner.y + inner.height - 1;
             let style = if input { Style::default() } else { Style::default().fg(theme::WARN) };
             buf.set_style(Rect { x: inner.x, y, width: inner.width, height: 1 }, Style::default().bg(theme::BAR));
@@ -1047,7 +1067,12 @@ impl App {
     }
 
     fn draw_menu(&mut self, f: &mut Frame, screen: Rect) {
-        let Some(menu) = self.ui.menu else { return };
+        let Some(menu) = self.ui.menu.clone() else { return };
+        let Some(target) = self.menu_target() else {
+            // its node is gone, the files changed under it: the menu closes
+            self.ui.menu = None;
+            return;
+        };
         let w: u16 = 28;
         let h = NODE_MENU.len() as u16 + 2;
         let x = menu.x.min(screen.x + screen.width.saturating_sub(w));
@@ -1055,7 +1080,7 @@ impl App {
         let r = Rect { x, y, width: w, height: h }.intersection(screen);
         self.ui.push(screen, Hit::Backdrop);
         f.render_widget(Clear, r);
-        let title = self.vault.tree.node(menu.target).title.clone();
+        let title = title_text(&self.vault.tree.node(target).title);
         let block = rounded(Line::from(Span::styled(format!(" {} ", fit(&title, 20)), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
         f.render_widget(block, r);
@@ -1077,7 +1102,7 @@ impl App {
                             m.sel = i;
                         }
                     }
-                    let sel = self.ui.menu.map(|m| m.sel == i).unwrap_or(false);
+                    let sel = self.ui.menu.as_ref().map(|m| m.sel == i).unwrap_or(false);
                     let base = if sel { Style::default().bg(theme::SEL) } else { Style::default() };
                     buf.set_style(row, base);
                     let label_style = if *a == Action::Delete { base.fg(theme::DANGER) } else { base };
@@ -1149,7 +1174,7 @@ impl App {
 
     /// A list row for a node: its title, then its parents dimmed.
     fn path_spans(&self, r: NRef) -> Vec<(String, Style)> {
-        let path = self.path_titles(r);
+        let path: Vec<String> = self.path_titles(r).iter().map(|t| title_text(t)).collect();
         let (last, parents) = path.split_last().map(|(l, p)| (l.clone(), p.join(" › "))).unwrap_or_default();
         let last = if last.is_empty() { "(untitled)".into() } else { last };
         vec![
@@ -1193,7 +1218,7 @@ impl App {
     }
 
     fn draw_props(&mut self, f: &mut Frame, screen: Rect) {
-        let title = self.props_target.map(|t| self.vault.tree.node(t).title.clone()).unwrap_or_default();
+        let title = self.props_target.map(|t| title_text(&self.vault.tree.node(t).title)).unwrap_or_default();
         let h = (self.props_rows.len() as u16 + 4).max(5);
         let r = Self::centered(screen, 64, h);
         let inner = self.popup(f, screen, r, &format!("Properties — {}", fit(&title, 30)), &[Action::PropAdd, Action::Close]);
@@ -1261,7 +1286,11 @@ impl App {
         ] {
             let text = render(&self.vault.tree, r, 1, true);
             let block = WBlock::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(color)).title(title);
-            let lines: Vec<Line> = text.lines().map(|l| style_line(l, false).line).collect();
+            let lines: Vec<Line> = text
+                .lines()
+                .zip(fences(text.lines()))
+                .map(|(l, code)| style_line(&super::wrap::shown(l, 0, usize::MAX), code).line)
+                .collect();
             f.render_widget(Paragraph::new(lines).block(block), rect);
         }
     }

@@ -78,6 +78,8 @@ fn check_reports_and_fix_canonicalizes() {
 #[test]
 fn merge_processes_conflict_files() {
     let dir = tempfile::tempdir().unwrap();
+    // the merged conflict file goes to a trash of the test's own (§11.5)
+    let state = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.md"), "# A\n\n- ours\n").unwrap();
     std::fs::write(
         dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
@@ -85,6 +87,7 @@ fn merge_processes_conflict_files() {
     )
     .unwrap();
     notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
         .args(["merge"])
         .assert()
         .success()
@@ -96,21 +99,23 @@ fn merge_processes_conflict_files() {
 #[test]
 fn trash_list_and_restore() {
     let dir = tempfile::tempdir().unwrap();
-    // put something in the trash via a delete through the core
-    std::fs::write(dir.path().join("root.md"), "# A\n\n- doomed\n").unwrap();
-    {
-        let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
-        let a = v.tree.resolved_children(v.tree.root)[0];
-        let node = v.tree.resolved_children(a)[0];
-        fold_core::ops::delete_subtree(&mut v, node).unwrap();
-    }
+    // a trash of the test's own (§11.5), not the machine's, where an entry
+    // left by an earlier run would make "doomed" match twice
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    // a deleted subtree, as a delete leaves it in the trash
+    let trash = state.path().join("fold").join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    std::fs::write(trash.join("20260926-101010-doomed.md"), "- doomed\n").unwrap();
     notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
         .args(["trash", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("doomed"));
     // restore by a unique substring of the trash file name
     notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
         .args(["trash", "restore", "doomed"])
         .assert()
         .success();
@@ -155,4 +160,49 @@ fn trash_restore_never_overwrites_root_md() {
         .success();
     assert_eq!(std::fs::read_to_string(dir.path().join("root.md")).unwrap(), "# Keep\n");
     assert!(dir.path().join("root-restored-2.md").exists());
+}
+
+/// The trash lives outside the vault (§11.5), often on another filesystem
+/// (a Syncthing folder on an external disk vs `$XDG_STATE_HOME`). Merging
+/// must still move the conflict file to trash (copy + remove across
+/// filesystems), or every rerun merges the same conflict again and adds
+/// another duplicate conflict block.
+#[test]
+#[cfg(target_os = "linux")]
+fn merge_trashes_conflict_file_across_filesystems() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let Ok(state) = tempfile::tempdir_in("/dev/shm") else {
+        return;
+    };
+    let dev = |p: &std::path::Path| std::fs::metadata(p).unwrap().dev();
+    if dev(dir.path()) == dev(state.path()) {
+        return; // not a cross-filesystem setup on this machine
+    }
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- [ ] t\n").unwrap();
+    let c = "root.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), "# A\n\n- [x] t\n").unwrap();
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .arg("merge")
+        .assert()
+        .success();
+    assert!(!dir.path().join(c).exists(), "conflict file left in the vault");
+    let trash = state.path().join("fold").join("trash");
+    assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 1);
+    // idempotent: a second run finds nothing to merge and adds no blocks
+    let md_files = |d: &std::path::Path| {
+        std::fs::read_dir(d)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "md"))
+            .count()
+    };
+    let before = md_files(dir.path());
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .arg("merge")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no sync-conflict files"));
+    assert_eq!(md_files(dir.path()), before);
 }

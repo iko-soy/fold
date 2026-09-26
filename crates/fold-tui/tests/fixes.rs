@@ -194,3 +194,423 @@ fn respelling_moves_the_node_and_keeps_the_cursor_on_it() {
     press(&mut app, "kJ");
     assert_eq!(root(&d), "# P\n\n- b\n\n## a\n");
 }
+
+#[test]
+fn editor_message_in_a_short_terminal_does_not_panic() {
+    let (_d, mut app) = app_with("# A\n\nbody\n");
+    press(&mut app, "e");
+    // the default keymap answers "nothing to undo", a message on the pane's
+    // last line; the pane has no inner rows at these sizes
+    app.handle_key(ctrl('z'));
+    for (w, h) in [(60u16, 5u16), (60, 6), (100, 4), (100, 3)] {
+        draw(&mut app, w, h);
+    }
+}
+
+#[test]
+fn alt_down_keeps_a_multi_line_selection() {
+    let with = |code, m| KeyEvent::new(code, m);
+    let (d, mut app) = app_with("# A\n\na\nb\nc\nd\n");
+    press(&mut app, "e");
+    draw(&mut app, 100, 24);
+    // the cursor opens on the title; go to "a", select "a" and "b", move them down twice
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(with(KeyCode::Down, KeyModifiers::SHIFT));
+    app.handle_key(with(KeyCode::End, KeyModifiers::SHIFT));
+    app.handle_key(with(KeyCode::Down, KeyModifiers::ALT));
+    app.handle_key(with(KeyCode::Down, KeyModifiers::ALT));
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    // the first move must leave "a" and "b" selected, so the second moves both
+    assert_eq!(root(&d), "# A\n\nc\nd\na\nb\n");
+}
+
+#[test]
+fn editor_undo_stops_at_cursor_moves() {
+    // normal keymap: typing somewhere else after a cursor move is a new undo
+    // step, so one Ctrl-Z takes back only the last run of typing
+    let (d, mut app) = app_with("# A\n\none\ntwo\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    press(&mut app, "A");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Home));
+    press(&mut app, "B");
+    app.handle_key(ctrl('s'));
+    assert_eq!(root(&d), "# A\n\nAone\nBtwo\n");
+    app.handle_key(ctrl('z'));
+    app.handle_key(ctrl('s'));
+    assert_eq!(root(&d), "# A\n\nAone\ntwo\n");
+}
+
+#[test]
+fn an_embed_cycle_does_not_overflow_the_stack() {
+    // §6.2: a cycle is a diagnostic, so a vault may contain one. The outline
+    // shows the block once and skips the repeat visit, as walk/render do.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~loop.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- Loop\n  ![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    draw(&mut app, 100, 24);
+    let rows = app.rows();
+    assert_eq!(current_title(&app), "Loop");
+    let loops = rows.iter().filter(|r| app.title_of(r.nref) == "Loop").count();
+    assert_eq!(loops, 1);
+    app.show_reading = true;
+    press(&mut app, "lj");
+    draw(&mut app, 100, 24);
+}
+
+#[test]
+fn deleting_the_zoomed_node_zooms_out() {
+    let (d, mut app) = app_with("# A\n\n# B\n\n- b1\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B; the cursor is on B
+    assert_eq!(current_title(&app), "B");
+    press(&mut app, "d"); // B is gone: the zoom must not dangle
+    assert_eq!(root(&d), "# A\n");
+    assert_eq!(current_title(&app), "A");
+    draw(&mut app, 100, 24);
+    // a zoomed node inside another zooms out to it
+    let (d, mut app) = app_with("# A\n\n## B\n\n# C\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "d");
+    assert_eq!(root(&d), "# A\n\n# C\n");
+    let titles: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
+    assert_eq!(titles, ["A"]);
+}
+
+#[test]
+fn undoing_under_a_zoom_keeps_the_zoom() {
+    let (_d, mut app) = app_with("- a\n- b\n");
+    press(&mut app, "ypG"); // paste a copy of a; the cursor is on b
+    app.handle_key(key(KeyCode::Enter)); // zoom into b
+    assert_eq!(current_title(&app), "b");
+    press(&mut app, "u"); // the file shrinks back to a, b
+    assert_eq!(current_title(&app), "b");
+    press(&mut app, "U");
+    assert_eq!(current_title(&app), "b");
+    draw(&mut app, 100, 24);
+}
+
+#[test]
+fn moving_the_zoomed_node_keeps_the_zoom_on_it() {
+    let (d, mut app) = app_with("- A\n- B\n  - B1\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B
+    press(&mut app, "K");
+    assert_eq!(root(&d), "- B\n  - B1\n- A\n");
+    assert_eq!(current_title(&app), "B");
+    let titles: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
+    assert_eq!(titles, ["B", "B1"]);
+}
+
+#[test]
+fn a_dismissed_reading_pane_menu_does_not_retarget_outline_verbs() {
+    // B is inside the folded A, so it has no outline row
+    let (d, mut app) = app_with("# A\n\n## B\n\n# C\n");
+    press(&mut app, "h");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jjm"); // the node menu of B, from its line in the pane
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "C");
+    press(&mut app, "d");
+    assert_eq!(root(&d), "# A\n\n## B\n");
+}
+
+#[test]
+fn new_sibling_of_the_zoomed_node_opens_the_new_node() {
+    let (d, mut app) = app_with("# A\n\n# B\n\n- b1\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B, the cursor on B (row 0)
+    assert_eq!(current_title(&app), "B");
+    press(&mut app, "n");
+    // the empty sibling is written after B's subtree...
+    assert_eq!(root(&d), "# A\n\n# B\n\n- b1\n\n#\n");
+    // ...and it, not B, is what the editor opens on (§10.3 `n`), with the
+    // zoom widened so that it is on screen
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(current_title(&app), "");
+    press(&mut app, "C");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# A\n\n# B\n\n- b1\n\n# C\n");
+    assert_eq!(current_title(&app), "C");
+    // a sibling of an embedded block lands after its embed
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        d.path().join("racfer~zfs.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- ZFS\n",
+    )
+    .unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "ZFS");
+    press(&mut app, "nX");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n  - X\n");
+    assert_eq!(current_title(&app), "X");
+}
+
+#[test]
+fn filter_pick_inside_a_block_unfolds_the_embedding_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~zfs.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- ZFS\n  - snapshots\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    assert_eq!(current_title(&app), "Homelab");
+    press(&mut app, "h"); // fold Homelab
+    press(&mut app, "/snapshots");
+    app.handle_key(key(KeyCode::Enter));
+    // §10.5: the pick unfolds its ancestors (through the embed) and selects it
+    assert_eq!(current_title(&app), "snapshots");
+}
+
+#[test]
+fn backspace_from_a_zoomed_block_goes_to_its_outline_parent() {
+    // §10.3 `Backspace`: zoom out to parent. A block root's parent in the
+    // outline is the node that embeds it (as the breadcrumbs show), not
+    // its own file's root.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "- Homelab\n  - NAS\n    ![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~zfs.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- ZFS\n  - snapshots\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    let titles = |app: &App| -> Vec<String> { app.rows().iter().map(|r| app.title_of(r.nref)).collect() };
+    press(&mut app, "jj");
+    assert_eq!(current_title(&app), "ZFS");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(titles(&app), ["ZFS", "snapshots"]);
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(titles(&app), ["NAS", "ZFS", "snapshots"]);
+    assert_eq!(current_title(&app), "ZFS");
+    // the same from the reading pane
+    app.show_reading = true;
+    app.handle_key(key(KeyCode::Enter)); // zoom into ZFS; the pane takes focus
+    assert_eq!(titles(&app), ["ZFS", "snapshots"]);
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(titles(&app), ["NAS", "ZFS", "snapshots"]);
+}
+
+#[test]
+fn enter_on_a_task_heading_in_the_reading_pane_zooms() {
+    // SPEC §10.4: Enter on a heading zooms into it; `x` toggles a task heading
+    let (d, mut app) = app_with("# A\n\n## [ ] T\n\nbody\n\n- [ ] i\n");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jj");
+    assert!(app.reading_doc_pub().lines[app.read_cursor_pub()].contains("[ ] T"));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(root(&d), "# A\n\n## [ ] T\n\nbody\n\n- [ ] i\n", "Enter must not toggle the task");
+    let doc = app.reading_doc_pub();
+    assert!(doc.lines[0].contains("T"), "zoomed into T: {:?}", doc.lines);
+    // on a task item, Enter still toggles
+    let i = doc.lines.iter().position(|l| l.contains("[ ] i")).unwrap();
+    for _ in 0..i {
+        press(&mut app, "j");
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(root(&d), "# A\n\n## [ ] T\n\nbody\n\n- [x] i\n");
+}
+
+/// Z zoomed, in the file after block B's: trashing B's file renumbers Z's.
+fn zoomed_on_z_over_b() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- Top\n  ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~z.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- Z\n  - c\n    ![[dozzod-binwes-talsun-worbec]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~b.md"),
+        "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- B\n  - b1\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    (dir, app)
+}
+
+fn titles(app: &App) -> Vec<String> {
+    app.rows().iter().map(|r| app.title_of(r.nref)).collect()
+}
+
+#[test]
+fn an_editor_save_keeps_the_zoom_on_its_node() {
+    let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+    // deleting a nested block's title line trashes its file (§5.2); here
+    // the cursor lands on a line of the enclosing block, which splices B
+    let (d, mut app) = zoomed_on_z_over_b();
+    assert_eq!(titles(&app), ["Z", "c", "B", "b1"]);
+    press(&mut app, "je"); // edit c: "- c", "  - B", "    - b1"
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Home));
+    app.handle_key(shift(KeyCode::Down));
+    app.handle_key(key(KeyCode::Delete));
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(md_files(&d), ["racfer~z.md", "root.md"]);
+    assert_eq!(titles(&app), ["Z", "c", "b1"]);
+    draw(&mut app, 100, 24);
+    // the same deleted from c's line, and saved by Esc
+    let (d, mut app) = zoomed_on_z_over_b();
+    press(&mut app, "je");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(shift(KeyCode::Up));
+    app.handle_key(shift(KeyCode::End));
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(md_files(&d).len(), 3);
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(md_files(&d), ["racfer~z.md", "root.md"]);
+    assert_eq!(titles(&app), ["Z", "c", "b1"]);
+    draw(&mut app, 100, 24);
+    // the zoomed node's own title edited: the zoom follows it
+    let (d, mut app) = app_with("# A\n\n# B\n\n- b1\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, "ee");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# A\n\n# Bee\n\n- b1\n");
+    assert_eq!(titles(&app), ["Bee", "b1"]);
+    // a child's title edited: the zoom stays on the zoomed node
+    let (d, mut app) = app_with("# A\n\n- a1\n\n# B\n\n- b1\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "jj");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B
+    assert_eq!(titles(&app), ["B", "b1"]);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, "x");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# A\n\n- a1\n\n# B\n\n- b1x\n");
+    assert_eq!(titles(&app), ["B", "b1x"]);
+    // Revert re-reads the files, and one changed on disk meanwhile
+    let (d, mut app) = app_with("- a\n- Z\n  - z1\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "ex");
+    std::fs::write(d.path().join("root.md"), "- a\n- a2\n- Z\n  - z1\n").unwrap();
+    app.run_action(fold_tui::app::Action::EditRevert);
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(titles(&app), ["Z", "z1"]);
+}
+
+#[test]
+fn move_to_a_later_node_keeps_the_cursor_on_the_moved_node() {
+    // the destination is found again by the key it had before the move
+    let (d, mut app) = app_with("# A\n\n- x\n\n# B\n\n# C\n");
+    press(&mut app, "j");
+    press(&mut app, "rC");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(root(&d), "# A\n\n# B\n\n# C\n\n- x\n");
+    assert_eq!(current_title(&app), "x");
+}
+
+#[test]
+fn indenting_the_zoomed_node_keeps_the_zoom_on_it() {
+    // zoomed into z, `>` makes it a child of s: z is still there, and the
+    // zoom stays on it, as it does for `s` (make block)
+    let (d, mut app) = app_with("# P\n\n- s\n- z\n  - z1\n");
+    press(&mut app, "jj");
+    assert_eq!(current_title(&app), "z");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(titles(&app), ["z", "z1"]);
+    press(&mut app, ">");
+    assert_eq!(root(&d), "# P\n\n- s\n  - z\n    - z1\n");
+    assert_eq!(titles(&app), ["z", "z1"], "the zoom left z");
+    // and `<` takes it back out of s, the zoom still on it
+    press(&mut app, "<");
+    assert_eq!(root(&d), "# P\n\n- s\n- z\n  - z1\n");
+    assert_eq!(titles(&app), ["z", "z1"], "the zoom left z");
+    // an item out of a section lands before the first section (§3.1)
+    let (d, mut app) = app_with("# P\n\n## S\n\n- z\n  - z1\n\n## T\n");
+    press(&mut app, "jj");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(titles(&app), ["z", "z1"]);
+    press(&mut app, "<");
+    assert_eq!(root(&d), "# P\n\n- z\n  - z1\n\n## S\n\n## T\n");
+    assert_eq!(titles(&app), ["z", "z1"], "the zoom left z");
+}
+
+#[test]
+fn indenting_or_outdenting_a_node_keeps_the_cursor_on_it() {
+    // among namesakes too: the node lands where the ordering rule puts it
+    // (§3.1), not wherever its old path now leads
+    let (d, mut app) = app_with("# P\n\n- s\n  - z\n    - mine\n- z\n  - theirs\n");
+    press(&mut app, "jj");
+    assert_eq!(current_title(&app), "z");
+    press(&mut app, "<");
+    assert_eq!(root(&d), "# P\n\n- s\n- z\n  - mine\n- z\n  - theirs\n");
+    assert_eq!(current_title(&app), "z");
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "mine");
+    press(&mut app, "k>");
+    assert_eq!(root(&d), "# P\n\n- s\n  - z\n    - mine\n- z\n  - theirs\n");
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "mine");
+}
+
+#[test]
+fn one_undo_after_leaving_with_a_cut_block_title_leaves_no_block_file_embedded_nowhere() {
+    // Ctrl-K on the block's title line, then Esc: leaving deletes the block
+    // (§5.2), A written without its embed and the file trashed. Leaving is
+    // one save, one op-log entry (§10.10): one `u` puts the block back
+    // embedded, or leaves it trashed, never a file that nothing embeds
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- task\n  body\n- two\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let embed = format!("![[{}]]", id.as_str());
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", embed));
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    assert!(!block.exists());
+    press(&mut app, "u");
+    let r = root(&d);
+    assert!(!block.exists() || r.contains(&embed), "one undo left {} embedded nowhere; root.md is {:?}", block.display(), r);
+    // the whole of leaving is undone: the block is back where it was
+    assert_eq!(r, format!("# A\n\n- one\n{}\n- two\n", embed));
+    assert!(block.exists());
+}

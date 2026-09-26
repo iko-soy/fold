@@ -1,7 +1,7 @@
 //! `notes check` diagnostics (§15.7) and `--fix` canonicalization (§4.2).
 
 use crate::ident::{filename, slug, split_filename, Id};
-use crate::parse::{Content, Kind};
+use crate::parse::{ends_with_blank_line, Content, Kind};
 use crate::render::render;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -91,6 +91,28 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                     });
                 }
             }
+        }
+    }
+    // cyclic embeds (§6.2): follow each block up through the embed that
+    // holds it until root.md, a block embedded nowhere, or the block itself
+    for (r, id) in &t.blocks {
+        let mut seen: Vec<&Id> = vec![id];
+        let mut cur = id;
+        while let Some(e) = t.embed_of(cur) {
+            // the block whose file holds that embed; none: root.md
+            let Some((_, holder)) = t.blocks.iter().find(|(b, _)| b.0 == e.0) else { break };
+            if holder == id {
+                out.push(Diagnostic {
+                    file: t.node(*r).block.as_ref().unwrap().path.clone(),
+                    message: format!("cyclic embed: block {} is embedded inside itself", id),
+                });
+                break;
+            }
+            if seen.contains(&holder) {
+                break; // a cycle above it, reported by the blocks on it
+            }
+            seen.push(holder);
+            cur = holder;
         }
     }
     // block files: exactly one root, valid unique ids (§4.9, §6.2)
@@ -198,6 +220,37 @@ fn embed_level_mismatch(t: &crate::tree::Tree, e: NRef) -> Option<usize> {
         .then_some(written)
 }
 
+/// The text of `e`'s file with heading embed `e` at the level of its
+/// position and the structure unchanged (§4.7). Its later sibling sections
+/// written deeper than that level move to it too (it is their position's
+/// level as well): left alone, the shallower embed would take them as its
+/// children. `None` when `e` has no stale level, or when no level keeps it
+/// where it is (its parent section is itself written at that level or
+/// deeper), and `check` goes on reporting it.
+fn embed_level_fix(t: &crate::tree::Tree, e: NRef) -> Option<String> {
+    embed_level_mismatch(t, e)?;
+    let lvl = t.derived_level(e);
+    let f = &t.files[e.0];
+    let parent = &f.nodes[f.nodes[e.1].parent?];
+    if parent.kind == Kind::Section && parent.level.unwrap_or(1) >= lvl {
+        return None;
+    }
+    let from = parent.children.iter().position(|&c| c == e.1)?;
+    let mut text = f.text.clone();
+    // last to first, so the spans before each edit stay valid
+    for &c in parent.children[from..].iter().rev() {
+        let n = &f.nodes[c];
+        let Some(w) = n.level.filter(|&w| w > lvl || c == e.1) else { continue };
+        let line = n.title_span.text(&f.text);
+        let at = n.title_span.start + line.len() - line.trim_start_matches([' ', '\t']).len();
+        if !f.text[at..].starts_with(&"#".repeat(w)) {
+            return None; // not an ATX heading
+        }
+        text.replace_range(at..at + w, &"#".repeat(lvl));
+    }
+    Some(text)
+}
+
 /// A heading embed must embed a section, a bare one an item (§4.7).
 fn form_mismatch(embed: Kind, block: Kind) -> bool {
     (embed == Kind::Section) != (block == Kind::Section)
@@ -247,7 +300,8 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             // frontmatter and intro text, exactly as found; then the root's
             // children in order — nodes rendered, text children verbatim,
             // one blank line between a node and what follows it unless both
-            // are items of a tight list (§4.2)
+            // are items of a tight list (§4.2); a line is blank whatever its
+            // line ending, so a CRLF file keeps its loose lists
             let mut s = f.text[..f.nodes[first].span.start].to_string();
             let root = &f.nodes[f.root_node];
             let from = root
@@ -259,23 +313,23 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             for c in &root.content[from..] {
                 let loose_after_prev = prev.map(|p| {
                     let pn = &f.nodes[p];
-                    pn.kind == Kind::Section || pn.span.text(&f.text).ends_with("\n\n")
+                    pn.kind == Kind::Section || ends_with_blank_line(pn.span.text(&f.text))
                 });
                 match *c {
                     Content::Node(k) => {
                         let kn = &f.nodes[k];
                         let blank = match loose_after_prev {
                             Some(loose) => loose || kn.kind == Kind::Section,
-                            None => !s.is_empty() && !s.ends_with("\n\n"),
+                            None => !s.is_empty() && !ends_with_blank_line(&s),
                         };
-                        if blank && !s.ends_with("\n\n") {
+                        if blank && !ends_with_blank_line(&s) {
                             s.push('\n');
                         }
                         s.push_str(&render(&vault.tree, (i, k), 1, false));
                         prev = Some(k);
                     }
                     Content::Text(sp) => {
-                        if prev.is_some() && !s.ends_with("\n\n") {
+                        if prev.is_some() && !ends_with_blank_line(&s) {
                             s.push('\n');
                         }
                         let t = sp.text(&f.text);
@@ -314,25 +368,15 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         crate::ops::respell_embed(vault, e, to_section)?;
         count += 1;
     }
-    // heading embeds at the level of their position (§4.7); only ever
-    // shallower than written, so no line changes parent
+    // heading embeds at the level of their position (§4.7), one at a time,
+    // with no line changing parent
     for _ in 0..10_000 {
         let t = &vault.tree;
-        let wrong = t.files.iter().enumerate().find_map(|(fi, f)| {
-            (0..f.nodes.len())
-                .find(|&ni| embed_level_mismatch(t, (fi, ni)).is_some())
-                .map(|ni| (fi, ni))
+        let fixed = t.files.iter().enumerate().find_map(|(fi, f)| {
+            (0..f.nodes.len()).find_map(|ni| embed_level_fix(t, (fi, ni)).map(|text| (fi, text)))
         });
-        let Some(e) = wrong else { break };
-        let n = vault.tree.node(e);
-        let line = format!(
-            "{}{} ![[{}]]",
-            " ".repeat(n.indent),
-            "#".repeat(vault.tree.derived_level(e)),
-            n.embed.as_ref().unwrap()
-        );
-        let span = n.title_span;
-        vault.write_span(e.0, span, &line)?;
+        let Some((file, text)) = fixed else { break };
+        vault.write_file_text(file, &text)?;
         count += 1;
     }
     // repair filenames (§6.4): an existing prefix that is a leading run of

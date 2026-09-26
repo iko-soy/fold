@@ -193,3 +193,66 @@ fn code_blocks_are_highlighted_by_their_language() {
     assert_eq!(fns[0], ratatui::style::Color::Magenta, "rust keyword highlighted");
     assert_eq!(fns[1], ratatui::style::Color::Yellow, "unknown language: plain code colour");
 }
+
+#[test]
+fn fences_are_drawn_where_the_parser_reads_them() {
+    // code breaks hard, marked with ↪, in the reading pane and the editor
+    // alike; prose wraps at spaces (§10.1)
+    let long = "Mirrored pairs, no raidz. Snapshots hourly via sanoid and pruned daily, replicated offsite every night.";
+    let code_in = |text: &str| -> (bool, bool) {
+        let (_d, mut app) = app_with(text);
+        app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+        let reading = screen(&mut app, 100, 24).contains('↪');
+        app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(app.mode_pub(), "edit");
+        (reading, screen(&mut app, 100, 24).contains('↪'))
+    };
+    // §3.3: a backtick fence's info string holds no backtick, so this is a
+    // paragraph with inline code, and what follows is prose
+    assert_eq!(code_in(&format!("# A\n\n```npm i``` first\n{}\n", long)), (false, false));
+    // a closing fence has nothing after it: "``` x" is code, not a closer
+    assert_eq!(code_in(&format!("# A\n\n```\n``` x\n{}\n```\n", long)), (true, true));
+    // nor is a shorter run of the same character
+    assert_eq!(code_in(&format!("# A\n\n~~~~\n~~~\n{}\n~~~~\n", long)), (true, true));
+    // the line with inline code is styled as text, not as a fence (whose
+    // info string is in the accent colour)
+    let (_d, mut app) = app_with("# A\n\n```npm i``` first\n");
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let (x, y) = (0..20u16)
+        .flat_map(|y| (34..90u16).map(move |x| (x, y)))
+        .find(|&(x, y)| (0..5).map(|i| buf[(x + i, y)].symbol()).collect::<String>() == "npm i")
+        .expect("drawn");
+    assert_ne!(buf[(x, y)].fg, ratatui::style::Color::Cyan, "styled as a fence's info string");
+}
+
+#[test]
+fn the_conflict_view_draws_fenced_code_as_code() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- [ ] task\n  ```sh\n  # a comment\n  ```\n").unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        "- [x] task\n  ```sh\n  # a comment\n  ```\n",
+    )
+    .unwrap();
+    let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    drop(v);
+    let mut app = App::new(dir.path()).unwrap();
+    app.enter_conflict_view();
+    assert_eq!(app.mode_pub(), "conflict");
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let at: Vec<(u16, u16)> = (0..20u16)
+        .flat_map(|y| (0..92u16).map(move |x| (x, y)))
+        .filter(|&(x, y)| (0..9).map(|i| buf[(x + i, y)].symbol()).collect::<String>() == "a comment")
+        .collect();
+    assert_eq!(at.len(), 2, "both sides drawn");
+    for (x, y) in at {
+        // code, not a heading
+        assert_eq!(buf[(x, y)].fg, ratatui::style::Color::Yellow);
+        assert!(!buf[(x, y)].modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+}

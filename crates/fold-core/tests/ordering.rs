@@ -548,3 +548,311 @@ fn drop_section_before_an_item_is_clamped() {
     assert_ordered(&v);
     assert!(v.find_by_path(&["P".into(), "S".into()]).is_some(), "{}", root_text(&v));
 }
+
+#[test]
+fn drop_before_a_later_sibling_lands_before_it() {
+    let src = "# A\n\n- a\n- b\n- c\n";
+    let (_d, mut v) = vault_with(src);
+    let (r, t) = (at(&v, "A/a"), at(&v, "A/c"));
+    assert!(!ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap());
+    assert_eq!(root_text(&v), "# A\n\n- b\n- a\n- c\n");
+    // dropping a node before its immediate next sibling leaves it in place,
+    // in a tight list or a loose one (§4.2: preserved as found)
+    for src in [src, "# A\n\n- a\n\n- b\n\n- c\n"] {
+        let (_d, mut v) = vault_with(src);
+        let (r, t) = (at(&v, "A/a"), at(&v, "A/b"));
+        ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap();
+        assert_eq!(root_text(&v), src);
+    }
+}
+
+#[test]
+fn respelled_item_does_not_adopt_deeper_written_sibling_sections() {
+    // top-level sections written at `##`: honoured as written, still the root's
+    let (_d, mut v) = vault_with("- note\n\n## Projects\n\n## Areas\n");
+    let before = parents(&v);
+    assert!(v.find_by_path(&["Projects".into()]).is_some());
+    let r = at(&v, "note");
+    ops::toggle_spelling(&mut v, r).unwrap();
+    // `~`: "so no sibling changes parent" (§3.1, §10.3)
+    assert_eq!(others(&parents(&v), "note"), others(&before, "note"), "{}", root_text(&v));
+    assert!(v.find_by_path(&["Projects".into()]).is_some(), "{}", root_text(&v));
+    assert_ordered(&v);
+}
+
+#[test]
+fn pasted_section_does_not_adopt_deeper_written_next_sibling() {
+    let (_d, mut v) = vault_with("## A\n\n## B\n");
+    let before = parents(&v);
+    let r = at(&v, "A");
+    ops::paste(&mut v, r, "# T\n\n## T1\n", true).unwrap();
+    // T lands between A and B as a sibling, its child one below it; B keeps
+    // the root as its parent
+    assert_eq!(root_text(&v), "## A\n\n## T\n\n### T1\n\n## B\n");
+    assert_eq!(others(&others(&parents(&v), "T"), "T1"), others(&before, "T"));
+    assert!(v.find_by_path(&["T".into(), "T1".into()]).is_some(), "{}", root_text(&v));
+}
+
+#[test]
+fn promoted_section_does_not_adopt_deeper_written_next_sibling() {
+    // `<` on S lands it between P and R, top-level sections written at `##`
+    let (_d, mut v) = vault_with("## P\n\n### S\n\n## R\n");
+    let before = parents(&v);
+    let s = at(&v, "P/S");
+    ops::promote(&mut v, s).unwrap();
+    assert_eq!(root_text(&v), "## P\n\n## S\n\n## R\n");
+    assert_eq!(others(&parents(&v), "S"), others(&before, "S"));
+}
+
+#[test]
+fn fixing_a_heading_embed_level_keeps_following_sections_in_place() {
+    // B is a sibling of the embed under A; making the embed shallower must
+    // not make B nest under it (§4.7: "the structure does not change")
+    let (_d, mut v) = vault_with_block(
+        "# A\n\n### ![[racfer-hattes-mislup-nodrys]]\n\n### B\n\n#### C\n",
+        "# S\n",
+    );
+    let before = parents(&v);
+    assert!(before.contains(&("B".to_string(), "A".to_string())), "{:?}", before);
+    assert!(check::check(&v).iter().any(|d| d.message.contains("level 3 where its position gives 2")));
+    check::fix(&mut v).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), "# A\n\n## ![[racfer-hattes-mislup-nodrys]]\n\n## B\n\n#### C\n");
+    assert!(check::check(&v).iter().all(|d| !d.message.contains("embed has children")
+        && !d.message.contains("heading embed at level")));
+    // a parent section written deeper than its own position leaves the
+    // embed no shallower level that keeps it there: it stays, reported
+    let root = "# A\n\n#### B\n\n###### ![[racfer-hattes-mislup-nodrys]]\n";
+    let (_d, mut v) = vault_with_block(root, "# S\n");
+    let before = parents(&v);
+    assert!(before.contains(&("S".to_string(), "B".to_string())), "{:?}", before);
+    check::fix(&mut v).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), root);
+}
+
+#[test]
+fn move_up_past_a_deeper_written_sibling_keeps_parents() {
+    // `### Note` skips a level but is still Doc's child, a sibling of Part
+    let (_d, mut v) = vault_with("# Doc\n\n### Note\n\n## Part\n");
+    assert_eq!(v.tree.node(at(&v, "Doc/Note")).kind, Kind::Section);
+    let before = others(&parents(&v), "Part");
+    let r = at(&v, "Doc/Part");
+    ops::move_sibling(&mut v, r, false).unwrap();
+    assert_eq!(others(&parents(&v), "Part"), before, "{}", root_text(&v));
+    assert_ordered(&v);
+    // the node moving down takes the level of the one moving up, and its
+    // subtree comes with it
+    let (_d, mut v) = vault_with("# Doc\n\n### Note\n\ntext\n\n#### Sub\n\n## Part\n");
+    let before = parents(&v);
+    let r = at(&v, "Doc/Part");
+    ops::move_sibling(&mut v, r, false).unwrap();
+    assert_eq!(root_text(&v), "# Doc\n\n## Part\n\n## Note\n\ntext\n\n### Sub\n");
+    assert_eq!(parents(&v), before);
+    // siblings all written deeper stay as written: none nests under another
+    let src = "# Doc\n\n### A\n\n### B\n\n### C\n";
+    let (_d, mut v) = vault_with(src);
+    let before = parents(&v);
+    let r = at(&v, "Doc/A");
+    ops::move_sibling(&mut v, r, true).unwrap();
+    assert_eq!(root_text(&v), "# Doc\n\n### B\n\n### A\n\n### C\n");
+    assert_eq!(parents(&v), before);
+    // an item indented deeper than the sibling after it (accepted on read)
+    let (_d, mut v) = vault_with("- P\n    - a\n      - kid\n  - b\n");
+    let before = parents(&v);
+    let r = at(&v, "P/b");
+    ops::move_sibling(&mut v, r, false).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), "- P\n  - b\n  - a\n    - kid\n");
+}
+
+// P sits under an item under `# S`, so its position gives it level 2 while
+// it and its sections are written a level shallower (§3.1: honoured as
+// written). A section written after one of them at the level P's position
+// gives would parse as that one's child.
+const SHALLOW: &str = "# S\n\n- i\n  # P\n  ## C\n";
+
+#[test]
+fn section_refiled_after_a_shallower_written_sibling_is_not_adopted_by_it() {
+    let (_d, mut v) = vault_with(&format!("{}\n# X\n", SHALLOW));
+    let before = others(&parents(&v), "X");
+    let (x, p) = (at(&v, "X"), at(&v, "S/i/P"));
+    ops::refile(&mut v, x, p).unwrap();
+    assert!(v.find_by_path(&["S".into(), "i".into(), "P".into(), "X".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "X"), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), format!("{}\n  ## X\n", SHALLOW));
+    assert_ordered(&v);
+}
+
+#[test]
+fn section_pasted_between_shallower_written_siblings_is_not_adopted() {
+    // no deeper than C before it, no shallower than D after it
+    let src = format!("{}  ## D\n", SHALLOW);
+    let (_d, mut v) = vault_with(&src);
+    let before = parents(&v);
+    let c = at(&v, "S/i/P/C");
+    ops::paste(&mut v, c, "# T\n", true).unwrap();
+    assert!(v.find_by_path(&["S".into(), "i".into(), "P".into(), "T".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "T"), before, "{}", root_text(&v));
+    assert_ordered(&v);
+}
+
+#[test]
+fn new_last_child_section_after_a_shallower_written_sibling_is_not_adopted() {
+    // N on P: a section beside C, not under it
+    let (_d, mut v) = vault_with(SHALLOW);
+    let before = parents(&v);
+    let p = at(&v, "S/i/P");
+    let x = ops::append_child_public(&mut v, p, "x").unwrap();
+    assert_eq!(v.tree.node(x).title, "x");
+    assert!(v.find_by_path(&["S".into(), "i".into(), "P".into(), "x".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "x"), before, "{}", root_text(&v));
+}
+
+#[test]
+fn making_a_block_of_a_section_after_a_shallower_written_sibling_keeps_its_parent() {
+    // the embed replaces P where it is written; at the level P's position
+    // gives it would parse as C's child
+    let (_d, mut v) = vault_with("# S\n\n- i\n  # C\n  # P\n");
+    let before = parents(&v);
+    let p = at(&v, "S/i/P");
+    ops::make_block(&mut v, p).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+}
+
+#[test]
+fn capture_after_a_shallower_written_day_starts_a_day_beside_it() {
+    // an Inbox spelled as an item, its day written by hand at `#`
+    let (_d, mut v) = vault_with("- Inbox\n  # 2000-01-01\n  - old\n");
+    let r = ops::capture(&mut v, "new", false).unwrap();
+    let path = v.tree.path(r);
+    assert_eq!(path.len(), 3, "{:?}\n{}", path, root_text(&v));
+    assert_eq!(path[0], "Inbox");
+    assert_ne!(path[1], "2000-01-01", "{}", root_text(&v));
+    assert!(v.find_by_path(&["Inbox".into(), "2000-01-01".into(), "old".into()]).is_some());
+}
+
+#[test]
+fn drop_before_the_next_sibling_in_a_four_space_list_keeps_it_a_sibling() {
+    // §4.2: 4-space nesting is accepted on read. Dropping a before b, its
+    // next sibling, leaves it where it was (a no-op); b must not become a's
+    // child because a was rewritten at two spaces in front of it
+    let (_d, mut v) = vault_with("# T\n\n- P\n    - a\n    - b\n");
+    let (a, b) = (at(&v, "T/P/a"), at(&v, "T/P/b"));
+    ops::move_node(&mut v, a, b, ops::Drop::Before).unwrap();
+    assert!(v.find_by_path(&["T".into(), "P".into(), "b".into()]).is_some(), "{}", root_text(&v));
+    assert!(v.find_by_path(&["T".into(), "P".into(), "a".into(), "b".into()]).is_none(), "{}", root_text(&v));
+    assert_eq!(root_text(&v), "# T\n\n- P\n    - a\n    - b\n");
+}
+
+#[test]
+fn a_node_placed_before_a_sibling_written_deeper_keeps_it_a_sibling() {
+    // siblings nested with a tab or 4 spaces (§4.2), and items indented
+    // under a section: a node pasted or dragged in front of one goes at
+    // its indent, not at the canonical one, where the sibling would parse
+    // as its child
+    for src in [
+        "# T\n\n- P\n    - a\n    - b\n",
+        "# T\n\n- P\n\t- a\n\t- b\n",
+        "# T\n\n- P\n    # a\n    # b\n",
+        "# T\n\n## P\n\n  - a\n  - b\n",
+    ] {
+        let (_d, mut v) = vault_with(src);
+        let before = parents(&v);
+        let b = at(&v, "T/P/b");
+        let item = v.tree.node(b).kind == Kind::Item;
+        ops::paste(&mut v, b, if item { "- c\n" } else { "# c\n" }, false).unwrap();
+        assert_eq!(others(&parents(&v), "c"), before, "paste in {:?}:\n{}", src, root_text(&v));
+        assert!(parents(&v).contains(&("c".into(), "P".into())), "{}", root_text(&v));
+        let (_d, mut v) = vault_with(src);
+        let (a, b) = (at(&v, "T/P/a"), at(&v, "T/P/b"));
+        ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
+        assert_eq!(parents(&v), before, "drag in {:?}:\n{}", src, root_text(&v));
+        let p = at(&v, "T/P");
+        let kids: Vec<String> =
+            v.tree.resolved_children(p).iter().map(|&k| v.tree.node(k).title.clone()).collect();
+        assert_eq!(kids, ["b", "a"], "{}", root_text(&v));
+    }
+    // an item before a section child written deeper
+    let (_d, mut v) = vault_with("# T\n\n- P\n    # a\n");
+    let before = parents(&v);
+    let a = at(&v, "T/P/a");
+    ops::paste(&mut v, a, "- c\n", false).unwrap();
+    assert_eq!(others(&parents(&v), "c"), before, "{}", root_text(&v));
+    assert!(parents(&v).contains(&("c".into(), "P".into())), "{}", root_text(&v));
+}
+
+#[test]
+fn making_a_block_after_a_shallower_sibling_written_deeper_keeps_the_next_sibling() {
+    // Notes is written with a tab (§4.2: accepted on read), Meeting and
+    // Followup at the app's two spaces: all three are children of Project.
+    // Notes' shallower level says nothing about Meeting's embed, which sits
+    // at a smaller indent; clamped to it, the embed takes Followup in.
+    let (_d, mut v) = vault_with("## S\n\n- Project\n\t# Notes\n  ### Meeting\n  ### Followup\n");
+    let before = parents(&v);
+    assert!(before.contains(&("Followup".into(), "Project".into())));
+    let m = at(&v, "S/Project/Meeting");
+    ops::make_block(&mut v, m).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+}
+
+#[test]
+fn a_section_placed_after_a_shallower_sibling_written_deeper_keeps_the_next_sibling() {
+    // the same for a section pasted between Notes and Meeting, or after
+    // Notes when it is Project's last child: Notes, closed by indentation,
+    // bounds neither
+    let (_d, mut v) = vault_with("## S\n\n- Project\n\t# Notes\n  ### Meeting\n  ### Followup\n");
+    let before = parents(&v);
+    let notes = at(&v, "S/Project/Notes");
+    ops::paste(&mut v, notes, "# X\n", true).unwrap();
+    assert_eq!(others(&parents(&v), "X"), before, "{}", root_text(&v));
+    assert!(parents(&v).contains(&("X".into(), "Project".into())), "{}", root_text(&v));
+    let (_d, mut v) = vault_with("## S\n\n- Project\n  ### Meeting\n\t# Notes\n");
+    let notes = at(&v, "S/Project/Notes");
+    ops::paste(&mut v, notes, "# X\n", true).unwrap();
+    assert!(root_text(&v).ends_with("\t# Notes\n\n  ### X\n"), "{}", root_text(&v));
+}
+
+#[test]
+fn refile_into_a_section_followed_by_an_indented_setext_heading() {
+    // a setext heading is read (§4.2) as the ATX heading of its level:
+    // `  Sub\n  ===` after `## P` is where `  # Sub` would be, a level-1
+    // heading that no indent puts under a section. Read as P's child, it
+    // made the verbs that write it, or write beside it, at its level 1
+    // (refile into P, `t` on it) move nodes out of P and Top
+    const SETEXT: &str = "# Top\n\n## P\n\n  Sub\n  ===\n\n# X\n";
+    let (_d, mut v) = vault_with(SETEXT);
+    let before = parents(&v);
+    assert_eq!(before, parents(&vault_with("# Top\n\n## P\n\n  # Sub\n\n# X\n").1));
+    let (x, p) = (at(&v, "X"), at(&v, "Top/P"));
+    ops::refile(&mut v, x, p).unwrap();
+    assert!(v.find_by_path(&["Top".into(), "P".into(), "X".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "X"), others(&before, "X"), "{}", root_text(&v));
+    let (_d, mut v) = vault_with(SETEXT);
+    let sub = at(&v, "Sub");
+    ops::toggle_taskness(&mut v, sub).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    // under an item, indentation nests it, as it does an ATX heading
+    let (_d, v) = vault_with("# Top\n\n- i\n\n  Sub\n  ===\n");
+    assert_eq!(parents(&v), parents(&vault_with("# Top\n\n- i\n\n  # Sub\n").1));
+    assert!(parents(&v).contains(&("Sub".into(), "i".into())));
+}
+
+#[test]
+fn drop_second_of_two_loose_items_before_the_first_keeps_the_list_loose() {
+    // §4.2: loose/tight lists are preserved as found
+    let (_d, mut v) = vault_with("# A\n\n- a\n\n- b\n");
+    let (b, a) = (at(&v, "A/b"), at(&v, "A/a"));
+    ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- b\n\n- a\n");
+    // and dropping the first before the second, where it is, changes nothing
+    let (_d, mut v) = vault_with("# A\n\n- a\n\n- b\n");
+    let (a, b) = (at(&v, "A/a"), at(&v, "A/b"));
+    ops::move_node(&mut v, a, b, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- a\n\n- b\n");
+    // a tight list stays tight
+    let (_d, mut v) = vault_with("# A\n\n- a\n- b\n");
+    let (b, a) = (at(&v, "A/b"), at(&v, "A/a"));
+    ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
+    assert_eq!(root_text(&v), "# A\n\n- b\n- a\n");
+}

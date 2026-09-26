@@ -567,3 +567,659 @@ fn check_fix_keeps_correct_prefixes_and_is_idempotent() {
     assert!(d.path().join("racfer~blk.md").exists());
     assert_eq!(fold_core::check::fix(&mut v).unwrap(), 0);
 }
+
+#[test]
+fn setext_sibling_spans_do_not_overlap() {
+    // the setext title line is taken back out of A's text: A's span must
+    // shrink with it, or A and Title overlap
+    let (_d, mut v) = vault_with("# A\n\nTitle\n===\n\nbody\n");
+    let kids = v.tree.resolved_children(v.tree.root);
+    assert_eq!(kids.len(), 2);
+    let (a, b) = (v.tree.node(kids[0]).span, v.tree.node(kids[1]).span);
+    assert!(a.end <= b.start, "A {:?} overlaps Title {:?}", a, b);
+    ops::move_sibling(&mut v, kids[0], true).unwrap();
+    let kids = v.tree.resolved_children(v.tree.root);
+    assert_eq!(v.tree.node(kids[0]).title, "Title");
+    assert_eq!(v.tree.node(kids[1]).title, "A");
+}
+
+#[test]
+fn move_sibling_before_a_setext_sibling_does_not_panic() {
+    let (_d, mut v) = vault_with("# A\n\nTitle\n===\n\nbody\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    ops::move_sibling(&mut v, a, true).unwrap();
+    let kids = v.tree.resolved_children(v.tree.root);
+    assert_eq!(v.tree.node(kids[0]).title, "Title", "{}", v.tree.files[0].text);
+    assert_eq!(v.tree.node(kids[1]).title, "A", "{}", v.tree.files[0].text);
+}
+
+#[test]
+fn delete_before_a_setext_sibling_keeps_its_title() {
+    let (_d, mut v) = vault_with("# A\n\nTitle\n===\n\nbody\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    ops::delete_subtree(&mut v, a).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert!(text.contains("Title"), "{}", text);
+    let top = v.tree.resolved_children(v.tree.root);
+    assert_eq!(top.len(), 1, "{}", text);
+    assert_eq!(v.tree.node(top[0]).title, "Title", "{}", text);
+}
+
+#[test]
+fn capture_before_a_setext_sibling_keeps_it() {
+    let (_d, mut v) = vault_with("# Inbox\n\nMeeting notes\n=============\n\n- action\n");
+    let inbox = v.tree.resolved_children(v.tree.root)[0];
+    ops::capture_to(&mut v, "new", false, inbox).unwrap();
+    let text = v.tree.files[0].text.clone();
+    let top = v.tree.resolved_children(v.tree.root);
+    assert_eq!(top.len(), 2, "{}", text);
+    assert_eq!(v.tree.node(top[1]).title, "Meeting notes", "{}", text);
+    let kids = v.tree.resolved_children(top[1]);
+    assert_eq!(kids.len(), 1, "{}", text);
+    assert_eq!(v.tree.node(kids[0]).title, "action", "{}", text);
+}
+
+#[test]
+fn archiving_keeps_hashtag_body_lines() {
+    // `#done` has no space after the hash: it is body text, not a heading
+    // (§4.2), so re-levelling the moved node must leave it as written
+    let (_d, mut v) = vault_with("# Old project\n\n#done wrap-up notes\n");
+    let r = at(&v, &["Old project"]);
+    ops::archive(&mut v, r).unwrap();
+    let t = &v.tree.files[0].text;
+    assert!(t.contains("## Old project\n"), "{}", t);
+    assert!(t.contains("\n#done wrap-up notes\n"), "{}", t);
+    assert!(!t.contains("##done"), "{}", t);
+}
+
+#[test]
+fn respelling_a_setext_heading_keeps_its_title() {
+    // §4.2: setext headings are read, and converted on write
+    let (_d, mut v) = vault_with("Title\n=====\n\nbody\n");
+    let r = at(&v, &["Title"]);
+    ops::toggle_spelling(&mut v, r).unwrap();
+    let text = &v.tree.files[0].text;
+    assert_eq!(text, "- Title\n\n  body\n");
+    assert!(v.find_by_path(&["Title".into()]).is_some(), "{}", text);
+}
+
+#[test]
+fn toggle_taskness_on_a_setext_heading_makes_it_a_task() {
+    // §4.2, §10.3 `t`: the checkbox goes between the marker and the title
+    let (_d, mut v) = vault_with("Title\n=====\n\nbody\n");
+    let r = at(&v, &["Title"]);
+    ops::toggle_taskness(&mut v, r).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert_eq!(text, "# [ ] Title\n\nbody\n");
+    let r = v.find_by_path(&["Title".into()]);
+    assert!(r.is_some(), "title changed: {}", text);
+    assert_eq!(v.tree.node(r.unwrap()).task, Some(TaskState::Open), "{}", text);
+    // and back: the checkbox goes, the ATX heading stays
+    ops::toggle_taskness(&mut v, r.unwrap()).unwrap();
+    assert_eq!(v.tree.files[0].text, "# Title\n\nbody\n");
+}
+
+#[test]
+fn demote_keeps_a_fenced_code_body_with_its_node() {
+    // b's body is a fenced code block; demoting b under a must re-indent the
+    // fence with b, or the code falls out of b's region and becomes a's text
+    let (d, mut v) = vault_with("- a\n- b\n  ```\n  code\n  ```\n");
+    let b = at(&v, &["b"]);
+    ops::demote(&mut v, b).unwrap();
+    assert_eq!(read(&d, "root.md"), "- a\n  - b\n    ```\n    code\n    ```\n");
+    let b = at(&v, &["a", "b"]);
+    let text = v.tree.files[0].text.clone();
+    assert!(
+        v.tree.node(b).text_lines(&text).iter().any(|l| l.contains("code")),
+        "code block is no longer b's body:\n{}",
+        text
+    );
+}
+
+#[test]
+fn respelling_keeps_code_in_a_fence_as_written() {
+    // a fence moves with its node; the code inside keeps its own indent, a
+    // tab included, and a `#` line in it is code, not a heading (§3.3)
+    let src = "# P\n\n## S\n\n```\n\tx\n  # not a heading\n```\n";
+    let (_d, mut v) = vault_with(src);
+    let s = at(&v, &["P", "S"]);
+    ops::toggle_spelling(&mut v, s).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert_eq!(text, "# P\n\n- S\n\n  ```\n  \tx\n    # not a heading\n  ```\n");
+    let s = at(&v, &["P", "S"]);
+    ops::toggle_spelling(&mut v, s).unwrap();
+    assert_eq!(v.tree.files[0].text, src);
+}
+
+// Nesting written with 4 spaces or a tab is accepted on read (§4.2); a child
+// written under such an item must still nest under it, not beside it.
+#[test]
+fn refile_under_a_four_space_nested_item_nests_under_it() {
+    let (_d, mut v) = vault_with("- a\n    - b\n- c\n");
+    let (c, b) = (at(&v, &["c"]), at(&v, &["a", "b"]));
+    ops::refile(&mut v, c, b).unwrap();
+    assert!(
+        v.find_by_path(&["a".into(), "b".into(), "c".into()]).is_some(),
+        "{}",
+        v.tree.files[0].text
+    );
+}
+
+#[test]
+fn demote_among_four_space_siblings_nests_the_node() {
+    let (_d, mut v) = vault_with("- a\n    - b\n    - c\n");
+    let c = at(&v, &["a", "c"]);
+    ops::demote(&mut v, c).unwrap();
+    assert!(
+        v.find_by_path(&["a".into(), "b".into(), "c".into()]).is_some(),
+        "{}",
+        v.tree.files[0].text
+    );
+}
+
+#[test]
+fn new_child_of_a_tab_nested_item() {
+    let (_d, mut v) = vault_with("- a\n\t- b\n");
+    let b = at(&v, &["a", "b"]);
+    let r = ops::append_child_public(&mut v, b, "x");
+    let text = v.tree.files[0].text.clone();
+    let r = r.unwrap_or_else(|e| panic!("{e}\n{text:?}"));
+    assert_eq!(v.tree.node(r).title, "x");
+    assert!(v.find_by_path(&["a".into(), "b".into(), "x".into()]).is_some(), "{:?}", text);
+}
+
+#[test]
+fn new_section_child_beside_a_deeper_written_section() {
+    // N on b, whose section child is written further in than b's derived
+    // child indent: the new section must still land under b
+    let (_d, mut v) = vault_with("- a\n    - b\n      ## S\n");
+    let b = at(&v, &["a", "b"]);
+    ops::append_child_public(&mut v, b, "x").unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert!(v.find_by_path(&["a".into(), "b".into(), "x".into()]).is_some(), "{:?}", text);
+    assert!(v.find_by_path(&["a".into(), "b".into(), "S".into()]).is_some(), "{:?}", text);
+}
+
+#[test]
+fn capture_to_a_four_space_nested_item_nests_under_it() {
+    let (_d, mut v) = vault_with("- a\n    - b\n");
+    let b = at(&v, &["a", "b"]);
+    let r = ops::capture_to(&mut v, "x\nmore", false, b).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert!(v.find_by_path(&["a".into(), "b".into(), "x".into()]).is_some(), "{:?}", text);
+    let body = v.tree.node(r).text_lines(&text).join("\n");
+    assert!(body.contains("more"), "{:?}", text);
+}
+
+#[test]
+fn deleting_a_section_block_keeps_lines_nested_under_its_embed() {
+    // text appended under a heading embed by another editor parses as the
+    // embed's content; the reading pane shows it in the parent, so deleting
+    // the block must not take it along (§4.7, §11.5)
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n## ![[{}]]\n\nnote under the embed\n", ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n# S\n\nbody\n", ID_A))],
+    );
+    let s = at(&v, &["A", "S"]);
+    ops::delete_subtree(&mut v, s).unwrap();
+    assert!(!d.path().join("racfer~s.md").exists());
+    assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n");
+}
+
+#[test]
+fn clearing_a_done_section_block_keeps_lines_nested_under_its_embed() {
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n## ![[{}]]\n\nnote under the embed\n\n## B\n", ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n# [x] S\n\nbody\n", ID_A))],
+    );
+    let a = at(&v, &["A"]);
+    assert_eq!(ops::clear_done(&mut v, a).unwrap(), 1);
+    assert!(!d.path().join("racfer~s.md").exists());
+    assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n\n## B\n");
+}
+
+#[test]
+fn deleting_a_broken_embed_keeps_lines_nested_under_it() {
+    let (d, mut v) = vault_with(&format!("# A\n\n## ![[{}]]\n\nnote under the embed\n", ID_A));
+    let a = at(&v, &["A"]);
+    let e = v.tree.resolved_children(a)[0];
+    assert!(v.tree.node(e).is_embed());
+    ops::delete_subtree(&mut v, e).unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n");
+}
+
+#[test]
+fn capture_with_an_item_spelled_inbox_does_not_leave_a_stray_day_heading() {
+    // `- Inbox` (e.g. after `~` on the Inbox section) is still the inbox
+    // (§3.1: spelling is presentation): today's day goes under it, never a
+    // top-level day heading written before failing
+    let (_d, mut v) = vault_with("- Inbox\n");
+    let r = ops::capture(&mut v, "x", false);
+    let text = v.tree.files[0].text.clone();
+    let r = r.unwrap_or_else(|e| panic!("capture failed: {}\n{}", e, text));
+    assert_eq!(v.tree.node(r).title, "x");
+    let path = v.tree.path(r);
+    assert_eq!(path.len(), 3, "{:?}\n{}", path, text);
+    assert_eq!(path[0], "Inbox");
+    // a second capture reuses the same day and adds nothing at the top
+    ops::capture(&mut v, "y", false).unwrap();
+    let top = v.tree.resolved_children(v.tree.root);
+    assert_eq!(top.len(), 1, "{}", v.tree.files[0].text);
+    let days = v.tree.resolved_children(top[0]);
+    assert_eq!(days.len(), 1, "{}", v.tree.files[0].text);
+    assert_eq!(v.tree.resolved_children(days[0]).len(), 2, "{}", v.tree.files[0].text);
+}
+
+#[test]
+fn path_target_with_duplicate_titles_is_ambiguous_not_guessed() {
+    // §3.4: a title that matches twice is an ambiguity error, never a guess.
+    let (_d, v) = vault_with("# Homelab\n\n## Notes\n\n- a\n\n## Notes\n\n- b\n");
+    let r = v.resolve_target("Homelab/Notes");
+    assert!(r.is_err(), "guessed {:?}", r.map(|r| v.tree.node(r).title.clone()));
+    assert!(r.unwrap_err().contains("ambiguous"));
+    // one path through the duplicates is still unique
+    let r = v.resolve_target("Homelab/Notes/b").unwrap();
+    assert_eq!(v.tree.node(r).title, "b");
+}
+
+#[test]
+fn path_target_resolves_through_duplicate_ancestor_titles() {
+    // exactly one node matches the full path P/Y, though the first P has no Y
+    let (_d, v) = vault_with("# P\n\n## X\n\n# P\n\n## Y\n");
+    let r = v.resolve_target("P/Y");
+    assert!(r.is_ok(), "{:?}", r);
+    assert_eq!(v.tree.node(r.unwrap()).title, "Y");
+}
+
+#[test]
+fn respelling_a_broken_embed_keeps_its_id() {
+    // no block file has the id: `~` changes only the embed's form (§4.7)
+    let (d, mut v) = vault_with(&format!("# A\n\n![[{}]]\n", ID_A));
+    let e = v.tree.resolved_children(at(&v, &["A"]))[0];
+    assert!(v.tree.node(e).is_embed());
+    ops::toggle_spelling(&mut v, e).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n## ![[{}]]\n", ID_A));
+    let e = v.tree.resolved_children(at(&v, &["A"]))[0];
+    ops::toggle_spelling(&mut v, e).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n", ID_A));
+    // and moves to its parent's boundary like any node respelled (§3.1)
+    let (d, mut v) = vault_with(&format!("# A\n\n![[{}]]\n- b\n", ID_A));
+    let e = v.tree.resolved_children(at(&v, &["A"]))[0];
+    assert!(ops::toggle_spelling(&mut v, e).unwrap());
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n- b\n\n## ![[{}]]\n", ID_A));
+}
+
+#[test]
+fn deleting_a_duplicate_embed_removes_only_its_line() {
+    // a second embed of a block is a diagnostic and renders as broken
+    // (§6.2): deleting it (from the reading pane) removes that line alone,
+    // as for a broken embed, and neither trashes the block nor takes the
+    // first embed, the one the block is stitched in at
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let dup = v.tree.raw_children(at(&v, &["B"]))[0];
+    assert!(v.tree.node(dup).is_embed());
+    ops::delete_subtree(&mut v, dup).unwrap();
+    assert!(d.path().join("racfer~s.md").exists(), "the block was trashed");
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
+    assert!(v.find_by_path(&["A".into(), "S".into()]).is_some());
+}
+
+#[test]
+fn make_block_on_a_file_changed_on_disk_leaves_no_block_file() {
+    // the write guard refuses to replace the node with its embed in a file
+    // that changed on disk since it was read; the block file must not be
+    // left behind either, orphaned and in no undo entry (§10.10)
+    let (d, mut v) = vault_with("# A\n\n- x\n");
+    std::fs::write(d.path().join("root.md"), "# A\n\n- x\n- synced\n").unwrap();
+    let x = at(&v, &["A", "x"]);
+    let err = ops::make_block(&mut v, x).unwrap_err();
+    assert!(err.to_string().contains("changed on disk"), "{}", err);
+    let names: Vec<String> = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["root.md"]);
+    assert_eq!(read(&d, "root.md"), "# A\n\n- x\n- synced\n");
+}
+
+#[test]
+fn first_child_of_an_item_without_a_body_follows_its_title() {
+    // §4.2: one blank line between a node's body and its first child; an
+    // item with no body has none to keep its first child from its title
+    // (§4.10: `- Talked to Anya…` then its child `### Options`)
+    for (src, parent, want) in [
+        ("- a\n", &["a"][..], "- a\n  - c\n"),
+        ("- a\n- b\n", &["a"], "- a\n  - c\n- b\n"),
+        ("- a\n\n- b\n", &["a"], "- a\n  - c\n\n- b\n"),
+        ("# S\n\n- a\n", &["S", "a"], "# S\n\n- a\n  - c\n"),
+        // a body keeps its blank line, and so does a section's title
+        ("- a\n  body\n", &["a"], "- a\n  body\n\n  - c\n"),
+        ("# S\n", &["S"], "# S\n\n- c\n"),
+    ] {
+        let (d, mut v) = vault_with(src);
+        let p = at(&v, parent);
+        let c = ops::append_child_public(&mut v, p, "c").unwrap();
+        assert_eq!(v.tree.node(c).title, "c");
+        assert_eq!(read(&d, "root.md"), want, "N under {:?}", src);
+        // capture to it too (§7)
+        let (d, mut v) = vault_with(src);
+        let p = at(&v, parent);
+        ops::capture_to(&mut v, "c", false, p).unwrap();
+        assert_eq!(read(&d, "root.md"), want, "capture to {:?}", src);
+    }
+    // under an item with a section child, the item goes before it: right
+    // after the title too
+    let (d, mut v) = vault_with("- a\n  # S\n");
+    let a = at(&v, &["a"]);
+    ops::capture_to(&mut v, "c", false, a).unwrap();
+    assert_eq!(read(&d, "root.md"), "- a\n  - c\n  # S\n");
+}
+
+#[test]
+fn deleting_a_node_that_holds_a_second_embed_keeps_the_block_and_its_first_embed() {
+    // the second embed of S (under B/x) renders as broken (§6.2); deleting
+    // x, the node that holds it, must not trash S nor take its first
+    // embed, the one under A that S is stitched in at
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n- x\n  ![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let x = at(&v, &["B", "x"]);
+    ops::delete_subtree(&mut v, x).unwrap();
+    assert!(d.path().join("racfer~s.md").exists(), "the block was trashed");
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
+    // nor may clearing a done x, which removes it the same way
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n- [x] x\n  ![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let b = at(&v, &["B"]);
+    assert_eq!(ops::clear_done(&mut v, b).unwrap(), 1);
+    assert!(d.path().join("racfer~s.md").exists(), "the block was trashed");
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
+}
+
+#[test]
+fn deleting_the_node_that_holds_a_blocks_first_embed_leaves_its_second_embed() {
+    // deleting A trashes S, which A holds; the second embed of S, under
+    // B/x, is x's line, not S's own (§6.2), and stays where it is
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n- x\n  ![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let a = at(&v, &["A"]);
+    ops::delete_subtree(&mut v, a).unwrap();
+    assert!(!d.path().join("racfer~s.md").exists(), "the block was not trashed");
+    assert_eq!(read(&d, "root.md"), format!("# B\n\n- x\n  ![[{}]]\n", ID_A));
+}
+
+#[test]
+fn a_block_embedded_twice_is_inlined_where_the_outline_shows_it() {
+    // X (embedded under A) embeds S, and root.md embeds S again under B.
+    // The outline (walk, and the TUI's rows) meets S under X first; the
+    // reading pane and editor (render) must inline S there too, not at the
+    // embed that happens to come first in file order
+    let (_d, v) = vault_files(
+        &format!("# A\n\n![[{ID_B}]]\n\n# B\n\n![[{ID_A}]]\n"),
+        &[
+            ("dozzod~x.md", &format!("---\nid: {ID_B}\n---\n\n- X\n  ![[{ID_A}]]\n")),
+            ("racfer~s.md", &format!("---\nid: {ID_A}\n---\n\n- S\n")),
+        ],
+    );
+    let mut walked = Vec::new();
+    v.tree.walk(v.tree.root, &mut |t, r| {
+        let n = t.node(r);
+        walked.push(if n.is_embed() { "(embed)".to_string() } else { n.title.clone() });
+    });
+    // B's embed of S is the second one met: it reads as broken (§6.2)
+    assert_eq!(walked, ["", "A", "X", "S", "B", "(embed)"]);
+    let x = at(&v, &["A", "X"]);
+    let r = fold_core::render::render(&v.tree, x, 1, true);
+    assert_eq!(r, "- X\n  - S\n");
+    let b = at(&v, &["B"]);
+    let r = fold_core::render::render(&v.tree, b, 1, true);
+    assert_eq!(r, format!("# B\n\n![[{ID_A}]]\n"));
+    // and the embed S is stitched in at, which promote and refile act
+    // beside (§4.7), is X's
+    let id = fold_core::Id::parse(ID_A).unwrap();
+    let e = v.tree.embed_of(&id).unwrap();
+    assert_eq!(v.tree.files[e.0].path, "dozzod~x.md");
+}
+
+#[test]
+fn a_block_an_orphan_embeds_too_is_inlined_where_the_root_reaches_it() {
+    // an orphan block file (embedded nowhere) that sorts before C also
+    // embeds S: S belongs where the root reaches it, under C, not at the
+    // orphan's embed, which nothing shows
+    const ID_O: &str = "lacnum-walbyn-dirlyn-havtyp";
+    let (_d, v) = vault_files(
+        &format!("# A\n\n![[{ID_B}]]\n"),
+        &[
+            ("bacwes~o.md", &format!("---\nid: {ID_O}\n---\n\n- O\n  ![[{ID_A}]]\n")),
+            ("dozzod~c.md", &format!("---\nid: {ID_B}\n---\n\n- C\n  ![[{ID_A}]]\n")),
+            ("racfer~s.md", &format!("---\nid: {ID_A}\n---\n\n- S\n")),
+        ],
+    );
+    let r = fold_core::render::render(&v.tree, v.tree.root, 1, true);
+    assert_eq!(r, "# A\n\n- C\n  - S\n");
+    assert!(v.find_by_path(&["A".into(), "C".into(), "S".into()]).is_some());
+}
+
+#[test]
+fn respelling_an_item_keeps_its_setext_child_under_it() {
+    // a setext heading is read (§4.2); respelling its parent must convert
+    // it with the rest of the subtree, not leave a level-1 underline that
+    // takes it out of the tree it was in
+    let (d, mut v) = vault_with("# P\n\n- a\n  Sub\n  ===\n  body\n");
+    let a = at(&v, &["P", "a"]);
+    assert_eq!(v.tree.resolved_children(a).len(), 1);
+    ops::toggle_spelling(&mut v, a).unwrap();
+    assert!(
+        v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(),
+        "{}",
+        read(&d, "root.md")
+    );
+    // so for a heading under an item written shallower than its position
+    // gives (§3.1): it stays one below its parent, respelled and back
+    let (d, mut v) = vault_with("# P\n\n- a\n  # Sub\n  body\n\n- b\n");
+    let a = at(&v, &["P", "a"]);
+    ops::toggle_spelling(&mut v, a).unwrap();
+    assert!(v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(), "{}", read(&d, "root.md"));
+    let a = at(&v, &["P", "a"]);
+    ops::toggle_spelling(&mut v, a).unwrap();
+    assert!(v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(), "{}", read(&d, "root.md"));
+    assert!(v.find_by_path(&["P".into(), "b".into()]).is_some(), "{}", read(&d, "root.md"));
+}
+
+#[test]
+fn respelling_a_block_whose_parent_changed_on_disk_writes_nothing() {
+    // `~` on a block writes its file, then its embed in the parent file. A
+    // sync not reloaded yet in the parent file makes the vault refuse the
+    // embed (§11.2); the block file must not be left respelled under an
+    // embed of the other form (§4.7), as make_block checks first
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    let t = at(&v, &["A", "task"]);
+    ops::make_block(&mut v, t).unwrap();
+    let bf = d.path().join(&v.tree.files[1].path);
+    let block_before = std::fs::read_to_string(&bf).unwrap();
+    let synced = format!("{}- from phone\n", read(&d, "root.md"));
+    std::fs::write(d.path().join("root.md"), &synced).unwrap();
+    let t = at(&v, &["A", "task"]);
+    let res = ops::toggle_spelling(&mut v, t);
+    assert!(res.is_err());
+    assert_eq!(read(&d, "root.md"), synced);
+    assert_eq!(
+        std::fs::read_to_string(&bf).unwrap(),
+        block_before,
+        "the block was respelled, its embed was not"
+    );
+}
+
+#[test]
+fn capturing_a_title_of_dashes_writes_nothing() {
+    // `- ---`, `- --` and `- - -` are thematic breaks, which CommonMark
+    // reads before a bullet: body text, not an item (§4.4). Capture refuses
+    // such a title before it writes anything, as it would an empty one
+    // (§4.3), instead of leaving a break under the day and failing after
+    for title in ["---", "--", "- -", "-- -"] {
+        let (d, mut v) = vault_with("# Projects\n");
+        let res = ops::capture(&mut v, title, false);
+        assert!(res.is_err(), "{:?} was captured", title);
+        assert_eq!(read(&d, "root.md"), "# Projects\n", "{:?}", title);
+        let (d, mut v) = vault_with("# A\n\n- x\n");
+        let a = at(&v, &["A"]);
+        let res = ops::capture_to(&mut v, title, false, a);
+        assert!(res.is_err(), "{:?} was captured", title);
+        assert_eq!(read(&d, "root.md"), "# A\n\n- x\n", "{:?}", title);
+    }
+    // a title that only starts with dashes, or a task's, is an item
+    let (_d, mut v) = vault_with("# A\n\n- x\n");
+    let a = at(&v, &["A"]);
+    let r = ops::capture_to(&mut v, "-- note", false, a).unwrap();
+    assert_eq!(v.tree.node(r).title, "-- note");
+    let a = at(&v, &["A"]);
+    let r = ops::capture_to(&mut v, "---", true, a).unwrap();
+    assert_eq!(v.tree.node(r).title, "---");
+    let a = at(&v, &["A"]);
+    let r = ops::capture_to(&mut v, "-", false, a).unwrap();
+    assert_eq!(v.tree.node(r).title, "-");
+}
+
+#[test]
+fn a_title_of_dashes_is_not_respelled_or_unchecked_into_a_thematic_break() {
+    // `~` on `## ---` would write `- ---`, and `t` on `- [ ] ---` would
+    // leave `- ---`: both thematic breaks, body text (§4.4), so the node
+    // would be gone and `y` under it taken in by `A`. Both are refused
+    // before they write
+    let (d, mut v) = vault_with("# A\n\n## ---\n\n- y\n");
+    let s = at(&v, &["A", "---"]);
+    assert!(ops::toggle_spelling(&mut v, s).is_err());
+    assert_eq!(read(&d, "root.md"), "# A\n\n## ---\n\n- y\n");
+    let (d, mut v) = vault_with("# A\n\n- [ ] ---\n- y\n");
+    let t = at(&v, &["A", "---"]);
+    assert!(ops::toggle_taskness(&mut v, t).is_err());
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [ ] ---\n- y\n");
+    // checked, and as a heading, it is still a title
+    let t = at(&v, &["A", "---"]);
+    ops::toggle_task(&mut v, t).unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [x] ---\n- y\n");
+    let t = at(&v, &["A", "---"]);
+    ops::toggle_spelling(&mut v, t).unwrap();
+    assert!(read(&d, "root.md").contains("\n## [x] ---\n"), "{}", read(&d, "root.md"));
+    at(&v, &["A", "---"]);
+    let (d, mut v) = vault_with("# A\n\n## [ ] ---\n");
+    let s = at(&v, &["A", "---"]);
+    ops::toggle_taskness(&mut v, s).unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\n## ---\n");
+}
+
+#[test]
+fn clearing_a_done_block_trashes_the_blocks_embedded_in_it() {
+    // T is embedded in S's file only: clearing a done S trashes T too, as
+    // deleting S does (§11.5), instead of leaving it embedded nowhere
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n- open\n", ID_A),
+        &[
+            ("racfer~s.md", &format!("---\nid: {}\n---\n\n- [x] S\n  ![[{}]]\n", ID_A, ID_B)),
+            ("dozzod~t.md", &format!("---\nid: {}\n---\n\n- T\n", ID_B)),
+        ],
+    );
+    let a = at(&v, &["A"]);
+    assert_eq!(ops::clear_done(&mut v, a).unwrap(), 1);
+    assert!(!d.path().join("racfer~s.md").exists(), "S was not trashed");
+    assert!(!d.path().join("dozzod~t.md").exists(), "T was left embedded nowhere");
+    assert_eq!(read(&d, "root.md"), "# A\n\n- open\n");
+}
+
+#[test]
+fn setting_a_property_on_a_second_embed_never_writes_the_file_that_holds_it() {
+    const ID_S: &str = "lacnum-walbyn-dirlyn-havtyp";
+    let x_text = format!("---\nid: {ID_B}\n---\n\n- X\n  ![[{ID_S}]]\n");
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{ID_S}]]\n\n# B\n\n![[{ID_B}]]\n"),
+        &[("dozzod~x.md", &x_text), ("lacnum~s.md", &format!("---\nid: {ID_S}\n---\n\n- S\n"))],
+    );
+    let x = at(&v, &["B", "X"]);
+    let second = v.tree.resolved_children(x)[0];
+    assert!(v.tree.node(second).is_embed(), "the second embed reads as broken");
+    let res = ops::set_property(&mut v, second, "due", "2026-10-01");
+    assert_eq!(
+        read(&d, "dozzod~x.md"),
+        x_text,
+        "set_property on S's second embed ({:?}) wrote into X's file",
+        res.map_err(|e| e.to_string())
+    );
+}
+
+#[test]
+fn verbs_that_write_into_a_node_refuse_a_second_embed() {
+    // a second embed of S reads as broken (§6.2): no node is there to hold
+    // a checkbox, properties or children, and an embed line has no
+    // children in its file. Each verb refuses, writing nothing, instead of
+    // writing into X's file, which holds the embed
+    const ID_S: &str = "lacnum-walbyn-dirlyn-havtyp";
+    fn second(v: &Vault) -> fold_core::tree::NRef {
+        v.tree.resolved_children(at(v, &["B", "X"]))[0]
+    }
+    type Verb = fn(&mut Vault) -> std::io::Result<()>;
+    let verbs: [(&str, Verb); 7] = [
+        ("toggle_taskness", |v| {
+            let e = second(v);
+            ops::toggle_taskness(v, e)
+        }),
+        ("set_property", |v| {
+            let e = second(v);
+            ops::set_property(v, e, "due", "2026-10-01").map(drop)
+        }),
+        ("append_child_public", |v| {
+            let e = second(v);
+            ops::append_child_public(v, e, "new").map(drop)
+        }),
+        ("capture_to", |v| {
+            let e = second(v);
+            ops::capture_to(v, "new", false, e).map(drop)
+        }),
+        ("refile", |v| {
+            let (c, e) = (at(v, &["C", "c"]), second(v));
+            ops::refile(v, c, e).map(drop)
+        }),
+        ("move_node into", |v| {
+            let (c, e) = (at(v, &["C", "c"]), second(v));
+            ops::move_node(v, c, e, ops::Drop::Into).map(drop)
+        }),
+        ("demote", |v| {
+            let y = at(v, &["B", "X", "y"]);
+            ops::demote(v, y).map(drop)
+        }),
+    ];
+    let root = format!("# A\n\n![[{ID_S}]]\n\n# B\n\n![[{ID_B}]]\n\n# C\n\n- c\n");
+    let x_text = format!("---\nid: {ID_B}\n---\n\n- X\n  ![[{ID_S}]]\n  - y\n");
+    let s_text = format!("---\nid: {ID_S}\n---\n\n- S\n");
+    for (name, verb) in verbs {
+        let (d, mut v) = vault_files(&root, &[("dozzod~x.md", &x_text), ("lacnum~s.md", &s_text)]);
+        assert!(v.tree.node(second(&v)).is_embed(), "the second embed reads as broken");
+        let res = verb(&mut v);
+        assert_eq!(read(&d, "dozzod~x.md"), x_text, "{} wrote into X's file", name);
+        assert_eq!(read(&d, "root.md"), root, "{} wrote root.md", name);
+        assert_eq!(read(&d, "lacnum~s.md"), s_text, "{} wrote S's file", name);
+        assert!(res.is_err(), "{} did nothing and said nothing", name);
+    }
+}
+
+#[test]
+fn a_key_set_in_root_md_goes_into_its_own_frontmatter() {
+    // root.md's frontmatter holds vault-level properties (§4.9): a key set
+    // there joins them, never a second frontmatter above them that turns
+    // them into text
+    let (d, mut v) = vault_with("---\nfoo: bar\n---\n\n# A\n");
+    ops::set_frontmatter_key(&mut v, 0, "due", Some("2026-10-01")).unwrap();
+    assert_eq!(read(&d, "root.md"), "---\nfoo: bar\ndue: 2026-10-01\n---\n\n# A\n");
+    ops::set_frontmatter_key(&mut v, 0, "foo", None).unwrap();
+    assert_eq!(read(&d, "root.md"), "---\ndue: 2026-10-01\n---\n\n# A\n");
+    let root = v.tree.root;
+    ops::set_property(&mut v, root, "due", "2026-10-02").unwrap();
+    assert_eq!(read(&d, "root.md"), "---\ndue: 2026-10-02\n---\n\n# A\n");
+}

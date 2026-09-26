@@ -74,7 +74,13 @@ pub struct App {
     pub(crate) vault: Vault,
     mode: Mode,
     focus: Focus,
+    /// The zoom root (§10.3). While a verb runs it may be stale: read it
+    /// through `zoom()`, and set it through `set_zoom()`.
     zoom_root: Option<NRef>,
+    /// The zoom root's key while a verb or undo runs: the files it writes
+    /// are re-parsed and their nodes renumbered, so until the verb settles
+    /// the zoom is found by key (§11.2), not by its old index.
+    zoom_anchor: Option<NodeKey>,
     pub cursor: usize,
     folded: Vec<NodeKey>,
     hide_done: bool,
@@ -101,10 +107,17 @@ pub struct App {
     /// The editor's keymap (normal, Vim, Helix), and its clipboard, kept
     /// across editing sessions.
     edit_keys: editor::Keys,
+    /// Set when `--keys` or `$FOLD_KEYS` chose this run's keymap: the
+    /// keymap the view goes on remembering instead (§10.6), the one it was
+    /// loaded with, or none.
+    kept_keys: Option<Option<editor::Keys>>,
     edit_clip: editor::Clip,
     edit_last_key: Instant,
     /// The pane that had focus when the editor opened, focused again after.
     edit_return: Focus,
+    /// Where an outline verb moved the node the editor is open on: the
+    /// editor is re-rendered there after the verb (`follow`).
+    edit_moved: Option<NRef>,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -150,6 +163,10 @@ struct Prompt {
     /// clicked or picked with ↑/↓ and Enter.
     picks: Vec<NRef>,
     sel: usize,
+    /// The node *Move to…* moves, fixed when the prompt opens: a menu's
+    /// target is dropped once its item has run, long before the pick. A
+    /// key, so a reload while the prompt is open cannot leave it stale.
+    moving: Option<NodeKey>,
 }
 
 #[derive(Clone)]
@@ -170,6 +187,7 @@ impl App {
             mode: Mode::Normal,
             focus: Focus::Outline,
             zoom_root: None,
+            zoom_anchor: None,
             cursor: 0,
             folded: Vec::new(),
             hide_done: false,
@@ -192,9 +210,11 @@ impl App {
                 .ok()
                 .and_then(|k| editor::Keys::parse(&k))
                 .unwrap_or_default(),
+            kept_keys: None,
             edit_clip: editor::Clip::default(),
             edit_last_key: Instant::now(),
             edit_return: Focus::Outline,
+            edit_moved: None,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -297,55 +317,142 @@ impl App {
     }
 
     /// Reload after an external change (§11.2): editor saves first, then
-    /// re-parse, cursor re-attached by id, key, deepest surviving step. A new
-    /// sync-conflict file starts the merge flow (§12).
+    /// re-parse, cursor re-attached by id, key, deepest surviving step, and
+    /// the editor re-rendered. A new sync-conflict file starts the merge
+    /// flow (§12).
     pub fn reload_external(&mut self) {
-        if self.editor.is_some() {
-            self.save_editor("external change");
-        }
+        // what popups show is held by key: the editor's save and the reload
+        // re-parse files, renumbering their nodes. A closed property form's
+        // node is stale after any verb since, and is let go
+        let props_key = self.props_target.filter(|_| self.mode == Mode::Props).map(|t| self.vault.key_of(t));
+        let filter_key = self.filter_rows.get(self.filter_sel).filter(|_| self.mode == Mode::Filter).map(|&r| self.vault.key_of(r));
+        let edit = self.editor_before_write("external change");
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
-        let zoom_key = self.zoom_root.map(|z| self.vault.key_of(z));
+        // the zoom is held by key (§11.2): the merge flow re-parses the
+        // vault, then may close the editor, which reads the outline, before
+        // the reload is over
+        self.anchor_zoom();
         // sync-conflict files start the merge flow (§11.2)
         match self.vault.conflict_files() {
-            Ok(files) if !files.is_empty() => {
-                match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
-                    Ok(outcomes) => {
-                        self.say(format!("merged: {}", outcomes.join("; ")));
-                        self.mode = Mode::Conflict;
-                        self.conflict_idx = 0;
-                    }
-                    Err(e) => self.say(format!("merge error: {}", e)),
-                }
-            }
+            Ok(files) if !files.is_empty() => self.merge_conflict_files("merged"),
             _ => {
                 if let Err(e) = self.vault.reload() {
                     self.say(format!("reload error: {}", e));
                 }
             }
         }
-        self.zoom_root = zoom_key.and_then(|k| self.vault.find_by_key(&k));
+        self.settle_zoom();
         if let Some(k) = cursor_key {
             if let Some(r) = self.vault.find_by_key(&k) {
                 self.move_cursor_to(r);
             }
         }
         self.clamp_cursor();
+        // the property form's node is found again, or the form closes; a
+        // target prompt lists its candidates again, and the filter its hits,
+        // its selection staying on its node (the menu keeps a key)
+        self.props_target = props_key.and_then(|k| self.find_exact(&k));
+        if self.mode == Mode::Props {
+            match self.props_target {
+                Some(_) => self.reopen_props(),
+                None => self.mode = self.base_mode(),
+            }
+        }
+        self.refresh_picks();
+        if self.mode == Mode::Filter {
+            self.update_filter();
+            let sel = filter_key.and_then(|k| self.find_exact(&k));
+            if let Some(i) = self.filter_rows.iter().position(|&r| Some(r) == sel) {
+                self.filter_sel = i;
+            }
+        }
+        self.editor_after_write(edit);
+    }
+
+    /// The merge flow (§12.2): merge the sync-conflict copies, then open
+    /// the conflict view on the pairs the merge raised. A copy the merge
+    /// leaves alone (an ignored file's, one with nothing to merge against)
+    /// raises none and stays, so it must not reopen the view, closing the
+    /// editor, on every reload; nor must pairs lived with (§12.5).
+    fn merge_conflict_files(&mut self, what: &str) {
+        let before = self.conflict_blocks();
+        match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+            Ok(outcomes) => {
+                self.say(format!("{}: {}", what, outcomes.join("; ")));
+                let raised = self.conflict_blocks().iter().any(|b| !before.contains(b));
+                if raised && (self.editor.is_none() || self.close_editor()) {
+                    self.mode = Mode::Conflict;
+                    self.conflict_idx = 0;
+                }
+            }
+            Err(e) => self.say(format!("merge error: {}", e)),
+        }
+    }
+
+    /// The conflict blocks of the unresolved pairs, by id (§12.5).
+    fn conflict_blocks(&self) -> Vec<NodeKey> {
+        fold_core::merge::conflict_pairs(&self.vault)
+            .into_iter()
+            .map(|(_, theirs)| self.vault.key_of(theirs))
+            .collect()
     }
 
     /// Visible outline rows: the zoom subtree, flattened, honouring folds
     /// and the hide-done toggle.
     pub fn rows(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
-        let root = self.zoom_root.unwrap_or(self.vault.tree.root);
-        self.flatten(root, 0, false, &mut out);
+        let root = self.zoom().unwrap_or(self.vault.tree.root);
+        self.flatten(root, 0, false, &mut out, &mut Vec::new());
         out
     }
 
-    fn flatten(&self, r: NRef, depth: usize, via_embed: bool, out: &mut Vec<FlatRow>) {
+    /// The zoom root (§10.3), found again by key while a verb runs.
+    fn zoom(&self) -> Option<NRef> {
+        match &self.zoom_anchor {
+            Some(k) => self.vault.find_by_key(k).filter(|&r| self.vault.tree.node(r).kind != Kind::Root),
+            None => self.zoom_root,
+        }
+    }
+
+    fn set_zoom(&mut self, r: Option<NRef>) {
+        self.zoom_root = r;
+        self.zoom_anchor = None;
+    }
+
+    /// Hold the zoom by key before a verb or undo rewrites files; a zoomed
+    /// node that goes away zooms out to its deepest surviving ancestor.
+    fn anchor_zoom(&mut self) {
+        self.zoom_root = self.zoom();
+        self.zoom_anchor = self.zoom_root.map(|z| self.vault.key_of(z));
+    }
+
+    /// The verb is over: the zoom it found by key holds.
+    fn settle_zoom(&mut self) {
+        self.set_zoom(self.zoom());
+    }
+
+    /// A node's parent in the outline, `None` at the top: a block root's
+    /// tree parent is its own file's root, but its outline parent is the
+    /// node that embeds it (as the breadcrumbs show).
+    fn outline_parent(&self, r: NRef) -> Option<NRef> {
+        let chain = self.chain(r);
+        chain.len().checked_sub(2).map(|i| chain[i])
+    }
+
+    /// `seen` holds the blocks already shown: an embed cycle or a second
+    /// embed of a block (§6.2 diagnostics) shows it once, as walk and render
+    /// do. Only a block can be reached twice, so only blocks are recorded.
+    fn flatten(&self, r: NRef, depth: usize, via_embed: bool, out: &mut Vec<FlatRow>, seen: &mut Vec<NRef>) {
         let n = self.vault.tree.node(r);
+        if n.is_block() {
+            if seen.contains(&r) {
+                return;
+            }
+            seen.push(r);
+        }
         if n.kind == Kind::Root {
             for c in self.vault.tree.resolved_children(r) {
-                self.flatten(c, depth, false, out);
+                self.flatten(c, depth, false, out, seen);
             }
             return;
         }
@@ -364,7 +471,7 @@ impl App {
         for c in self.vault.tree.resolved_children(r) {
             let through_embed = self.vault.tree.node(c).is_embed()
                 && self.vault.tree.resolved_child(c) != c;
-            self.flatten(c, depth + 1, through_embed || via_embed, out);
+            self.flatten(c, depth + 1, through_embed || via_embed, out, seen);
         }
     }
 
@@ -388,6 +495,12 @@ impl App {
         if let Some(i) = rows.iter().position(|r| r.nref == target) {
             self.cursor = i;
         }
+    }
+
+    /// The node a key names, only if it is that very node: no falling back
+    /// to the deepest step that still exists.
+    fn find_exact(&self, key: &NodeKey) -> Option<NRef> {
+        self.vault.find_by_key(key).filter(|&r| self.vault.key_of(r) == *key)
     }
 
     fn is_folded(&self, r: NRef) -> bool {
@@ -449,15 +562,35 @@ impl App {
     fn act_make_block(&mut self) {
         let Some(r) = self.subject() else { return };
         self.push_undo("act_make_block");
+        let on = self.on_node(r);
         match ops::make_block(&mut self.vault, r) {
             Ok(id) => {
                 self.say(format!("block {}", id));
-                // the cursor stays on the node, now a block
+                // the cursor (a zoom, the editor) stays on the node, now a block
                 if let Some(nr) = self.vault.tree.block_by_id(&id) {
+                    self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
             }
             Err(e) => self.say(format!("error: {}", e)),
+        }
+    }
+
+    /// Whether the zoom, and the editor, are on `r`, before a verb moves it.
+    fn on_node(&self, r: NRef) -> (bool, bool) {
+        let r = self.vault.tree.resolved_child(r);
+        (self.zoom() == Some(r), self.editor_node() == Some(r))
+    }
+
+    /// A node a verb moved landed at `nr`: a zoom on it stays on it
+    /// (§10.3), and the editor open on it is re-rendered there after the
+    /// verb (§10.6), not over whatever node its old path now leads to.
+    fn follow(&mut self, (zoomed, editing): (bool, bool), nr: NRef) {
+        if zoomed {
+            self.set_zoom(Some(nr));
+        }
+        if editing {
+            self.edit_moved = Some(nr);
         }
     }
 
@@ -523,12 +656,24 @@ impl App {
     }
 
     fn act_demote(&mut self) {
-        let Some(r) = self.subject() else { return };
+        let Some(s) = self.subject() else { return };
         self.push_undo("act_demote");
-        let key = self.vault.key_of(r);
-        match ops::demote(&mut self.vault, r) {
+        let r = self.vault.tree.resolved_child(s);
+        let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
+        // it goes under the node before it (§10.3)
+        let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
+        let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| self.vault.key_of(sibs[i]));
+        let on = self.on_node(r);
+        match ops::demote(&mut self.vault, s) {
             Ok(moved) => {
-                if let Some(nr) = self.vault.find_by_key(&key) {
+                // the cursor (a zoom, the editor) stays on the node where it
+                // landed
+                let landed = match &prev {
+                    Some(dest) => self.moved_node(&key, kind, dest, None),
+                    None => self.find_exact(&key),
+                };
+                if let Some(nr) = landed {
+                    self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
                 if moved {
@@ -540,12 +685,30 @@ impl App {
     }
 
     fn act_promote(&mut self) {
-        let Some(r) = self.subject() else { return };
+        let Some(s) = self.subject() else { return };
         self.push_undo("act_promote");
-        let key = self.vault.key_of(r);
-        match ops::promote(&mut self.vault, r) {
+        let r = self.vault.tree.resolved_child(s);
+        let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
+        // it goes beside its parent, right after it, under the parent's
+        // parent (§10.3)
+        let parent = self.outline_parent(r);
+        let grand = parent.map(|p| self.outline_parent(p).unwrap_or(self.vault.tree.root));
+        let rank = parent.zip(grand).and_then(|(p, g)| {
+            let at = self.vault.tree.resolved_children(g).iter().position(|&c| c == p)?;
+            Some(self.namesakes_before(r, g, at + 1))
+        });
+        let grand = grand.map(|g| self.vault.key_of(g));
+        let on = self.on_node(r);
+        match ops::promote(&mut self.vault, s) {
             Ok(moved) => {
-                if let Some(nr) = self.vault.find_by_key(&key) {
+                // the cursor (a zoom, the editor) stays on the node where it
+                // landed
+                let landed = match &grand {
+                    Some(dest) => self.moved_node(&key, kind, dest, rank),
+                    None => self.find_exact(&key),
+                };
+                if let Some(nr) = landed {
+                    self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
                 if moved {
@@ -567,21 +730,24 @@ impl App {
 
     fn act_clear_done(&mut self) {
         self.push_undo("act_clear_done");
-        let target = self.zoom_root.unwrap_or(self.vault.tree.root);
+        let target = self.zoom().unwrap_or(self.vault.tree.root);
         match ops::clear_done(&mut self.vault, target) {
             Ok(n) => self.refresh_after(&format!("{} done item(s) trashed", n)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
 
-    fn refile_to(&mut self, dest: NRef) {
-        let Some(r) = self.subject() else { return };
+    /// *Move to…* (§6.5): the prompt's moving node goes under `dest`.
+    fn refile_to(&mut self, r: NRef, dest: NRef) {
         self.push_undo("move to");
-        let key = self.vault.key_of(r);
+        let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
+        let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
+        let on = self.on_node(rr);
         match ops::refile(&mut self.vault, r, dest) {
             Ok(moved) => {
                 self.refresh_after(&with_rule_note("moved", moved));
-                if let Some(nr) = self.moved_node(&key, dest) {
+                if let Some(nr) = self.moved_node(&key, kind, &dest_key, None) {
+                    self.follow(on, nr);
                     self.reveal(nr);
                 }
             }
@@ -589,21 +755,46 @@ impl App {
         }
     }
 
-    /// Where a moved node landed: by its key if it survived, else the
-    /// destination's child with its title.
-    fn moved_node(&self, key: &NodeKey, dest: NRef) -> Option<NRef> {
+    /// Where a node a verb moved under `dest` (a key taken before the move:
+    /// the move renumbers the nodes of the files it writes) landed: a block
+    /// by its id; else, among `dest`'s children with the node's title and
+    /// kind, the one the ordering rule (§3.1) put it at. Moved in as the
+    /// last child, that is the last of them (an item goes after the items,
+    /// a section after the sections); put at a place among them, the one
+    /// after the `rank` namesakes that `namesakes_before` counted there.
+    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, rank: Option<usize>) -> Option<NRef> {
         let title = match key {
             NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
             NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
             NodeKey::Root => None,
         }?;
-        let dest = self.vault.find_by_key(&self.vault.key_of(dest)).unwrap_or(dest);
-        self.vault
-            .tree
-            .resolved_children(dest)
-            .into_iter()
-            .rev()
-            .find(|&c| self.vault.tree.node(c).title == title)
+        let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
+        let mut hits = kids.iter().filter(|&&c| {
+            let n = self.vault.tree.node(c);
+            n.title == title && n.kind == kind
+        });
+        match rank {
+            Some(i) => hits.nth(i).copied(),
+            None => hits.next_back().copied(),
+        }
+    }
+
+    /// Before a verb puts `r` among `dest`'s children, just before the
+    /// `at`-th: how many of them, other than `r`, share its title and kind
+    /// and come before that place, for `moved_node`. Clamped by the
+    /// ordering rule (§3.1), an item goes no later than the first section
+    /// and a section no earlier than after the last item, so it still comes
+    /// right after these namesakes.
+    fn namesakes_before(&self, r: NRef, dest: NRef, at: usize) -> usize {
+        let n = self.vault.tree.node(r);
+        let kids = self.vault.tree.resolved_children(dest);
+        kids.iter()
+            .take(at)
+            .filter(|&&c| {
+                let m = self.vault.tree.node(c);
+                c != r && m.title == n.title && m.kind == n.kind
+            })
+            .count()
     }
 
     /// The node an action applies to: a menu's target, else the cursor's.
@@ -615,14 +806,9 @@ impl App {
         let Some(r) = self.subject() else { return };
         self.push_undo("new node");
         let res = if child {
-            // the new child must be visible to put the cursor on it
-            if self.is_folded(r) {
-                self.toggle_fold(r);
-            }
             match ops::append_child_public(&mut self.vault, r, "") {
                 Ok(nr) => {
-                    self.move_cursor_to(nr);
-                    self.act_edit();
+                    self.edit_new_node(nr);
                     return;
                 }
                 Err(e) => Err(e),
@@ -634,25 +820,28 @@ impl App {
                 _ => "- ".to_string(),
             };
             let key = self.vault.key_of(r);
-            let depth = self.rows().get(self.cursor).map(|row| row.depth).unwrap_or(0);
             match ops::paste(&mut self.vault, r, &format!("{}\n", line), true) {
                 Ok(_) => {
-                    // move to the new sibling: the first row after the
-                    // cursor node's subtree, at its depth, with an empty title
-                    if let Some(nr) = self.vault.find_by_key(&key) {
-                        self.move_cursor_to(nr);
+                    // the new sibling: the node after the cursor node among
+                    // its siblings in the outline, with an empty title
+                    let r = self.vault.find_by_key(&key).unwrap_or(r);
+                    let parent = self.outline_parent(r).unwrap_or(self.vault.tree.root);
+                    let kids = self.vault.tree.resolved_children(parent);
+                    let new = kids
+                        .iter()
+                        .position(|&c| c == r)
+                        .and_then(|i| kids.get(i + 1).copied())
+                        .filter(|&c| self.vault.tree.node(c).title.is_empty());
+                    if let Some(nr) = new {
+                        // a sibling of the zoomed node is outside the zoom:
+                        // widen it to their parent
+                        if self.zoom() == Some(r) {
+                            self.set_zoom(self.outline_parent(r));
+                        }
+                        self.edit_new_node(nr);
+                        return;
                     }
-                    let rows = self.rows();
-                    if let Some(i) = rows.iter().enumerate().skip(self.cursor + 1).position(
-                        |(_, row)| {
-                            row.depth <= depth
-                                && self.vault.tree.node(row.nref).title.is_empty()
-                        },
-                    ) {
-                        self.cursor += 1 + i;
-                    }
-                    self.act_edit();
-                    return;
+                    Ok(())
                 }
                 Err(e) => Err(e),
             }
@@ -661,6 +850,35 @@ impl App {
             Ok(()) => self.refresh_after("node created"),
             Err(e) => self.say(format!("error: {}", e)),
         }
+    }
+
+    /// Open the editor on a node `n` / `N` just made, with the outline
+    /// cursor on it (§10.6): the new node, not whatever `subject()` is.
+    fn edit_new_node(&mut self, nr: NRef) {
+        let focus = self.focus;
+        self.reveal(nr);
+        self.focus = focus;
+        self.open_editor_on(nr);
+        // an open editor whose save is refused stays, with its text: the
+        // title is typed only into a fresh editor on the new node
+        if !self.editor_dirty() && self.editor_node() == Some(nr) {
+            self.type_new_title();
+        }
+    }
+
+    /// After `n` / `N` the editor types the new node's title (§10.6): the
+    /// cursor goes after the marker and its space, in insert mode as after
+    /// Vim's or Helix's `o`. The space is the buffer's alone until something
+    /// is typed, so a node left untitled is written as it was.
+    fn type_new_title(&mut self) {
+        let Some(ed) = self.editor.as_mut() else { return };
+        if let Some(l) = ed.buf.lines.first_mut() {
+            if !l.text.ends_with(' ') {
+                l.text.push(' ');
+            }
+        }
+        ed.set_cursor(editor::Pos::new(0, ed.len(0)));
+        ed.mode = editor::Mode::Insert;
     }
 
     // -------------------------------------------------------- editor (§10.6)
@@ -677,25 +895,28 @@ impl App {
             show_reading: self.show_reading,
             wrap: self.wrap,
             hide_done: self.hide_done,
-            keys: Some(self.edit_keys),
+            keys: self.kept_keys.unwrap_or(Some(self.edit_keys)),
             outline_width: self.ui.outline_width,
-            zoom: self.zoom_root.map(|z| self.vault.key_of(z)),
+            zoom: self.zoom().map(|z| self.vault.key_of(z)),
             folded: self.folded.clone(),
         }
     }
 
     /// Restore remembered view settings; `keep_keys` when `--keys` or
-    /// `$FOLD_KEYS` chose the keymap for this run.
+    /// `$FOLD_KEYS` chose the keymap for this run: the remembered keymap is
+    /// then neither applied nor replaced (§10.6).
     pub fn apply_view(&mut self, v: View, keep_keys: bool) {
         self.show_reading = v.show_reading;
         self.wrap = v.wrap;
         self.hide_done = v.hide_done;
-        if let (false, Some(k)) = (keep_keys, v.keys) {
+        if keep_keys {
+            self.kept_keys = Some(v.keys);
+        } else if let Some(k) = v.keys {
             self.edit_keys = k;
         }
         self.ui.outline_width = v.outline_width;
         self.folded = v.folded;
-        self.zoom_root = v.zoom.and_then(|k| self.vault.find_by_key(&k)).filter(|&r| self.vault.tree.node(r).kind != Kind::Root);
+        self.set_zoom(v.zoom.and_then(|k| self.vault.find_by_key(&k)).filter(|&r| self.vault.tree.node(r).kind != Kind::Root));
         self.cursor = 0;
         self.clamp_cursor();
     }
@@ -718,6 +939,14 @@ impl App {
 
     /// Open the built-in editor over a node's subtree (§10.6).
     fn open_editor_on(&mut self, target: NRef) {
+        // an editor already open saves first, as on leaving it; one whose
+        // save is refused stays, with its text and its clipboard
+        if !self.save_editor_releasing("switch") {
+            return;
+        }
+        if let Some(ed) = self.editor.take() {
+            self.edit_clip = ed.clip;
+        }
         let buf = fold_core::edit::open_editor(&self.vault, target);
         self.editor = Some(editor::Editor::new(buf, self.edit_keys, self.edit_clip.clone()));
         if self.mode != Mode::Edit {
@@ -737,30 +966,195 @@ impl App {
         self.say(format!("editor keys: {}", keys.name()));
     }
 
-    fn save_editor(&mut self, why: &str) {
-        let Some(mut ed) = self.editor.take() else { return };
+    /// Write the editor's dirty blocks; true when nothing is left unsaved.
+    /// A refused save (the file changed on disk) keeps the text in the
+    /// editor and says why.
+    fn save_editor(&mut self, why: &str) -> bool {
+        self.write_editor(why, false)
+    }
+
+    /// Save the editor to leave it, or before it is re-rendered (§10.6): a
+    /// block cut and not pasted back cannot be pasted as itself any more,
+    /// so once the save went through it is let go, and deleted (§5.2). It
+    /// is saved first still in transit, so a refused save leaves the editor
+    /// as it was, its clipboard too; and the save and the deletion are one
+    /// op-log entry (§10.10), so one undo puts back the block's file and
+    /// its embed together.
+    fn save_editor_releasing(&mut self, why: &str) -> bool {
+        self.write_editor(why, true)
+    }
+
+    /// `save_editor`; with `release`, `save_editor_releasing`.
+    fn write_editor(&mut self, why: &str, release: bool) -> bool {
+        if release && !self.editor_dirty() {
+            // nothing to save first, so nothing a refusal keeps in transit
+            if let Some(ed) = self.editor.as_mut() {
+                ed.release_clip();
+            }
+        }
+        if !self.editor_dirty() {
+            return true;
+        }
         self.settle_undo();
+        let cursor = self.current().map(|r| self.vault.key_of(r));
+        let on_editor = self.anchor_zoom_for_save();
+        let Some(mut ed) = self.editor.take() else { return true };
+        // what another program changed beside the edited blocks is taken in
+        // before the snapshot, so undoing this save leaves it be
+        ed.buf.rebase_dirty(&mut self.vault);
         let snap = ops::Snapshot::take(&self.vault, "edit");
-        match ed.buf.save_all(&mut self.vault) {
+        let mut res = ed.buf.save_all(&mut self.vault);
+        if let Some(n) = res.as_ref().ok().copied().filter(|_| release) {
+            ed.release_clip();
+            // the block that held the embed is written again: counted once
+            res = ed.buf.save_all(&mut self.vault).map(|m| m.max(n));
+        }
+        self.editor = Some(ed);
+        self.settle_zoom_after_save(on_editor);
+        // blocks written before a refusal are an op too
+        self.record_undo(snap);
+        // the save re-parsed what it wrote: the outline cursor stays on its
+        // node, so a verb that saves the editor first acts on the row clicked
+        if let Some(r) = cursor.and_then(|k| self.find_exact(&k)) {
+            self.move_cursor_to(r);
+        }
+        let saved = match res {
             Ok(n) => {
-                self.record_undo(snap);
                 if n > 0 {
                     self.say(format!("saved {} block(s) ({})", n, why));
                 }
+                true
             }
-            Err(e) => self.say(format!("error: {}", e)),
-        }
-        self.editor = Some(ed);
+            Err(e) => {
+                self.say(format!("error: {}", e));
+                false
+            }
+        };
         self.edit_last_key = Instant::now();
+        saved
     }
 
-    fn close_editor(&mut self) {
-        self.save_editor("exit");
+    /// Hold the zoom by key across an editor save (§10.3): the save
+    /// re-parses the files it writes, renumbering their nodes, and may
+    /// trash a block's file, renumbering the files after it. True when the
+    /// zoom is the node the editor is open on.
+    fn anchor_zoom_for_save(&mut self) -> bool {
+        self.anchor_zoom();
+        self.zoom_root.is_some() && self.editor_node() == self.zoom_root
+    }
+
+    /// After it, the zoom holds: the editor's own node found as the editor
+    /// finds it, since its title, and so its key, may be what was edited;
+    /// any other node by its key, or its deepest surviving step.
+    fn settle_zoom_after_save(&mut self, on_editor: bool) {
+        if let Some(k) = self.editor_key().filter(|_| on_editor) {
+            self.zoom_anchor = Some(k);
+        }
+        self.settle_zoom();
+    }
+
+    /// Leave the editor, saving it (§10.6); true when it closed. When the
+    /// save is refused the editor stays open with its text: nothing typed
+    /// is dropped except by *Revert*.
+    fn close_editor(&mut self) -> bool {
+        // a block cut and not pasted back is deleted once saved (§5.2)
+        if !self.save_editor_releasing("exit") {
+            self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
+            return false;
+        }
         if let Some(ed) = self.editor.take() {
             self.edit_clip = ed.clip;
         }
         self.mode = Mode::Normal;
         self.focus = self.edit_return;
+        true
+    }
+
+    /// The node the editor is open on, as a key that survives the files
+    /// changing under it (§3.4): its render root, found in the tree as the
+    /// editor last read or wrote it.
+    fn editor_key(&self) -> Option<NodeKey> {
+        self.editor_node().map(|r| self.vault.key_of(r))
+    }
+
+    /// The editor's render root in the tree as the editor last read or
+    /// wrote it.
+    fn editor_node(&self) -> Option<NRef> {
+        let ed = self.editor.as_ref()?;
+        let info = ed.buf.owners.values().find(|i| i.parent.is_none())?;
+        let r = match &info.id {
+            Some(id) => self.vault.tree.block_by_id(id)?,
+            None => {
+                let file = self.vault.file_index(&info.path)?;
+                let f = &self.vault.tree.files[file];
+                if info.is_root {
+                    (file, f.root_node)
+                } else {
+                    let i = f.nodes.iter().position(|n| n.kind != Kind::Root && n.span.start == info.start)?;
+                    (file, i)
+                }
+            }
+        };
+        Some(r)
+    }
+
+    /// Before something writes files under an open editor, an outline verb
+    /// or a reload (§10.6, §11.2): the editor saves first. Returns what it
+    /// is open on and the files as they are, for `editor_after_write`.
+    fn editor_before_write(&mut self, why: &str) -> Option<(NodeKey, ops::Snapshot)> {
+        // the editor is re-rendered after, so a block cut and not pasted
+        // back cannot be pasted as itself any more: once the editor is
+        // saved, it is deleted (§5.2). A refused save keeps it in transit,
+        // as the editor keeps its text (it is not re-rendered)
+        self.editor.as_ref()?;
+        self.save_editor_releasing(why);
+        let key = self.editor_key()?;
+        Some((key, ops::Snapshot::take(&self.vault, why)))
+    }
+
+    /// After it: if any file changed, the editor is re-rendered over the
+    /// files as they now are, so its next save is not refused: on its node
+    /// where the verb moved it (`follow`), else the very node its key names.
+    fn editor_after_write(&mut self, before: Option<(NodeKey, ops::Snapshot)>) {
+        let moved = self.edit_moved.take();
+        let Some((key, snap)) = before else { return };
+        if ops::Inverse::since(snap, &self.vault).is_some() {
+            self.rebuild_editor(moved.or_else(|| self.find_exact(&key)));
+        }
+    }
+
+    /// Re-render a clean editor over the files as they are now (§11.2), on
+    /// its node found again, with the cursor where it was: over the same
+    /// node's text, never an ancestor's its old path falls back to. Text a
+    /// refused save still holds is never replaced.
+    fn rebuild_editor(&mut self, target: Option<NRef>) {
+        if self.editor.is_none() || self.editor_dirty() {
+            return;
+        }
+        let Some(target) = target else {
+            // nothing unsaved, and nothing left to edit
+            self.close_editor();
+            self.say("the node being edited is gone");
+            return;
+        };
+        let buf = fold_core::edit::open_editor(&self.vault, target);
+        let Some(ed) = self.editor.as_mut() else { return };
+        let same = buf.lines.len() == ed.buf.lines.len()
+            && buf.lines.iter().zip(&ed.buf.lines).all(|(a, b)| a.text == b.text && a.owner == b.owner);
+        if same {
+            // the same text: the cursor, mode and undo history stay
+            ed.buf = buf;
+        } else {
+            // new text: the old undo steps would write the old text back
+            let mut fresh = editor::Editor::new(buf, ed.keys, ed.clip.clone());
+            if ed.mode == editor::Mode::Insert {
+                fresh.mode = editor::Mode::Insert;
+            }
+            fresh.cursor = ed.cursor;
+            fresh.search = ed.search.take();
+            fresh.clamp_cursor();
+            *ed = fresh;
+        }
     }
 
     /// Whether the editor holds changes not yet written.
@@ -791,12 +1185,16 @@ impl App {
         // moving out of a dirty block saves it (§10.6)
         if before != after && self.editor.as_ref().is_some_and(|e| e.buf.dirty.contains(&before)) {
             self.settle_undo();
-            let snap = ops::Snapshot::take(&self.vault, "edit");
+            let on_editor = self.anchor_zoom_for_save();
             let mut ed = self.editor.take().unwrap();
-            if ed.buf.splice(&mut self.vault, before).is_ok() {
+            ed.buf.rebase_dirty(&mut self.vault);
+            let snap = ops::Snapshot::take(&self.vault, "edit");
+            let res = ed.buf.splice(&mut self.vault, before);
+            self.editor = Some(ed);
+            self.settle_zoom_after_save(on_editor);
+            if res.is_ok() {
                 self.record_undo(snap);
             }
-            self.editor = Some(ed);
         }
     }
 
@@ -806,7 +1204,7 @@ impl App {
         if let Some(p) = self.prompt.as_mut() {
             p.text.push_str(text.lines().next().unwrap_or(""));
             self.refresh_picks();
-        } else if let Some(ed) = self.editor.as_mut() {
+        } else if let (Mode::Edit, Some(ed)) = (self.mode, self.editor.as_mut()) {
             ed.paste_text(text);
             self.edit_last_key = Instant::now();
         } else if self.mode == Mode::Filter {
@@ -864,18 +1262,20 @@ impl App {
             self.say("read-only line (preserved verbatim)");
             return;
         }
+        let edit = self.editor_before_write("outline verb");
         self.push_undo("delete property");
         match ops::set_frontmatter_key(&mut self.vault, t.0, &k, None) {
             Ok(()) => self.say(format!("{} removed", k)),
             Err(e) => self.say(format!("error: {}", e)),
         }
         self.reopen_props();
+        self.editor_after_write(edit);
     }
 
     pub fn key_props(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.props_sel + 1 < self.props_rows.len() {
@@ -917,7 +1317,7 @@ impl App {
                 }
                 self.prompt = Some(p);
             }
-            KeyCode::Enter => self.accept_prompt(p),
+            KeyCode::Enter => self.accept_prompt_saving_editor(p),
             KeyCode::Backspace => {
                 p.text.pop();
                 self.prompt = Some(p);
@@ -940,7 +1340,12 @@ impl App {
         let picked = p.picks.get(p.sel).copied();
         match p.action {
             PromptAction::Refile => match picked.map(Ok).unwrap_or_else(|| self.vault.resolve_target(&p.text)) {
-                Ok(dest) => self.refile_to(dest),
+                Ok(dest) => {
+                    match p.moving.as_ref().and_then(|k| self.find_exact(k)) {
+                        Some(r) => self.refile_to(r, dest),
+                        None => self.say("that node is gone"),
+                    }
+                }
                 Err(e) => self.say(e),
             },
             PromptAction::GoTo => match picked.map(Ok).unwrap_or_else(|| self.vault.resolve_target(&p.text)) {
@@ -967,8 +1372,12 @@ impl App {
                         return;
                     }
                     self.push_undo("set property");
+                    let on = self.on_node(t);
                     match ops::set_property(&mut self.vault, t, &k, &p.text) {
                         Ok(block) => {
+                            // a first property makes a block (§6.1): a zoom
+                            // and the editor follow it
+                            self.follow(on, block);
                             self.say(format!("{} set", k));
                             self.props_target = Some(block);
                             self.reopen_props();
@@ -995,13 +1404,36 @@ impl App {
         }
     }
 
+    /// Accept a prompt as an outline verb: the editor saves first and is
+    /// re-rendered after (§10.6).
+    fn accept_prompt_saving_editor(&mut self, mut p: Prompt) {
+        // the save re-parses what it wrote: the pick is found again by key
+        let picked = p.picks.get(p.sel).map(|&r| self.vault.key_of(r));
+        let edit = self.editor_before_write("outline verb");
+        match picked.map(|k| self.find_exact(&k)) {
+            Some(None) => self.say("that node is gone"),
+            Some(Some(r)) => {
+                p.picks = vec![r];
+                p.sel = 0;
+                self.accept_prompt(p);
+            }
+            None => self.accept_prompt(p),
+        }
+        self.editor_after_write(edit);
+    }
+
     fn open_prompt(&mut self, label: &str, action: PromptAction, text: String) {
+        let moving = match action {
+            PromptAction::Refile => self.subject().map(|r| self.vault.key_of(r)),
+            _ => None,
+        };
         self.prompt = Some(Prompt {
             label: label.into(),
             text,
             action,
             picks: Vec::new(),
             sel: 0,
+            moving,
         });
         self.refresh_picks();
     }
@@ -1015,10 +1447,7 @@ impl App {
         }
         let q = p.text.to_lowercase();
         // a node cannot move into its own subtree
-        let moving = match p.action {
-            PromptAction::Refile => self.subject().map(|r| self.vault.tree.resolved_child(r)),
-            _ => None,
-        };
+        let moving = p.moving.as_ref().and_then(|k| self.find_exact(k)).map(|r| self.vault.tree.resolved_child(r));
         let mut nodes: Vec<NRef> = Vec::new();
         self.vault.tree.walk(self.vault.tree.root, &mut |t, r| {
             if t.node(r).kind != Kind::Root && !t.node(r).is_embed() {
@@ -1052,14 +1481,18 @@ impl App {
         }
     }
 
-    /// Put the cursor on a node, unfolding and zooming out as needed.
+    /// Put the cursor on a node, unfolding and zooming out as needed. The
+    /// ancestors unfolded are its outline ancestors, through the embeds
+    /// that stitch in the blocks it sits in, not only those in its file.
     fn reveal(&mut self, r: NRef) {
-        for a in self.vault.tree.ancestors(r) {
+        let mut chain = self.chain(r);
+        chain.pop();
+        for a in chain {
             let k = self.vault.key_of(a);
             self.folded.retain(|f| f != &k);
         }
-        if self.zoom_root.is_some() && !self.rows().iter().any(|row| row.nref == r) {
-            self.zoom_root = None;
+        if self.zoom().is_some() && !self.rows().iter().any(|row| row.nref == r) {
+            self.set_zoom(None);
         }
         self.move_cursor_to(r);
         self.focus = Focus::Outline;
@@ -1070,6 +1503,10 @@ impl App {
     pub fn enter_conflict_view(&mut self) {
         if fold_core::merge::conflict_pairs(&self.vault).is_empty() {
             self.say("no conflicts");
+            return;
+        }
+        // the view replaces the editor, which saves and closes first
+        if self.editor.is_some() && !self.close_editor() {
             return;
         }
         self.mode = Mode::Conflict;
@@ -1103,11 +1540,6 @@ impl App {
                         Ok(()) => self.say("kept ours"),
                         Err(e) => self.say(format!("error: {}", e)),
                     }
-                    self.conflict_idx = self.conflict_idx.saturating_sub(0).min(
-                        fold_core::merge::conflict_pairs(&self.vault)
-                            .len()
-                            .saturating_sub(1),
-                    );
                 }
             }
             KeyCode::Char('t') => {
@@ -1135,6 +1567,9 @@ impl App {
             }
             _ => {}
         }
+        // a resolved pair leaves the list: stay on the pair now shown
+        let n = fold_core::merge::conflict_pairs(&self.vault).len();
+        self.conflict_idx = self.conflict_idx.min(n.saturating_sub(1));
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -1209,7 +1644,7 @@ impl App {
                     key.code,
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
                 ) {
-                    self.mode = Mode::Normal;
+                    self.mode = self.base_mode();
                 }
             }
             Mode::Conflict => self.key_conflict(key),
@@ -1218,14 +1653,27 @@ impl App {
 
     /// Drop the editor's unsaved changes (§10.6: *Revert*, `:q!`).
     fn discard_editor(&mut self) {
-        if let Some(ed) = self.editor.take() {
-            self.edit_clip = ed.clip;
-        }
+        let ed = self.editor.take();
         self.mode = Mode::Normal;
         self.focus = self.edit_return;
+        // the reload may renumber nodes: files can have changed on disk
+        self.anchor_zoom();
         let _ = self.vault.reload();
+        let mut said = String::from("changes discarded");
+        if let Some(ed) = ed {
+            // a block a save took out of its parent (cut and not pasted
+            // back, or deleted) cannot be pasted back as itself any more:
+            // it is deleted now, as on leaving any other way (§5.2)
+            let snap = ops::Snapshot::take(&self.vault, "revert");
+            if let Err(e) = ed.buf.discard(&mut self.vault) {
+                said = format!("{}; error: {}", said, e);
+            }
+            self.record_undo(snap);
+            self.edit_clip = ed.clip;
+        }
+        self.settle_zoom();
         self.clamp_cursor();
-        self.say("changes discarded");
+        self.say(said);
     }
 
     pub fn key_normal(&mut self, key: KeyEvent) {
@@ -1357,6 +1805,7 @@ impl App {
             return;
         };
         self.mark_self_write();
+        self.anchor_zoom();
         match inv.undo(&mut self.vault) {
             Ok(()) => {
                 self.say(format!("undone: {}", inv.description));
@@ -1378,6 +1827,7 @@ impl App {
             return;
         };
         self.mark_self_write();
+        self.anchor_zoom();
         match inv.redo(&mut self.vault) {
             Ok(()) => {
                 self.say(format!("redone: {}", inv.description));
@@ -1397,12 +1847,14 @@ impl App {
         self.settle_undo();
         self.pending_undo = Some(ops::Snapshot::take(&self.vault, desc));
         self.mark_self_write();
+        self.anchor_zoom();
     }
 
     /// Turn the pending snapshot into an op-log entry holding exactly the
     /// files the verb changed (§10.10); a verb that changed nothing leaves
     /// no entry and keeps the redo stack.
     fn settle_undo(&mut self) {
+        self.settle_zoom();
         if let Some(snap) = self.pending_undo.take() {
             self.record_undo(snap);
         }
@@ -1472,21 +1924,23 @@ impl App {
                 use fold_core::reading::LineRef;
                 match fold_core::reading::node_at(&doc, self.read_cursor) {
                     Some(LineRef::Title(r)) => {
+                        // a heading zooms, a task heading too (`x` toggles
+                        // it); a task item toggles (§10.4)
                         let n = self.vault.tree.node(r);
-                        if n.task.is_some() {
+                        if n.kind == Kind::Section {
+                            self.set_zoom(Some(r));
+                            self.read_cursor = 0;
+                            self.scroll_reading = 0;
+                        } else if n.task.is_some() {
                             self.act_on_node(r, |app, r| {
                                 let _ = ops::toggle_task(&mut app.vault, r);
                             });
-                        } else if n.kind == Kind::Section {
-                            self.zoom_root = Some(r);
-                            self.read_cursor = 0;
-                            self.scroll_reading = 0;
                         }
                     }
                     Some(LineRef::Embed(e)) => {
                         let t = self.vault.tree.resolved_child(e);
                         if t != e {
-                            self.zoom_root = Some(t);
+                            self.set_zoom(Some(t));
                             self.read_cursor = 0;
                             self.scroll_reading = 0;
                         }
@@ -1495,17 +1949,8 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if let Some(z) = self.zoom_root {
-                    if let Some(p) = self.vault.tree.node(z).parent {
-                        let pr = (z.0, p);
-                        self.zoom_root = if self.vault.tree.node(pr).kind != Kind::Root {
-                            Some(pr)
-                        } else {
-                            None
-                        };
-                    } else {
-                        self.zoom_root = None;
-                    }
+                if let Some(z) = self.zoom() {
+                    self.set_zoom(self.outline_parent(z));
                     self.read_cursor = 0;
                     self.scroll_reading = 0;
                 } else {
@@ -1537,8 +1982,11 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             // what isn't the pane's own works as it does in the outline
             KeyCode::Char('m') => {
+                // the menu keeps its own target; a later outline verb must
+                // not inherit this one
                 self.action_target = self.read_node();
                 self.run_action(Action::NodeMenu);
+                self.action_target = None;
             }
             KeyCode::Char(':' | '?' | 'c' | 'C' | 'u' | 'U') => {
                 let rows = self.rows();
@@ -1551,7 +1999,7 @@ impl App {
     /// Reset the reading cursor when the pane starts showing another node
     /// (outline cursor moved, zoom changed), and keep it inside the doc.
     fn sync_read_target(&mut self) {
-        let key = self.zoom_root.or_else(|| self.current()).map(|r| self.vault.key_of(r));
+        let key = self.zoom().or_else(|| self.current()).map(|r| self.vault.key_of(r));
         if key != self.read_key {
             self.read_key = key;
             self.read_cursor = 0;
@@ -1564,7 +2012,7 @@ impl App {
 
     pub fn reading_doc_pub(&self) -> fold_core::reading::ReadingDoc { self.reading_doc() }
     fn reading_doc(&self) -> fold_core::reading::ReadingDoc {
-        let target = self.zoom_root.or_else(|| self.current());
+        let target = self.zoom().or_else(|| self.current());
         match target {
             Some(r) => fold_core::reading::build(&self.vault, r),
             None => fold_core::reading::ReadingDoc {
@@ -1732,7 +2180,7 @@ impl App {
         let hits = self.palette_hits();
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.palette.clear();
             }
             KeyCode::Up => self.palette_sel = self.palette_sel.saturating_sub(1),
@@ -1743,7 +2191,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let chosen = hits.get(self.palette_sel).copied();
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.palette.clear();
                 self.palette_sel = 0;
                 if let Some(a) = chosen {
@@ -1765,11 +2213,17 @@ impl App {
     /// Open the node menu (§10.3) for `r`, anchored at a screen position.
     fn open_menu(&mut self, r: NRef, x: u16, y: u16) {
         self.ui.menu = Some(ui::Menu {
-            target: r,
+            target: self.vault.key_of(r),
             x,
             y,
             sel: 0,
         });
+    }
+
+    /// The node the open menu is on, found again by its key: `None` once
+    /// the files changed under the menu and that node is gone (§11.2).
+    fn menu_target(&self) -> Option<NRef> {
+        self.find_exact(&self.ui.menu.as_ref()?.target)
     }
 
     fn key_menu(&mut self, key: KeyEvent) {
@@ -1790,11 +2244,16 @@ impl App {
         }
     }
 
-    /// Run a node-menu item on the menu's target.
+    /// Run a node-menu item on the menu's target, found by its key; the
+    /// verb holds it by key across the editor's save (`run_action`).
     fn run_menu_item(&mut self, i: usize) {
         let Some(menu) = self.ui.menu.take() else { return };
         let Some(Some(a)) = action::NODE_MENU.get(i) else { return };
-        self.action_target = Some(menu.target);
+        let Some(target) = self.find_exact(&menu.target) else {
+            self.say("that node is gone");
+            return;
+        };
+        self.action_target = Some(target);
         self.run_action(*a);
         self.action_target = None;
     }
@@ -1802,6 +2261,30 @@ impl App {
     /// Run any action by name (§10.8): what buttons, menus and the palette
     /// do. Node actions apply to `subject()`.
     pub fn run_action(&mut self, a: Action) {
+        // §10.6: an outline verb saves the editor first, and the editor is
+        // then re-rendered over what the verb wrote. Revert must not save,
+        // and an action that opens the editor builds it afresh. The save
+        // re-parses what it writes, and deletes a block cut and not pasted
+        // back, renumbering the files after it (§5.2): a menu's or button's
+        // node is held by key across it
+        let target = self.action_target.map(|t| self.vault.key_of(t));
+        let edit = match a {
+            Action::EditRevert => None,
+            _ => self.editor_before_write("outline verb"),
+        };
+        self.action_target = target.as_ref().and_then(|k| self.find_exact(k));
+        let gone = target.is_some() && self.action_target.is_none();
+        if gone {
+            self.say("that node is gone");
+        } else {
+            self.run_action_inner(a);
+        }
+        if gone || !matches!(a, Action::Edit | Action::NewSibling | Action::NewChild | Action::ConflictEdit) {
+            self.editor_after_write(edit);
+        }
+    }
+
+    fn run_action_inner(&mut self, a: Action) {
         // a node action from a menu first selects its node
         if let Some(t) = self.action_target {
             if self.rows().iter().any(|row| row.nref == t) {
@@ -1881,22 +2364,30 @@ impl App {
             }
             Action::GoTo => self.open_prompt("go to", PromptAction::GoTo, String::new()),
             Action::ClearDone => self.act_clear_done(),
-            Action::Canonicalize => match fold_core::check::fix(&mut self.vault) {
-                Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
-                Err(e) => self.say(format!("error: {}", e)),
-            },
-            Action::Merge => match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
-                Ok(o) => {
-                    self.say(format!("{} merge(s)", o.len()));
-                    if !fold_core::merge::conflict_pairs(&self.vault).is_empty() {
-                        self.enter_conflict_view();
-                    }
+            Action::Canonicalize => {
+                self.anchor_zoom();
+                match fold_core::check::fix(&mut self.vault) {
+                    Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
+                    Err(e) => self.say(format!("error: {}", e)),
                 }
-                Err(e) => self.say(format!("error: {}", e)),
-            },
+            }
+            Action::Merge => {
+                self.anchor_zoom();
+                match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+                    Ok(o) => {
+                        self.say(format!("{} merge(s)", o.len()));
+                        if !fold_core::merge::conflict_pairs(&self.vault).is_empty() {
+                            self.enter_conflict_view();
+                        }
+                    }
+                    Err(e) => self.say(format!("error: {}", e)),
+                }
+            }
             Action::ResolveConflicts => self.enter_conflict_view(),
             Action::EditorKeys => self.set_edit_keys(self.edit_keys.next()),
-            Action::EditDone => self.close_editor(),
+            Action::EditDone => {
+                self.close_editor();
+            }
             Action::EditRevert => self.discard_editor(),
             Action::Close => self.close_top(),
             Action::PromptOk => {
@@ -1914,6 +2405,16 @@ impl App {
         }
     }
 
+    /// The mode under a popup (§10.2): the editor if one is open, since a
+    /// popup opened over it closes back to it, else normal.
+    fn base_mode(&self) -> Mode {
+        if self.editor.is_some() {
+            Mode::Edit
+        } else {
+            Mode::Normal
+        }
+    }
+
     /// Close whatever is on top: a menu, a prompt, then a popup mode.
     fn close_top(&mut self) {
         if self.ui.menu.take().is_some() {
@@ -1923,17 +2424,19 @@ impl App {
             return;
         }
         match self.mode {
-            Mode::Edit => self.close_editor(),
+            Mode::Edit => {
+                self.close_editor();
+            }
             Mode::Filter => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.filter.clear();
                 self.filter_rows.clear();
             }
             Mode::Picker => {
-                self.mode = Mode::Normal;
+                self.mode = self.base_mode();
                 self.palette.clear();
             }
-            Mode::Props | Mode::Help | Mode::Conflict => self.mode = Mode::Normal,
+            Mode::Props | Mode::Help | Mode::Conflict => self.mode = self.base_mode(),
             Mode::Normal => {}
         }
     }
@@ -1941,7 +2444,7 @@ impl App {
     /// Zoom into a node: the reading pane shows it (§10.3 `Enter`).
     fn zoom_into(&mut self, r: NRef) {
         if self.vault.tree.node(r).kind != Kind::Root {
-            self.zoom_root = Some(r);
+            self.set_zoom(Some(r));
             self.cursor = 0;
             self.read_cursor = 0;
             self.scroll_reading = 0;
@@ -1951,12 +2454,12 @@ impl App {
         }
     }
 
+    /// Zoom out to the parent (§10.3 `Backspace`): the outline parent,
+    /// so a zoomed block goes to the node that embeds it.
     fn zoom_out(&mut self) {
-        if let Some(z) = self.zoom_root {
+        if let Some(z) = self.zoom() {
             let key = self.vault.key_of(z);
-            self.zoom_root = self.vault.tree.node(z).parent.map(|p| (z.0, p)).filter(|&p| {
-                self.vault.tree.node(p).kind != Kind::Root
-            });
+            self.set_zoom(self.outline_parent(z));
             self.cursor = 0;
             if let Some(r) = self.vault.find_by_key(&key) {
                 self.move_cursor_to(r);
@@ -1966,8 +2469,8 @@ impl App {
 
     /// Zoom straight to a node, or to the root (breadcrumbs, §10.1).
     fn zoom_to(&mut self, r: Option<NRef>) {
-        let prev = self.zoom_root;
-        self.zoom_root = r;
+        let prev = self.zoom();
+        self.set_zoom(r);
         self.cursor = 0;
         if let Some(p) = prev {
             if !self.rows().iter().any(|row| row.nref == p) {
@@ -2095,21 +2598,17 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
         app.edit_keys = parsed;
     }
     let keys_chosen = keys.is_some() || std::env::var_os("FOLD_KEYS").is_some();
+    if keys_chosen {
+        // no view yet: it remembers no keymap from this run either
+        app.kept_keys = Some(None);
+    }
     if let Some(v) = view::load(dir) {
         app.apply_view(v, keys_chosen);
     }
     app.start_watcher();
     // a sync-conflict file present at startup starts the merge flow (§12.2)
-    if let Ok(files) = app.vault.conflict_files() {
-        if !files.is_empty() {
-            match fold_core::merge::merge_sync_conflicts(&mut app.vault, false) {
-                Ok(o) => {
-                    app.say(format!("merged on startup: {}", o.join("; ")));
-                    app.enter_conflict_view();
-                }
-                Err(e) => app.say(format!("merge error: {}", e)),
-            }
-        }
+    if app.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
+        app.merge_conflict_files("merged on startup");
     }
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
@@ -2163,11 +2662,12 @@ fn run_loop(
             out.flush()?;
         }
         if app.quit {
-            // save any open editor on quit (§10.6)
-            if app.editor.is_some() {
-                app.close_editor();
+            // save any open editor on quit (§10.6); one whose save is
+            // refused stays open with its text
+            if app.editor.is_none() || app.close_editor() {
+                return Ok(());
             }
-            return Ok(());
+            app.quit = false;
         }
         // autosave after 750 ms without a keystroke (§10.6)
         if app.mode == Mode::Edit && app.editor_dirty() && app.edit_last_key.elapsed() > Duration::from_millis(750) {

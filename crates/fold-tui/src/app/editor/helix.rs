@@ -1,13 +1,25 @@
 //! The Helix keymap: selection first. Motions select, actions act on the
 //! selection; `v` makes motions extend it. One selection (no multi-cursor).
 
-use super::{order, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, Editor, Group, Mode, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
 pub struct State {
     count: String,
     prefix: Option<char>,
+}
+
+/// The largest count: more digits than that are this.
+const MAX_COUNT: usize = 999_999_999;
+
+/// The most text a count may make `>` add.
+const MAX_TEXT: usize = 4 << 20;
+
+/// The count typed before a key, 1 if none.
+fn take_count(st: &mut State) -> usize {
+    let s = std::mem::take(&mut st.count);
+    if s.is_empty() { 1 } else { s.parse().map_or(MAX_COUNT, |n: usize| n.clamp(1, MAX_COUNT)) }
 }
 
 /// The selection as `[start, end)`: the anchor to the cursor, both included;
@@ -36,6 +48,68 @@ fn select_to(e: &mut Editor, from: Pos, to: Pos) {
     }
 }
 
+/// Helix's word boundary: a change of class, a line end being a class of
+/// its own.
+fn boundary(a: char, b: char, big: bool) -> bool {
+    class(a, big) != class(b, big) || (a == '\n') != (b == '\n')
+}
+
+/// Select the `n`th word forward or back, as Helix's word motions do: each
+/// walks from the cursor until `target` holds between the character behind
+/// and the one ahead, and selects what it walked over. A target right at the
+/// cursor (it ends a word, or the whitespace after one) and line ends right
+/// ahead move the start past them, so a repeated `w` or `b` selects the next
+/// word rather than keeping the last character of this one.
+fn select_words(e: &mut Editor, n: usize, fwd: bool, target: &dyn Fn(char, char) -> bool) {
+    let mut sel = None;
+    for _ in 0..n {
+        let cur = sel.map_or(e.cursor, |(_, c)| c);
+        match word_step(e, cur, fwd, target) {
+            Some(s) => sel = Some(s),
+            None => break,
+        }
+    }
+    if let Some((from, to)) = sel {
+        select_to(e, from, to);
+    }
+}
+
+/// One word from `cur`: the selection's anchor and cursor, or `None` at the
+/// end (start) of the text. A place between two characters is named by the
+/// position of the one after it.
+fn word_step(e: &Editor, cur: Pos, fwd: bool, target: &dyn Fn(char, char) -> bool) -> Option<(Pos, Pos)> {
+    let ahead = |g: Pos| if fwd { e.char_at(g) } else { e.prev(g).and_then(|q| e.char_at(q)) };
+    let step = |g: Pos| if fwd { e.next(g) } else { e.prev(g) };
+    // the walk starts on the cursor's far side, the selection's other end
+    // is on its near side
+    let (mut h, mut anchor) = if fwd { (e.next(cur)?, cur) } else { (cur, e.next(cur).unwrap_or(cur)) };
+    ahead(h)?;
+    let mut behind = e.char_at(cur).unwrap_or('\n');
+    while ahead(h) == Some('\n') {
+        behind = '\n';
+        h = step(h)?;
+    }
+    if behind == '\n' {
+        anchor = h;
+    }
+    let start = h;
+    while let Some(ch) = ahead(h) {
+        if target(behind, ch) {
+            if h != start {
+                break;
+            }
+            anchor = h;
+        }
+        behind = ch;
+        h = step(h)?;
+    }
+    Some(if fwd {
+        (anchor, e.prev(h).filter(|q| *q >= anchor).unwrap_or(anchor))
+    } else {
+        (e.prev(anchor).filter(|q| *q >= h).unwrap_or(h), h)
+    })
+}
+
 /// Move the cursor, collapsing the selection (or extending it in select mode).
 fn move_to(e: &mut Editor, to: Pos) {
     if e.mode == Mode::Select {
@@ -57,6 +131,11 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // a key that moves the cursor ends a run of typing: what is typed
+    // after it is its own undo step, as in the other keymaps
+    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
+        e.group = Group::None;
+    }
     match key.code {
         KeyCode::Esc => {
             e.mode = Mode::Normal;
@@ -146,11 +225,11 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.helix.count.push(c);
         return out;
     }
-    let n: usize = std::mem::take(&mut e.helix.count).parse().unwrap_or(1).max(1);
+    let n = take_count(&mut e.helix);
     let p = e.cursor;
     match (c, alt) {
         ('h', _) => move_to(e, Pos::new(p.line, p.col.saturating_sub(n))),
-        ('l', _) => move_to(e, Pos::new(p.line, (p.col + n).min(e.len(p.line)))),
+        ('l', _) => move_to(e, Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)))),
         ('j' | 'k', _) => {
             if e.mode == Mode::Select {
                 if e.anchor.is_none() {
@@ -163,24 +242,19 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             e.move_visual(if c == 'j' { n as isize } else { -(n as isize) });
         }
         ('w' | 'W', false) => {
+            // up to the start of the next word, or a line end
             let big = c == 'W';
-            let mut from = p;
-            let mut to = p;
-            for _ in 0..n {
-                from = to;
-                let next = e.word_fwd(to, big);
-                to = if next > to { e.prev(next).unwrap_or(next) } else { next };
-                if to == from {
-                    to = e.word_fwd(e.next(to).unwrap_or(to), big);
-                }
-            }
-            select_to(e, from, to);
+            select_words(e, n, true, &|a, b| boundary(a, b, big) && (b == '\n' || !b.is_whitespace()));
         }
         ('e' | 'E', false) => {
             let big = c == 'E';
             let mut from = p;
             let mut to = p;
             for _ in 0..n {
+                // a count past the end of the text stops there
+                if e.word_end(to, big) == to {
+                    break;
+                }
                 // from here if the word goes on, else from the next character
                 let at_end = e.word_end(to, big) != to && e.next(to).map(|q| e.word_at(q, big).0 != e.word_at(to, big).0).unwrap_or(true);
                 from = if at_end { e.next(to).unwrap_or(to) } else { to };
@@ -189,19 +263,18 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             select_to(e, from.min(to), to);
         }
         ('b' | 'B', false) => {
+            // back to the start of a word (`a` is the character after `b`)
             let big = c == 'B';
-            let mut from = p;
-            let mut to = p;
-            for _ in 0..n {
-                from = to;
-                to = e.word_back(to, big);
-            }
-            select_to(e, from, to);
+            select_words(e, n, false, &|a, b| boundary(a, b, big) && (a == '\n' || !a.is_whitespace()));
         }
         ('x', false) => {
             // select the line; again, extend by a line
             let whole = e.anchor.is_some_and(|a| a.col == 0 && a <= e.cursor) && e.cursor.col >= e.len(e.cursor.line);
-            let (l1, l2) = if whole { (e.anchor.unwrap().line, (e.cursor.line + n).min(e.lines() - 1)) } else { (p.line, (p.line + n - 1).min(e.lines() - 1)) };
+            let (l1, l2) = if whole {
+                (e.anchor.unwrap().line, e.cursor.line.saturating_add(n).min(e.lines() - 1))
+            } else {
+                (p.line, p.line.saturating_add(n - 1).min(e.lines() - 1))
+            };
             e.anchor = Some(Pos::new(l1, 0));
             e.cursor = Pos::new(l2, e.len(l2));
         }
@@ -234,10 +307,16 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             } else {
                 e.checkpoint();
             }
-            let gone = e.delete(s, en);
-            if !alt {
-                let lw = gone.ends_with('\n') && s.col == 0;
-                e.copy(gone, lw);
+            if c == 'd' && !alt && s.col == 0 && en.col == 0 && en.line > s.line {
+                // whole lines are cut, so a nested block's title line put
+                // back moves the block (§5.2)
+                e.cut_lines(s.line, en.line - 1);
+            } else {
+                let gone = e.delete(s, en);
+                if !alt {
+                    let lw = gone.ends_with('\n') && s.col == 0;
+                    e.copy(gone, lw);
+                }
             }
             e.anchor = None;
             e.set_cursor(s);
@@ -259,25 +338,23 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             }
             e.checkpoint();
             let (s, en) = range(e);
-            let at = if clip.linewise {
-                if c == 'p' {
-                    if en.col == 0 && en.line > s.line { en } else { Pos::new((en.line + 1).min(e.lines()), 0) }
+            if clip.linewise {
+                // whole lines below the selection's last line or above its
+                // first, a nested block cut with its title line moving back
+                // with them (§5.2); the lines put in are selected
+                let first = if c == 'p' {
+                    let l = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
+                    e.put_clip_lines(l, true)
                 } else {
-                    Pos::new(s.line, 0)
-                }
-            } else if c == 'p' {
-                en
-            } else {
-                s
-            };
-            let end = if clip.linewise && at.line >= e.lines() {
-                let last = e.lines() - 1;
-                e.put_lines(last, &clip.text, true);
-                Pos::new(e.lines(), 0)
-            } else {
-                e.insert(at, &clip.text)
-            };
-            let at = if clip.linewise && at.line >= e.lines() { Pos::new(e.lines() - clip.text.matches('\n').count(), 0) } else { at };
+                    e.put_clip_lines(s.line, false)
+                };
+                let last = first + clip.text.matches('\n').count().max(1) - 1;
+                e.anchor = Some(Pos::new(first, 0));
+                e.cursor = Pos::new(last, e.len(last));
+                return out;
+            }
+            let at = if c == 'p' { en } else { s };
+            let end = e.insert(at, &clip.text);
             e.anchor = Some(at);
             e.cursor = e.prev(end).unwrap_or(end);
         }
@@ -301,28 +378,50 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             e.change_case(s, en, how);
         }
         ('>' | '<', false) => {
+            // a count of levels (two spaces each) in one change, as Helix does
             let (s, en) = range(e);
             let l2 = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
-            let a = e.anchor;
-            for _ in 0..n {
-                e.indent(s.line, l2, if c == '>' { 1 } else { -1 });
+            let width = n.saturating_mul(2);
+            if c == '>' && n > 1 && width.saturating_mul(l2 - s.line + 1) > MAX_TEXT {
+                e.message = Some("text too long".into());
+                return out;
             }
+            let a = e.anchor;
+            e.checkpoint();
+            for l in s.line..=l2 {
+                if c == '>' {
+                    if !e.line(l).is_empty() {
+                        e.insert(Pos::new(l, 0), &" ".repeat(width));
+                    }
+                } else {
+                    let k = e.line(l).chars().take(width).take_while(|ch| *ch == ' ').count();
+                    e.delete(Pos::new(l, 0), Pos::new(l, k));
+                }
+            }
+            e.cursor.col = if c == '>' { e.cursor.col + width } else { e.cursor.col.saturating_sub(width) };
             e.anchor = a;
         }
         ('J', false) => {
+            // the selected lines (a line selection ends on the last one's
+            // line end), or this one and the next
             let (s, en) = range(e);
-            let lines = en.line.saturating_sub(s.line).max(1);
+            let l2 = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
+            let lines = l2.saturating_sub(s.line).max(1);
             e.join(s.line, lines);
             e.anchor = None;
         }
         ('u', false) => {
             for _ in 0..n {
-                e.undo();
+                if !e.undo() {
+                    break;
+                }
             }
         }
         ('U', false) => {
             for _ in 0..n {
-                e.redo();
+                if !e.redo() {
+                    break;
+                }
             }
         }
         ('i', false) => {
@@ -380,7 +479,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 /// The key after `g`, `f`/`t`/`F`/`T`, `r` or `m`.
 fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
-    let n: usize = std::mem::take(&mut e.helix.count).parse().unwrap_or(1).max(1);
+    let n = take_count(&mut e.helix);
     let cur = e.cursor;
     match p {
         'g' => {
@@ -398,16 +497,17 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
             }
         }
         'f' | 't' | 'F' | 'T' => {
-            if let Some(to) = e.find_char(cur, c, p, n) {
+            // Helix's `t`/`T` look past a target next to the cursor
+            if let Some(to) = e.find_char(cur, c, p, n, true) {
                 select_to(e, cur, to);
             }
         }
         'r' => {
+            // each character where it is: line ends stay, and so does every
+            // line's tag (§5.2)
             let (s, en) = range(e);
             e.checkpoint();
-            let t: String = e.text(s, en).chars().map(|ch| if ch == '\n' { ch } else { c }).collect();
-            e.delete(s, en);
-            e.insert(s, &t);
+            e.map_chars(s, en, |_| c);
         }
         'm' => {
             // mi( / ma" …: select inside / around a pair

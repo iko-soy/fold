@@ -4,7 +4,8 @@
 //!
 //! Every change goes through `insert` and `delete`, which use the buffer's
 //! own line operations, so each line keeps (or inherits) its owning block and
-//! the blocks it touches become dirty (§5.2).
+//! the blocks it touches become dirty (§5.2); whole lines moved, or cut and
+//! put back, carry their tags (`move_lines`, `cut_lines`, `put_clip_lines`).
 
 mod helix;
 mod normal;
@@ -13,7 +14,7 @@ mod vim;
 use super::wrap::{self, Row};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fold_core::edit::{EditBuffer, EditLine, Owner};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A position: line, and column in characters.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Default)]
@@ -89,6 +90,9 @@ pub struct Outcome {
 pub struct Clip {
     pub text: String,
     pub linewise: bool,
+    /// Whole lines cut in this editor: each line's block, where that block's
+    /// title line was cut with it (§5.2: cut and paste moves its embed).
+    pub tags: Vec<Option<Owner>>,
 }
 
 /// An input line at the bottom of the editor: `:` commands or `/` search.
@@ -107,6 +111,8 @@ enum Group {
 struct Snap {
     lines: Vec<EditLine>,
     cursor: Pos,
+    /// The block each block's embed sits in (moving lines can change it).
+    parents: BTreeMap<Owner, Option<Owner>>,
 }
 
 pub struct Editor {
@@ -119,6 +125,9 @@ pub struct Editor {
     pub clip: Clip,
     pub cmdline: Option<CmdLine>,
     pub search: Option<String>,
+    /// Whether the last search went forward (`/`, Vim's `*`) or back (`?`,
+    /// `#`): Vim's `n` goes on the same way.
+    search_fwd: bool,
     /// A one-line message for the editor's status (a failed search, …).
     pub message: Option<String>,
     /// Lines on screen, for paging (set by the renderer).
@@ -145,7 +154,9 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(buf: EditBuffer, keys: Keys, clip: Clip) -> Editor {
+    pub fn new(buf: EditBuffer, keys: Keys, mut clip: Clip) -> Editor {
+        // tags name blocks of the buffer they were cut from
+        clip.tags.clear();
         let mode = match keys {
             Keys::Normal => Mode::Insert,
             Keys::Vim | Keys::Helix => Mode::Normal,
@@ -159,6 +170,7 @@ impl Editor {
             clip,
             cmdline: None,
             search: None,
+            search_fwd: true,
             message: None,
             page: 20,
             copied: None,
@@ -207,7 +219,13 @@ impl Editor {
 
     /// Text from the terminal's paste (bracketed paste): typed in as is.
     pub fn paste_text(&mut self, text: &str) {
+        if let Some(cl) = self.cmdline.as_mut() {
+            // an open `:` or `/` line is where typing goes: its first line
+            cl.text.push_str(text.lines().next().unwrap_or(""));
+            return;
+        }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.forget_goal();
         if self.mode != Mode::Insert && self.keys != Keys::Normal {
             // pasting in a normal mode puts the text after the cursor
             self.checkpoint();
@@ -223,9 +241,11 @@ impl Editor {
 
     // -------------------------------------------------------------- pointer
 
-    /// A click: the cursor goes there and any selection is dropped.
+    /// A click: the cursor goes there and any selection is dropped. Typing
+    /// after it is a new undo step.
     pub fn click(&mut self, p: Pos) {
         self.anchor = None;
+        self.group = Group::None;
         if matches!(self.mode, Mode::Visual { .. } | Mode::Select) {
             self.mode = Mode::Normal;
         }
@@ -260,6 +280,7 @@ impl Editor {
         if s == e {
             return;
         }
+        self.group = Group::None;
         self.anchor = Some(s);
         self.cursor = if self.keys == Keys::Normal { e } else { self.prev(e).unwrap_or(e) };
         if self.keys == Keys::Vim && self.mode == Mode::Normal {
@@ -366,7 +387,11 @@ impl Editor {
     }
 
     /// Insert text at a position; returns the position after it. New lines
-    /// belong to the block of the line they split (§5.2).
+    /// belong to the block of the line they follow (§5.2): the line they
+    /// split, or at column 0 the line above, so a line opened or pasted above
+    /// a nested block's title line is not written into that block. Text
+    /// starting with a line break at an empty line goes in below it (`o`,
+    /// `p`, Enter, Ctrl-D there), so those lines are that line's block's.
     pub fn insert(&mut self, at: Pos, s: &str) -> Pos {
         if s.is_empty() {
             return at;
@@ -383,6 +408,23 @@ impl Editor {
             self.buf.set_line(at.line, format!("{}{}{}", pre, s, post));
             return Pos::new(at.line, at.col + s.chars().count());
         }
+        let owner = self.buf.lines[at.line].owner;
+        let block_title = self.buf.owners.get(&owner).is_some_and(|i| i.parent.is_some())
+            && !self.buf.lines[..at.line].iter().any(|l| l.owner == owner);
+        if at.col == 0 && at.line > 0 && block_title && !(parts[0].is_empty() && post.is_empty()) {
+            // in front of a nested block's title line, whole lines go in
+            // after the line above, taking its tag: they are not the block's
+            // text; the title line keeps its own tag and only gains the last
+            // part
+            let mut l = at.line - 1;
+            for p in &parts[..parts.len() - 1] {
+                self.buf.insert_line(l, p.to_string());
+                l += 1;
+            }
+            let last = parts[parts.len() - 1];
+            self.buf.set_line(l + 1, format!("{}{}", last, post));
+            return Pos::new(l + 1, last.chars().count());
+        }
         self.buf.set_line(at.line, format!("{}{}", pre, parts[0]));
         let mut l = at.line;
         for p in &parts[1..parts.len() - 1] {
@@ -394,7 +436,15 @@ impl Editor {
         Pos::new(l + 1, last.chars().count())
     }
 
-    /// Delete `[a, b)`; returns what was deleted.
+    /// Delete `[a, b)`; returns what was deleted. A line deleted whole takes
+    /// its tag with it (§5.2): what is left of a joined line keeps the tag of
+    /// line `a`, unless the range starts at column 0 and leaves some of line
+    /// `b`, or ends at its start (short of the end of the text): then line
+    /// `b` is what is left. A range from column 0 through the end of line
+    /// `b` deletes lines `a` to `b` whole, and the empty line left keeps the
+    /// tag of a block whose title line was not among them (`kept`), so a
+    /// nested block's title line deleted that way deletes the block,
+    /// whichever end of the range it is at.
     pub fn delete(&mut self, a: Pos, b: Pos) -> String {
         let (a, mut b) = order(a, b);
         if b.line >= self.lines() {
@@ -407,12 +457,48 @@ impl Editor {
         self.changes += 1;
         let first = self.line(a.line).to_string();
         let last = self.line(b.line).to_string();
-        let joined = format!("{}{}", &first[..byte(&first, a.col)], &last[byte(&last, b.col)..]);
+        let rest = &last[byte(&last, b.col)..];
+        if a.col == 0 && a.line < b.line && (!rest.is_empty() || (b.col == 0 && b.line + 1 < self.lines())) {
+            for l in (a.line..b.line).rev() {
+                self.buf.delete_line(l);
+            }
+            self.buf.set_line(a.line, rest.to_string());
+            return gone;
+        }
+        let whole = (a.col == 0 && a.line < b.line).then(|| self.kept(a.line, b.line));
+        let joined = format!("{}{}", &first[..byte(&first, a.col)], rest);
         for l in (a.line + 1..=b.line).rev() {
             self.buf.delete_line(l);
         }
         self.buf.set_line(a.line, joined);
+        if let Some(o) = whole {
+            let was = std::mem::replace(&mut self.buf.lines[a.line].owner, o);
+            self.buf.mark_dirty(was);
+            self.buf.mark_dirty(o);
+        }
         gone
+    }
+
+    /// The block the empty line left where lines `l1..=l2` are deleted whole
+    /// belongs to: one whose title line (§5.2) is not among them — line
+    /// `l1`'s, else line `l2`'s, else the block they sit in.
+    fn kept(&self, l1: usize, l2: usize) -> Owner {
+        let titles = self.titles();
+        let gone = |o: Owner| {
+            self.buf.owners.get(&o).is_some_and(|i| i.parent.is_some())
+                && titles.get(&o).is_some_and(|t| (l1..=l2).contains(t))
+        };
+        let (mut o, last) = (self.buf.lines[l1].owner, self.buf.lines[l2].owner);
+        if gone(o) && !gone(last) {
+            return last;
+        }
+        while gone(o) {
+            match self.buf.owners.get(&o).and_then(|i| i.parent) {
+                Some(p) => o = p,
+                None => break,
+            }
+        }
+        o
     }
 
     /// Delete whole lines `l1..=l2`; returns them, each ending in `\n`.
@@ -461,11 +547,215 @@ impl Editor {
         Some(gone)
     }
 
+    // -------------------------------------------------------------- moving lines
+
+    /// Move whole lines `l1..=l2` one line down or up, past their neighbour.
+    /// Each line keeps its tag (§5.2), so moving a nested block's title line
+    /// moves its embed.
+    pub fn move_lines(&mut self, l1: usize, l2: usize, down: bool) {
+        let (lo, hi) = if down { (l1, l2 + 1) } else { (l1.wrapping_sub(1), l2) };
+        if (!down && l1 == 0) || hi >= self.buf.lines.len() {
+            return;
+        }
+        let titles = self.titles();
+        if down {
+            self.buf.lines[lo..=hi].rotate_right(1);
+        } else {
+            self.buf.lines[lo..=hi].rotate_left(1);
+        }
+        self.changes += 1;
+        for i in lo..=hi {
+            let o = self.buf.lines[i].owner;
+            self.buf.mark_dirty(o);
+        }
+        // where the line at `i` went: the neighbour to the far end, the rest by one
+        let to = |i: usize| {
+            if i < lo || i > hi {
+                i
+            } else if down {
+                if i == hi { lo } else { i + 1 }
+            } else if i == lo {
+                hi
+            } else {
+                i - 1
+            }
+        };
+        let mut moved = BTreeMap::new();
+        for (o, t) in titles {
+            if (lo..=hi).contains(&t) {
+                self.touch(o);
+            }
+            moved.insert(o, Some(to(t)));
+        }
+        self.settle(&moved);
+    }
+
+    /// Cut whole lines `l1..=l2` to the clipboard. A nested block whose title
+    /// line goes keeps its tag there, and its lines left behind go to the
+    /// block they now sit in, so pasting the lines moves the block (§5.2).
+    pub fn cut_lines(&mut self, l1: usize, l2: usize) {
+        let l2 = l2.min(self.lines() - 1);
+        let titles = self.titles();
+        let nested = |e: &Editor, o: Owner| e.buf.owners.get(&o).is_some_and(|i| i.parent.is_some());
+        let tags = (l1..=l2)
+            .map(|l| {
+                let o = self.buf.lines.get(l)?.owner;
+                (nested(self, o) && titles.get(&o).is_some_and(|&t| t >= l1)).then_some(o)
+            })
+            .collect();
+        let text = self.delete_lines(l1, l2);
+        let n = l2 + 1 - l1;
+        let left = titles
+            .into_iter()
+            .map(|(o, t)| (o, if t < l1 { Some(t) } else if t > l2 { Some(t - n) } else { None }))
+            .collect();
+        self.settle(&left);
+        self.set_clip(text, true, tags);
+    }
+
+    /// Put the clipboard's whole lines above or below line `l`; returns the
+    /// first new line. They take the tag of the line above (§5.2), except the
+    /// lines of a nested block cut with its title line and no longer in the
+    /// buffer: those go back with their own tag, so the block moves. A tag
+    /// the buffer does not know (it was re-rendered since the cut, §11.2)
+    /// names no block to write the line to, and is not put back.
+    pub fn put_clip_lines(&mut self, l: usize, below: bool) -> usize {
+        let clip = self.clip.clone();
+        let titles = self.titles();
+        let first = self.put_lines(l, &clip.text, below);
+        let n = clip.tags.len();
+        if n == 0 || clip.text.matches('\n').count() != n || first + n > self.buf.lines.len() {
+            return first;
+        }
+        let present: BTreeSet<Owner> =
+            self.buf.lines.iter().enumerate().filter(|(i, _)| *i < first || *i >= first + n).map(|(_, x)| x.owner).collect();
+        let mut back: BTreeMap<Owner, Option<usize>> = BTreeMap::new();
+        for (i, tag) in clip.tags.iter().enumerate() {
+            let Some(o) = tag.filter(|o| !present.contains(o) && self.buf.owners.contains_key(o)) else { continue };
+            let was = std::mem::replace(&mut self.buf.lines[first + i].owner, o);
+            self.buf.mark_dirty(was);
+            self.touch(o);
+            back.entry(o).or_insert(Some(first + i));
+        }
+        if !back.is_empty() {
+            for (o, t) in titles {
+                back.insert(o, Some(if t >= first { t + n } else { t }));
+            }
+            self.settle(&back);
+        }
+        first
+    }
+
+    /// The first line of each block: its title line (§5.2).
+    fn titles(&self) -> BTreeMap<Owner, usize> {
+        let mut t = BTreeMap::new();
+        for (i, l) in self.buf.lines.iter().enumerate() {
+            t.entry(l.owner).or_insert(i);
+        }
+        t
+    }
+
+    /// Whether block `o` is `outer` or nested in it.
+    fn within(&self, mut o: Owner, outer: Owner) -> bool {
+        while o != outer {
+            match self.buf.owners.get(&o).and_then(|i| i.parent) {
+                Some(p) => o = p,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// A block changed and moved: it is dirty, and so is the block its embed
+    /// sits in (§5.2).
+    fn touch(&mut self, o: Owner) {
+        self.buf.mark_dirty(o);
+        if let Some(p) = self.buf.owners.get(&o).and_then(|i| i.parent) {
+            self.buf.mark_dirty(p);
+        }
+    }
+
+    /// After lines moved with their tags, each goes with the block it now
+    /// sits in (§5.2): `retag_strays`, then each nested block's embed goes
+    /// to the block its title line sits in, by the rule the buffer's save
+    /// follows too (`EditBuffer::reparent`).
+    fn settle(&mut self, titles: &BTreeMap<Owner, Option<usize>>) {
+        self.retag_strays(titles);
+        let now = self.titles();
+        self.buf.reparent(&now);
+    }
+
+    /// A line of a nested block that is no longer contiguous with the
+    /// block's title line (at `titles`, or gone) is re-tagged to the block it
+    /// now sits in, that of the line above (§5.2).
+    fn retag_strays(&mut self, titles: &BTreeMap<Owner, Option<usize>>) {
+        let n = self.buf.lines.len();
+        for (&o, &title) in titles {
+            if self.buf.owners.get(&o).and_then(|i| i.parent).is_none() {
+                continue;
+            }
+            // the title line, then the lines of the block and the blocks in it
+            let (t, mut end) = match title {
+                Some(t) => (t, t + 1),
+                None => (n, n),
+            };
+            while end < n && self.within(self.buf.lines[end].owner, o) {
+                end += 1;
+            }
+            for i in 1..n {
+                if (i < t || i >= end) && self.buf.lines[i].owner == o {
+                    let above = self.buf.lines[i - 1].owner;
+                    self.buf.lines[i].owner = above;
+                    self.buf.mark_dirty(above);
+                    self.buf.mark_dirty(o);
+                }
+            }
+        }
+    }
+
+    /// The block each block's embed sits in.
+    fn parents(&self) -> BTreeMap<Owner, Option<Owner>> {
+        self.buf.owners.iter().map(|(&o, i)| (o, i.parent)).collect()
+    }
+
+    /// What splice writes for each block (§5.2): its own lines, and the
+    /// first line of each block nested in it, where that block's embed goes.
+    fn splice_views(lines: &[EditLine], parents: &BTreeMap<Owner, Option<Owner>>) -> BTreeMap<Owner, Vec<(Owner, String)>> {
+        let mut views: BTreeMap<Owner, Vec<(Owner, String)>> = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        for l in lines {
+            views.entry(l.owner).or_default().push((l.owner, l.text.clone()));
+            let mut o = l.owner;
+            while let Some(p) = parents.get(&o).copied().flatten() {
+                if seen.insert(o) {
+                    views.entry(p).or_default().push((o, l.text.clone()));
+                }
+                o = p;
+            }
+        }
+        views
+    }
+
     // -------------------------------------------------------------- clipboard
 
     pub fn copy(&mut self, text: String, linewise: bool) {
+        self.set_clip(text, linewise, Vec::new());
+    }
+
+    /// Fill the clipboard. The blocks whose title lines it holds are in
+    /// transit until they are pasted back or the clipboard is replaced: the
+    /// buffer holds them, so a save meanwhile does not delete them (§5.2).
+    fn set_clip(&mut self, text: String, linewise: bool, tags: Vec<Option<Owner>>) {
         self.copied = Some(text.clone());
-        self.clip = Clip { text, linewise };
+        self.buf.hold(tags.iter().flatten().copied().collect());
+        self.clip = Clip { text, linewise, tags };
+    }
+
+    /// Leaving the editor: the clipboard keeps its text, but a block whose
+    /// title line was cut and not pasted back is deleted now (§5.2).
+    pub fn release_clip(&mut self) {
+        self.clip.tags.clear();
+        self.buf.hold(Vec::new());
     }
 
     fn after_cursor(&self) -> Pos {
@@ -477,7 +767,7 @@ impl Editor {
     /// Remember the text before a change. Consecutive typing is one step.
     pub fn checkpoint(&mut self) {
         self.redo.clear();
-        self.undo.push(Snap { lines: self.buf.lines.clone(), cursor: self.cursor });
+        self.undo.push(Snap { lines: self.buf.lines.clone(), cursor: self.cursor, parents: self.parents() });
         self.group = Group::None;
     }
 
@@ -508,20 +798,25 @@ impl Editor {
         true
     }
 
-    /// Put a snapshot back; every block whose text differs is dirty again.
+    /// Put a snapshot back; every block whose text differs is dirty again,
+    /// and so is every block a nested block moved in.
     fn restore(&mut self, s: Snap) -> Snap {
-        let cur = Snap { lines: std::mem::take(&mut self.buf.lines), cursor: self.cursor };
-        let text_of = |lines: &[EditLine], o: Owner| -> Vec<String> {
-            lines.iter().filter(|l| l.owner == o).map(|l| l.text.clone()).collect()
-        };
-        let owners: BTreeSet<Owner> = cur.lines.iter().chain(s.lines.iter()).map(|l| l.owner).collect();
-        for o in owners {
-            if text_of(&cur.lines, o) != text_of(&s.lines, o) {
-                self.buf.mark_dirty(o);
+        let cur = Snap { lines: std::mem::take(&mut self.buf.lines), cursor: self.cursor, parents: self.parents() };
+        let was = Self::splice_views(&cur.lines, &cur.parents);
+        let now = Self::splice_views(&s.lines, &s.parents);
+        for o in was.keys().chain(now.keys()) {
+            if was.get(o) != now.get(o) {
+                self.buf.mark_dirty(*o);
             }
         }
         self.buf.lines = s.lines;
+        for (o, p) in s.parents {
+            if let Some(i) = self.buf.owners.get_mut(&o) {
+                i.parent = p;
+            }
+        }
         self.cursor = s.cursor;
+        self.forget_goal();
         self.anchor = None;
         self.changes += 1;
         self.group = Group::None;
@@ -551,6 +846,12 @@ impl Editor {
 
     pub fn set_cursor(&mut self, p: Pos) {
         self.cursor = p;
+        self.forget_goal();
+    }
+
+    /// Up and down aim from where the cursor is now, not for the column an
+    /// earlier vertical move aimed for (after typing, undo, …).
+    fn forget_goal(&mut self) {
         self.want_col = None;
         self.want_x = None;
     }
@@ -567,18 +868,9 @@ impl Editor {
             let mut fence: Option<(char, usize)> = None;
             for l in 0..self.lines() {
                 let text = self.line(l);
-                let t = text.trim_start();
-                let fc = t.chars().next().filter(|c| *c == '`' || *c == '~');
-                let n = fc.map(|c| t.chars().take_while(|x| *x == c).count()).unwrap_or(0);
-                let is_fence = n >= 3;
-                let code = fence.is_some() && !is_fence;
-                if is_fence {
-                    fence = match fence {
-                        Some((c, m)) if Some(c) == fc && n >= m => None,
-                        None => Some((fc.unwrap(), n)),
-                        keep => keep,
-                    };
-                }
+                // fences as the parser reads them (§3.3); the fences
+                // themselves are not code
+                let code = !fold_core::parse::fence_transition(text, &mut fence) && fence.is_some();
                 codes.push(code);
                 rows.push(match self.wrap_cols {
                     Some(cols) => wrap::wrap(text, cols, code),
@@ -761,19 +1053,23 @@ impl Editor {
     }
 
     /// Find a character on the cursor's line: `f` (forward, on it), `t`
-    /// (forward, before it), `F`, `T`.
-    pub fn find_char(&self, from: Pos, c: char, kind: char, count: usize) -> Option<Pos> {
+    /// (forward, before it), `F`, `T`. A `t`/`T` target right next to the
+    /// cursor is found where the cursor is, as in Vim, unless `skip`: then
+    /// the search starts past it, as Helix's `t` and Vim's `;` do.
+    pub fn find_char(&self, from: Pos, c: char, kind: char, count: usize, skip: bool) -> Option<Pos> {
         let line: Vec<char> = self.line(from.line).chars().collect();
         let mut col = from.col;
-        for _ in 0..count.max(1) {
+        for k in 0..count.max(1) {
+            // after the first, each step starts past the target it found
+            let past = usize::from(skip || k > 0);
             col = match kind {
                 'f' | 't' => {
-                    let start = if kind == 't' { col + 2 } else { col + 1 };
+                    let start = if kind == 't' { col + 1 + past } else { col + 1 };
                     let i = (start.min(line.len())..line.len()).find(|&i| line[i] == c)?;
                     if kind == 't' { i - 1 } else { i }
                 }
                 _ => {
-                    let end = if kind == 'T' { col.saturating_sub(1) } else { col };
+                    let end = if kind == 'T' { col.saturating_sub(past) } else { col };
                     let i = (0..end).rev().find(|&i| line[i] == c)?;
                     if kind == 'T' { i + 1 } else { i }
                 }
@@ -909,27 +1205,28 @@ impl Editor {
     /// Typing: replaces a selection, one undo step per run of typing.
     pub fn type_char(&mut self, c: char) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
         }
         self.cursor = self.insert(self.cursor, &c.to_string());
-        self.want_col = None;
     }
 
     /// Enter: a new line, keeping the current line's indentation.
     pub fn newline(&mut self) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
         }
         let indent: String = self.line(self.cursor.line).chars().take_while(|c| *c == ' ').collect();
         let indent: String = indent.chars().take(self.cursor.col).collect();
         self.cursor = self.insert(self.cursor, &format!("\n{}", indent));
-        self.want_col = None;
     }
 
     pub fn backspace(&mut self) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
             return;
@@ -943,11 +1240,11 @@ impl Editor {
             self.delete(start, self.cursor);
             self.cursor = start;
         }
-        self.want_col = None;
     }
 
     pub fn delete_forward(&mut self) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
             return;
@@ -960,6 +1257,7 @@ impl Editor {
     /// Delete back to the start of the word (Ctrl-W, Alt-Backspace).
     pub fn delete_word_back(&mut self) {
         self.checkpoint();
+        self.forget_goal();
         let start = self.word_back(self.cursor, false);
         self.delete(start, self.cursor);
         self.cursor = start;
@@ -998,22 +1296,40 @@ impl Editor {
         }
     }
 
-    /// Change the case of `[a, b)`: `u` lower, `U` upper, `~` swap.
-    pub fn change_case(&mut self, a: Pos, b: Pos, how: char) {
-        let t = self.text(a, b);
-        let n: String = t
-            .chars()
-            .map(|c| match how {
-                'u' => c.to_lowercase().next().unwrap_or(c),
-                'U' => c.to_uppercase().next().unwrap_or(c),
-                _ if c.is_uppercase() => c.to_lowercase().next().unwrap_or(c),
-                _ => c.to_uppercase().next().unwrap_or(c),
-            })
-            .collect();
-        if n != t {
-            self.delete(a, b);
-            self.insert(a, &n);
+    /// Replace each character of `[a, b)` by `f` of it, one line at a time:
+    /// line ends stay where they are and every line keeps its tag (§5.2).
+    pub fn map_chars(&mut self, a: Pos, b: Pos, f: impl Fn(char) -> char) {
+        let (a, mut b) = order(a, b);
+        if b.line >= self.lines() {
+            b = Pos::new(self.lines() - 1, self.len(self.lines() - 1));
         }
+        for l in a.line..=b.line {
+            let s = if l == a.line { a.col } else { 0 };
+            let e = if l == b.line { b.col } else { usize::MAX };
+            let new: String = self.line(l).chars().enumerate().map(|(i, c)| if i >= s && i < e { f(c) } else { c }).collect();
+            if new != self.line(l) {
+                self.changes += 1;
+                self.buf.set_line(l, new);
+            }
+        }
+    }
+
+    /// Change the case of `[a, b)`: `u` lower, `U` upper, `~` swap. A
+    /// character whose other case is not one character ('ß' is "SS") stays
+    /// as it is, as in Vim.
+    pub fn change_case(&mut self, a: Pos, b: Pos, how: char) {
+        fn one(c: char, mut other: impl Iterator<Item = char>) -> char {
+            match (other.next(), other.next()) {
+                (Some(x), None) => x,
+                _ => c,
+            }
+        }
+        self.map_chars(a, b, |c| match how {
+            'u' => one(c, c.to_lowercase()),
+            'U' => one(c, c.to_uppercase()),
+            _ if c.is_uppercase() => one(c, c.to_lowercase()),
+            _ => one(c, c.to_uppercase()),
+        });
     }
 
     // -------------------------------------------------------------- search
@@ -1026,11 +1342,20 @@ impl Editor {
         let pat = pat.to_lowercase();
         let n = self.lines();
         let hits = |l: usize| -> Vec<usize> {
-            let line = self.line(l).to_lowercase();
+            // a character can lowercase to several ('İ' to "i̇"): count
+            // columns in the line itself, not in its lowercase
+            let mut line = String::new();
+            let mut col_of = Vec::new();
+            for (col, c) in self.line(l).chars().enumerate() {
+                for lc in c.to_lowercase() {
+                    line.push(lc);
+                    col_of.push(col);
+                }
+            }
             let mut out = Vec::new();
             let mut start = 0;
             while let Some(i) = line[start..].find(&pat) {
-                out.push(line[..start + i].chars().count());
+                out.push(col_of[line[..start + i].chars().count()]);
                 start += i + pat.len().max(1);
             }
             out
@@ -1053,7 +1378,15 @@ impl Editor {
     /// Jump to the next match of the last search.
     pub fn search_next(&mut self, fwd: bool) -> Option<Pos> {
         let pat = self.search.clone()?;
-        match self.find(&pat, self.cursor, fwd) {
+        // Helix searches on from the selection's end, or back from its start,
+        // so the match it has selected is not found again
+        let from = match self.anchor {
+            Some(a) if self.keys == Keys::Helix => {
+                if fwd { a.max(self.cursor) } else { a.min(self.cursor) }
+            }
+            _ => self.cursor,
+        };
+        match self.find(&pat, from, fwd) {
             Some(p) => {
                 self.set_cursor(p);
                 Some(p)
@@ -1099,6 +1432,7 @@ impl Editor {
                     self.search = Some(t.to_string());
                 }
                 let fwd = cl.kind == '/';
+                self.search_fwd = fwd;
                 if let Some(p) = self.search_next(fwd) {
                     if self.keys == Keys::Helix || self.keys == Keys::Normal {
                         // select the match

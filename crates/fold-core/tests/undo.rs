@@ -82,3 +82,24 @@ fn undo_and_redo_of_make_block_create_and_remove_the_file() {
     assert_eq!(count(), with_block);
     assert!(v.find_by_path(&["A".into(), "B".into()]).is_some());
 }
+
+/// A verb computes what it writes from the parsed files. When a sync has
+/// changed a file since and the change is not reloaded yet (the watcher's
+/// debounce), the verb refuses rather than write its stale text back over
+/// the change, which undo could not bring back either (§1 principle 4,
+/// §11.2).
+#[test]
+fn a_verb_refuses_to_overwrite_a_change_not_reloaded_yet() {
+    let (d, mut v) = vault_with("- [ ] a\n- [ ] b\n");
+    let synced = "- [ ] a\n- [ ] b\n- [ ] from phone\n";
+    std::fs::write(d.path().join("root.md"), synced).unwrap();
+    let a = v.find_by_path(&["a".into()]).unwrap();
+    let err = ops::toggle_task(&mut v, a).unwrap_err();
+    assert!(err.to_string().contains("root.md"), "{}", err);
+    assert_eq!(read(&d, "root.md"), synced);
+    // once reloaded, it runs on what is there
+    v.reload().unwrap();
+    let a = v.find_by_path(&["a".into()]).unwrap();
+    ops::toggle_task(&mut v, a).unwrap();
+    assert_eq!(read(&d, "root.md"), "- [x] a\n- [ ] b\n- [ ] from phone\n");
+}

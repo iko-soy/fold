@@ -136,13 +136,6 @@ fn capture_inner(
     task: bool,
     target: Option<NRef>,
 ) -> std::io::Result<NRef> {
-    let dest = match target {
-        Some(t) => t,
-        None => {
-            let inbox = find_or_create_inbox(vault)?;
-            find_or_create_day(vault, inbox)?
-        }
-    };
     // The first line is the title; further lines are the item's body, so a
     // captured document (`capture < file.md`) nests under the item instead
     // of injecting structure beside it (§4.1): its headings are pushed below
@@ -154,14 +147,17 @@ fn capture_inner(
     } else {
         first.trim().to_string()
     };
-    let mut line = format!("- {}", title);
+    // refused before the inbox or its day is created
+    let mut line = item_line(&title)?;
+    let dest = match target {
+        Some(t) => write_target(&vault.tree, t)?,
+        None => {
+            let inbox = find_or_create_inbox(vault)?;
+            find_or_create_day(vault, inbox)?
+        }
+    };
     if !rest.trim().is_empty() {
-        let dn = vault.tree.node(dest);
-        let item_indent = if dn.kind == Kind::Item {
-            vault.tree.indent(dest) + 2
-        } else {
-            vault.tree.indent(dest)
-        };
+        let item_indent = child_indent(&vault.tree, dest);
         let level = vault.tree.level(dest) as isize;
         let body = shift_lines(rest.trim_end(), level, item_indent as isize + 2);
         line.push('\n');
@@ -188,9 +184,13 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
             return Ok(c);
         }
     }
-    // `## <today>` as the last child of Inbox (§7)
+    // `## <today>` as the last child of Inbox (§7), at its child indent: an
+    // Inbox respelled as an item is still the inbox (§3.1); no deeper than
+    // a day before it as written, which would take it as its child
+    let last = vault.tree.raw_children(inbox).last().copied();
     let level = vault.tree.level(inbox) + 1;
-    let indent = vault.tree.indent(inbox);
+    let level = written_level(&vault.tree, last).map_or(level, |w| level.min(w));
+    let indent = child_indent(&vault.tree, inbox);
     let heading = format!(
         "{}{} {}",
         " ".repeat(indent),
@@ -282,20 +282,22 @@ fn append_child_line(
     line: &str,
     section_ok: bool,
 ) -> std::io::Result<NRef> {
+    // under the node an embed stands for: an embed line has no children
+    // in its file (§6.2)
+    let parent = write_target(&vault.tree, parent)?;
     let parent_key = vault.key_of(parent);
     let node = vault.tree.node(parent);
     let file = parent.0;
     // Items under a section sit at the section's own indent; items under an
     // item nest one level deeper (§3.1, §4.10).
-    let indent = if node.kind == Kind::Item {
-        vault.tree.indent(parent) + 2
-    } else {
-        vault.tree.indent(parent)
-    };
+    let indent = child_indent(&vault.tree, parent);
     let text = vault.tree.files[file].text.clone();
     let kids = vault.tree.raw_children(parent);
     let is_section = |r: NRef| vault.tree.node(r).kind == Kind::Section;
     let first_section = kids.iter().position(|&c| is_section(c));
+    // §4.2 puts one blank line between a node's body and its first child:
+    // an item with no body has its first child right under its title
+    let bare_item = node.kind == Kind::Item && node.body_lines(&text).is_empty();
     let index;
     match (first_section, section_ok) {
         (Some(_), true) => {
@@ -307,10 +309,12 @@ fn append_child_line(
                 *kids.iter().rev().find(|&&c| is_section(c)).unwrap()
             };
             let title = line.trim_start().strip_prefix("- ").unwrap_or(line.trim_start());
+            // at the last section's written indent, which its parent
+            // reaches, and written level, which keeps it beside it
             let heading = format!(
                 "{}{} {}",
-                " ".repeat(vault.tree.indent(last)),
-                "#".repeat(vault.tree.level(last)),
+                " ".repeat(vault.tree.node(last).indent),
+                "#".repeat(written_level(&vault.tree, Some(last)).unwrap_or(1)),
                 title
             );
             let pos = trimmed_end(&text, node.span);
@@ -325,7 +329,7 @@ fn append_child_line(
                 pos -= 1;
             }
             let prev_is_item = fs > 0 && !is_section(kids[fs - 1]);
-            let sep = if prev_is_item { "" } else { "\n" };
+            let sep = if prev_is_item || (fs == 0 && bare_item) { "" } else { "\n" };
             vault.write_span(
                 file,
                 Span { start: pos, end: pos },
@@ -337,8 +341,8 @@ fn append_child_line(
             let line_indented = format!("{}{}", " ".repeat(indent), line);
             let pos = trimmed_end(&text, node.span);
             // blank line before unless the previous sibling is also an item
-            // (tight list)
-            let prev_is_item = kids.last().map(|&c| !is_section(c)).unwrap_or(false);
+            // (tight list), or there is none under a bare item
+            let prev_is_item = kids.last().map(|&c| !is_section(c)).unwrap_or(bare_item);
             let sep = if prev_is_item { "\n" } else { "\n\n" };
             insert_at(vault, file, pos, sep, &line_indented)?;
             index = kids.len();
@@ -372,7 +376,7 @@ pub fn toggle_task(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
 
 /// Toggle task-ness itself (§10.3 `t`).
 pub fn toggle_taskness(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
-    let r = vault.tree.resolved_child(r);
+    let r = write_target(&vault.tree, r)?;
     let state = match vault.tree.node(r).task {
         Some(_) => None,
         None => Some(TaskState::Open),
@@ -387,8 +391,11 @@ pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io
     let n = vault.tree.node(r);
     let is_block = n.is_block();
     let file = r.0;
-    let ts = n.title_span;
-    let line = ts.text(&vault.tree.files[file].text).to_string();
+    // a setext title has no marker to put the checkbox after: it is
+    // rewritten as an ATX heading, underline and all (§4.2)
+    let (ts, line) = setext_as_atx(&vault.tree, r).unwrap_or_else(|| {
+        (n.title_span, n.title_span.text(&vault.tree.files[file].text).to_string())
+    });
     let mark = |st: TaskState| match st {
         TaskState::Open => "[ ]",
         TaskState::Done => "[x]", // also rewrites `[X]` / `[-]`
@@ -407,7 +414,9 @@ pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io
         },
         (None, None) => line.clone(),
     };
-    if new_line != line {
+    // `- [ ] ---` unchecked is `- ---`, a thematic break (§4.4)
+    not_a_break(&new_line)?;
+    if new_line != ts.text(&vault.tree.files[file].text) {
         vault.write_span(file, ts, &new_line)?;
     }
     if is_block {
@@ -440,6 +449,26 @@ fn marker_end(line: &str) -> Option<usize> {
     }
 }
 
+/// A setext section's title (§4.2: read, converted on write) as an ATX
+/// heading at its written level and indent, with the span it replaces: the
+/// title line and its underline, the line after it. `None` for any other
+/// node. The written level keeps what nests under the heading unchanged.
+fn setext_as_atx(tree: &crate::tree::Tree, r: NRef) -> Option<(Span, String)> {
+    let n = tree.node(r);
+    let text = tree.text_of(r);
+    let line = n.title_span.text(text);
+    let t = line.trim_start();
+    // every other section's title line is an ATX heading (or a heading embed)
+    if n.kind != Kind::Section || atx_hashes(t).is_some() {
+        return None;
+    }
+    let under = text[n.title_span.end..].find('\n').map_or(text.len(), |i| n.title_span.end + i + 1);
+    let end = text[under..].find('\n').map_or(text.len(), |i| under + i);
+    let indent = &line[..line.len() - t.len()];
+    let atx = format!("{}{} {}", indent, "#".repeat(n.level.unwrap_or(1)), n.title);
+    Some((Span { start: n.title_span.start, end }, atx))
+}
+
 /// Byte range of the checkbox right after the marker (`[ ]`, `[x]`, `[X]`,
 /// `[-]`) plus the space after it (§4.2). Checkbox-like text later in the
 /// title is title text.
@@ -468,8 +497,7 @@ pub fn set_frontmatter_key(
     value: Option<&str>,
 ) -> std::io::Result<()> {
     let f = vault.tree.files[file].clone();
-    let root_node = f.nodes[f.root_node].children.get(0).copied();
-    let block = root_node.and_then(|rn| f.nodes[rn].block.clone());
+    let block = file_block(&f).cloned();
     let (mut raw, fm_span) = match &block {
         Some(b) => (b.frontmatter_raw.clone(), b.frontmatter_span),
         None => (String::new(), None),
@@ -525,14 +553,18 @@ pub fn set_frontmatter_key(
     vault.write_file_text(file, &new_text)
 }
 
+/// The block whose frontmatter a file holds: a block file's root, its
+/// first node (§4.9); root.md's, the implicit Root, whose frontmatter holds
+/// vault-level properties.
+fn file_block(f: &crate::parse::ParsedFile) -> Option<&crate::parse::Block> {
+    let root = &f.nodes[f.root_node];
+    root.block.as_ref().or_else(|| f.nodes[*root.children.first()?].block.as_ref())
+}
+
 /// All top-level keys of a block's frontmatter, for the property editor.
 pub fn frontmatter_lines(vault: &Vault, file: usize) -> Vec<(String, String, bool)> {
     // (key, value, editable) — unknown-structure lines are read-only (§10.6)
-    let f = &vault.tree.files[file];
-    let Some(&rn) = f.nodes[f.root_node].children.first() else {
-        return Vec::new();
-    };
-    let Some(b) = &f.nodes[rn].block else {
+    let Some(b) = file_block(&vault.tree.files[file]) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -563,22 +595,25 @@ pub fn delete_subtree(vault: &mut Vault, r: NRef) -> std::io::Result<String> {
     if n.is_block() || n.is_embed() {
         let target = if n.is_embed() { vault.tree.resolved_child(r) } else { r };
         if target == r && n.is_embed() {
-            // broken embed: just the line
-            let span = n.span;
+            // broken embed: just the line. So for a second embed of a
+            // block, which renders as broken (§6.2): the block, and the
+            // embed it is stitched in at, are not this line's
+            let duplicate = n.embed.as_ref().is_some_and(|id| vault.tree.block_by_id(id).is_some());
+            let span = embed_line_span(&vault.tree, r);
             remove_span_with_separator(vault, r.0, span)?;
-            return Ok("broken embed removed".into());
+            return Ok(if duplicate { "duplicate embed removed" } else { "broken embed removed" }.into());
         }
+        // the block itself first: it leaves by its own embed
         let ids = nested_block_ids(vault, target);
         let path = vault.tree.node(target).block.as_ref().unwrap().path.clone();
-        for id in ids {
-            trash_block(vault, &id)?;
+        if let Some((own, nested)) = ids.split_first() {
+            trash_block(vault, own)?;
+            trash_nested(vault, nested)?;
         }
         return Ok(format!("block {:?} trashed", path));
     }
     let ids = plain_remove(vault, r)?;
-    for id in ids {
-        trash_block(vault, &id)?;
-    }
+    trash_nested(vault, &ids)?;
     Ok("subtree trashed".into())
 }
 
@@ -606,23 +641,47 @@ fn plain_remove(vault: &mut Vault, r: NRef) -> std::io::Result<Vec<Id>> {
     Ok(ids)
 }
 
-/// Remove a block's embed line (if it is still anywhere) and move its file to
-/// the trash.
+/// Remove the embed line a block is stitched in at (if it is still
+/// anywhere) and move its file to the trash.
 fn trash_block(vault: &mut Vault, id: &Id) -> std::io::Result<()> {
-    let embed = vault.tree.files.iter().enumerate().find_map(|(fi, f)| {
-        f.nodes
-            .iter()
-            .position(|nd| nd.embed.as_ref() == Some(id))
-            .map(|ni| (fi, ni))
-    });
-    if let Some(e) = embed {
-        let span = vault.tree.node(e).span;
+    if let Some(e) = vault.tree.embed_of(id) {
+        let span = embed_line_span(&vault.tree, e);
         remove_span_with_separator(vault, e.0, span)?;
     }
     if let Some(b) = vault.tree.block_by_id(id) {
         vault.trash_file(b.0)?;
     }
     Ok(())
+}
+
+/// Move the files of blocks nested in a removed subtree to the trash. Their
+/// embeds went with the lines and files that held them: an embed of one
+/// still elsewhere is a second embed, a line of its own (§6.2), and stays.
+fn trash_nested(vault: &mut Vault, ids: &[Id]) -> std::io::Result<()> {
+    for id in ids {
+        if let Some(b) = vault.tree.block_by_id(id) {
+            vault.trash_file(b.0)?;
+        }
+    }
+    Ok(())
+}
+
+/// The part of an embed's span that is the embed itself: its line and the
+/// blank lines after it. Lines nested under an embed are a diagnostic
+/// (§4.7) that the reading pane shows in the parent, so they stay there
+/// when the embed goes: nothing else holds a copy of them (§11.5).
+fn embed_line_span(tree: &crate::tree::Tree, e: NRef) -> Span {
+    let n = tree.node(e);
+    let text = tree.text_of(e);
+    let end = n.span.end.min(text.len());
+    let mut at = text[n.title_span.end..end].find('\n').map_or(end, |i| n.title_span.end + i + 1);
+    for l in text[at..end].split_inclusive('\n') {
+        if !l.trim().is_empty() {
+            break;
+        }
+        at += l.len();
+    }
+    Span { start: n.span.start, end: at }
 }
 
 /// The byte range to cut when removing `span`: the node plus whatever blank
@@ -704,11 +763,7 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
         frontmatter_span: None,
     };
     let pf = crate::parse::parse_file("clip.md", text, 0, Some(block));
-    let tree = crate::tree::Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    };
+    let tree = crate::tree::Tree::new(vec![pf]);
     let mut out = String::new();
     let kids = tree.resolved_children(tree.root);
     for (i, k) in kids.iter().enumerate() {
@@ -720,11 +775,9 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
         let t = first.trim_start();
         // render(_, 1) writes a section root at level 1 and an item root in
         // a section of level 1 (its nested sections at 2)
-        let ld = if t.starts_with('#') {
-            let cur_level = t.chars().take_while(|&c| c == '#').count();
-            parent_level as isize + 1 - cur_level as isize
-        } else {
-            parent_level as isize - 1
+        let ld = match atx_hashes(t) {
+            Some(cur_level) => parent_level as isize + 1 - cur_level as isize,
+            None => parent_level as isize - 1,
         };
         let cur_indent = first.len() - t.len();
         let id = indent as isize - cur_indent as isize;
@@ -740,26 +793,33 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
 }
 
 /// Shift every line of a rendered document by (level_delta, indent_delta).
+/// Fenced code is shifted too, so it stays in its node's region (§3.3), but
+/// never re-levelled.
 fn shift_lines(raw: &str, level_delta: isize, indent_delta: isize) -> String {
     let mut out = String::new();
     let mut fence: Option<(char, usize)> = None;
     for line in raw.split_inclusive('\n') {
         let l = line.strip_suffix('\n').unwrap_or(line);
         let nl = if line.ends_with('\n') { "\n" } else { "" };
-        if fence_transition(l, &mut fence) || fence.is_some() {
-            out.push_str(l);
-            out.push_str(nl);
-            continue;
-        }
+        let in_code = fence_transition(l, &mut fence) || fence.is_some();
         let trimmed = l.trim_start();
         if trimmed.is_empty() {
             out.push_str(nl);
             continue;
         }
+        if in_code {
+            // only the leading spaces change: a tab, or any indentation
+            // inside the code, stays as written
+            let code = l.trim_start_matches(' ');
+            let cur_indent = l.len() - code.len();
+            out.push_str(&" ".repeat((cur_indent as isize + indent_delta).max(0) as usize));
+            out.push_str(code);
+            out.push_str(nl);
+            continue;
+        }
         let cur_indent = l.len() - trimmed.len();
         let new_indent = (cur_indent as isize + indent_delta).max(0) as usize;
-        if trimmed.starts_with('#') {
-            let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if let Some(hashes) = atx_hashes(trimmed) {
             let new_level = (hashes as isize + level_delta).max(1) as usize;
             out.push_str(&" ".repeat(new_indent));
             out.push_str(&"#".repeat(new_level));
@@ -774,35 +834,22 @@ fn shift_lines(raw: &str, level_delta: isize, indent_delta: isize) -> String {
     out
 }
 
+/// The level of an ATX heading line, given without its indent: `#`+ then a
+/// space or the end of the line (§4.2). `#tag` is text, as the parser reads it.
+fn atx_hashes(trimmed: &str) -> Option<usize> {
+    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+    let after = &trimmed[hashes..];
+    (hashes > 0 && (after.is_empty() || after.starts_with(' '))).then_some(hashes)
+}
+
 fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
-    let t = raw.trim_start();
-    let first = match t.chars().next() {
-        Some(c) if c == '`' || c == '~' => c,
-        _ => return false,
-    };
-    let count = t.chars().take_while(|&c| c == first).count();
-    if count < 3 {
-        return false;
-    }
-    match open {
-        None => {
-            *open = Some((first, count));
-            true
-        }
-        Some((c, n)) => {
-            if *c == first && count >= *n {
-                *open = None;
-                true
-            } else {
-                false
-            }
-        }
-    }
+    // fences as the parser reads them, so shifting re-levels what it does
+    crate::parse::fence_transition(raw, open)
 }
 
 /// Refile: move a subtree under a new parent as its last child (§6.5).
 pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<bool> {
-    let dest = vault.tree.resolved_child(dest);
+    let dest = write_target(&vault.tree, dest)?;
     let n = vault.tree.node(r);
     // guard: cannot refile into own subtree — ancestry followed through
     // embeds, so a destination inside a nested block counts too
@@ -816,7 +863,7 @@ pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<bool> {
         }
         guard += 1;
         if guard > 10_000 {
-            break; // embed cycle: a diagnostic elsewhere
+            break; // embed cycle: `check` reports it (§6.2)
         }
         anc = resolved_parent(&vault.tree, a);
     }
@@ -858,7 +905,15 @@ pub fn move_node(vault: &mut Vault, r: NRef, target: NRef, drop: Drop) -> std::i
                 return Err(io_err("cannot move a node into itself"));
             }
             let moving = stand_in(&vault.tree, r);
-            let idx = vault.tree.raw_children(parent).iter().position(|&k| k == t).unwrap_or(0);
+            // the target's index among the children `place` sees: without
+            // the moving node, which may come before it
+            let idx = vault
+                .tree
+                .raw_children(parent)
+                .into_iter()
+                .filter(|&k| k != moving)
+                .position(|k| k == t)
+                .unwrap_or(0);
             let rendered = render(&vault.tree, moving, 1, false);
             let shifted =
                 shift_document(&rendered, vault.tree.level(parent), child_indent(&vault.tree, parent));
@@ -900,12 +955,29 @@ fn stand_in(tree: &crate::tree::Tree, r: NRef) -> NRef {
     r
 }
 
+/// The node a verb writes into at `r`: a block's own embed is the block
+/// (§4.7). An embed that resolves to nothing, broken or a second embed of
+/// a block (§6.2), is only a line of the file that holds it: it has no
+/// checkbox, properties or children of its own, so the verb is refused
+/// rather than writing them into that file.
+fn write_target(tree: &crate::tree::Tree, r: NRef) -> std::io::Result<NRef> {
+    let t = tree.resolved_child(r);
+    if tree.node(t).is_embed() {
+        return Err(io_err("a broken or duplicate embed has no node to write to"));
+    }
+    Ok(t)
+}
+
 /// Indent of a child of `parent` (§3.1): items nest under items, everything
-/// under a section stays at the section's own indent.
+/// under a section stays at the section's own indent. Measured from the
+/// parent's written indent, not its derived one: nesting written with tabs
+/// or 4 spaces is read (§4.2), and a line at the derived child indent could
+/// fall short of such a parent and parse as its sibling.
 fn child_indent(tree: &crate::tree::Tree, parent: NRef) -> usize {
-    match tree.node(parent).kind {
-        Kind::Item => tree.indent(parent) + 2,
-        Kind::Section => tree.indent(parent),
+    let n = tree.node(parent);
+    match n.kind {
+        Kind::Item => n.indent + 2,
+        Kind::Section => n.indent,
         Kind::Root => 0,
     }
 }
@@ -921,6 +993,12 @@ fn top_kinds(doc: &str) -> Vec<Kind> {
         .collect()
 }
 
+/// The indent a document's first top-level node is written at.
+fn top_indent(doc: &str) -> Option<usize> {
+    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    pf.nodes[pf.root_node].children.first().map(|&c| pf.nodes[c].indent)
+}
+
 /// Clamp a wanted child index by the ordering rule `(text | item)*
 /// section*` (§3.1): items no later than the first section child, sections
 /// no earlier. `kids` are the parent's child nodes without the one moving.
@@ -932,6 +1010,45 @@ fn clamp_index(tree: &crate::tree::Tree, kids: &[NRef], want: usize, kinds: &[Ki
     let lo = if kinds.contains(&Kind::Section) { first_section } else { 0 };
     let hi = if kinds.contains(&Kind::Item) { first_section } else { kids.len() };
     want.min(kids.len()).clamp(lo, hi)
+}
+
+/// The level of `k` as written, if it is a section. A written level is
+/// honoured (§4.7): a section written after it deeper than that is its
+/// child, and one written before it shallower than that takes it (and
+/// every section after it) as a child (§3.1). The level `k`'s position
+/// gives can be deeper: under an item, sections may be written shallower.
+fn written_level(tree: &crate::tree::Tree, k: Option<NRef>) -> Option<usize> {
+    k.map(|k| tree.node(k)).filter(|n| n.kind == Kind::Section).map(|n| n.level.unwrap_or(1))
+}
+
+/// `doc` (shifted to a child position) with its top-level sections, and
+/// everything under them, re-levelled to stay siblings of the sections
+/// around them (`written_level`): no deeper than `prev`, the sibling
+/// section they are written after, and no shallower than `next`, the one
+/// they are written before.
+fn level_among(tree: &crate::tree::Tree, prev: Option<NRef>, next: Option<NRef>, doc: &str) -> String {
+    let (most, least) = (written_level(tree, prev), written_level(tree, next));
+    if most.is_none() && least.is_none() {
+        return doc.to_string();
+    }
+    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    let tops = &pf.nodes[pf.root_node].children;
+    // a document's sections come after its items (§3.1)
+    let Some(first) = tops.iter().map(|&c| &pf.nodes[c]).find(|n| n.kind == Kind::Section) else {
+        return doc.to_string();
+    };
+    // indentation closes a section before its level does (§4.2): a sibling
+    // written deeper than the sections, before them, or shallower, after
+    // them, is no parent or child of theirs, whatever its level
+    let most = most.filter(|_| prev.is_some_and(|p| tree.node(p).indent <= first.indent));
+    let least = least.filter(|_| next.is_some_and(|k| tree.node(k).indent >= first.indent));
+    let have = tops.last().and_then(|&c| pf.nodes[c].level).unwrap_or(1);
+    let want = most.map_or(have, |m| have.min(m)).max(least.unwrap_or(1));
+    if want == have {
+        return doc.to_string();
+    }
+    let at = first.span.start;
+    format!("{}{}", &doc[..at], shift_lines(&doc[at..], want as isize - have as isize, 0))
 }
 
 /// Write `doc` (already shifted to a child position of `parent`) as the
@@ -996,6 +1113,32 @@ fn place(
         Some(crate::parse::Content::Text(_)) => false,
         None => pnode.kind == Kind::Item,
     };
+    // inserting before an item: after another item, the list is as tight as
+    // the text there says (read below); starting the list, it is read in
+    // the list as found, the moving node still in it: between `next` and
+    // the item after it, or else between the moving node and `next` right
+    // after it. A list of one item is tight.
+    let is_item = |c: Option<&crate::parse::Content>| {
+        matches!(c, Some(crate::parse::Content::Node(k)) if tree.files[file].nodes[*k].kind == Kind::Item)
+    };
+    let next_at = next.and_then(|k| content.iter().position(|c| *c == crate::parse::Content::Node(k.1)));
+    let starts_run = next_at.is_some_and(|i| i == 0 || !is_item(content.get(i - 1)));
+    let found = &pnode.content;
+    let found_at = next.and_then(|k| found.iter().position(|c| *c == crate::parse::Content::Node(k.1)));
+    let no_blank_after = |k: NRef| {
+        let sp = tree.node(k).span;
+        !text[sp.start..sp.end.min(text.len())].ends_with("\n\n")
+    };
+    let run_tight = match (next, found_at) {
+        (Some(k), Some(i)) if is_item(found.get(i + 1)) => no_blank_after(k),
+        (Some(_), Some(i)) => match moving {
+            Some(m) if i > 0 && m.0 == file && found[i - 1] == crate::parse::Content::Node(m.1) => {
+                no_blank_after(m)
+            }
+            _ => true,
+        },
+        _ => true,
+    };
     let next_kind = next.map(|k| tree.node(k).kind);
     let removal = match moving {
         Some(m) if m.0 == file => Some(removal_range(&text, tree.node(m).span)),
@@ -1005,6 +1148,15 @@ fn place(
         text = format!("{}{}", &text[..start], &text[end..]);
         pos = after_removal(pos, start, end);
     }
+    // before a sibling written deeper than the node (tab or 4-space
+    // nesting is read, §4.2), the node goes at that sibling's indent: any
+    // shallower, the sibling would parse as its child
+    let doc = match (next.map(|k| tree.node(k).indent), top_indent(doc)) {
+        (Some(want), Some(have)) if want > have => shift_lines(doc, 0, (want - have) as isize),
+        _ => doc.to_string(),
+    };
+    let prev = idx.checked_sub(1).map(|i| kids[i]);
+    let doc = level_among(tree, prev, next, &doc);
     let body = doc.trim_end_matches('\n');
     let insertion = match next_kind {
         Some(nk) => {
@@ -1015,7 +1167,9 @@ fn place(
             } else {
                 ""
             };
-            let tight = last == Kind::Item && nk == Kind::Item && !text[..pos].ends_with("\n\n");
+            let tight = last == Kind::Item
+                && nk == Kind::Item
+                && if starts_run { run_tight } else { !text[..pos].ends_with("\n\n") };
             format!("{}{}\n{}", lead, body, if tight { "" } else { "\n" })
         }
         None => {
@@ -1097,10 +1251,17 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
         .collect();
     let mut blocks: Vec<Id> = Vec::new();
     let mut plain: Vec<NRef> = Vec::new();
+    let mut nested: Vec<Id> = Vec::new();
     for &r in &tops {
         let n = vault.tree.node(r);
         match n.block.as_ref().and_then(|b| b.id.clone()) {
-            Some(id) => blocks.push(id),
+            Some(id) => {
+                // the block leaves by its own embed; blocks embedded in its
+                // file go to the trash with it, as delete_subtree sends them
+                let ids = nested_block_ids(vault, r);
+                nested.extend(ids.into_iter().filter(|i| *i != id));
+                blocks.push(id);
+            }
             None => plain.push(r),
         }
     }
@@ -1109,13 +1270,14 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
     let mut done = 0;
     for r in plain {
         let ids = plain_remove(vault, r)?;
-        blocks.extend(ids);
+        nested.extend(ids);
         done += 1;
     }
     let n_block_tops = tops.len() - done;
     for id in blocks {
         trash_block(vault, &id)?;
     }
+    trash_nested(vault, &nested)?;
     Ok(done + n_block_tops)
 }
 
@@ -1125,13 +1287,7 @@ fn resolved_parent(tree: &crate::tree::Tree, r: NRef) -> Option<NRef> {
     let p = tree.node(r).parent?;
     let pr = (r.0, p);
     if tree.node(pr).kind == Kind::Root && r.0 != tree.root.0 {
-        let id = tree.node(r).block.as_ref()?.id.clone()?;
-        tree.files.iter().enumerate().find_map(|(fi, f)| {
-            f.nodes
-                .iter()
-                .position(|nd| nd.embed.as_ref() == Some(&id))
-                .map(|ni| (fi, ni))
-        })
+        tree.embed_of(tree.node(r).block.as_ref()?.id.as_ref()?)
     } else if tree.node(pr).kind == Kind::Root {
         None
     } else {
@@ -1155,14 +1311,28 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     file_text.push_str(&body);
     let prefix = vault.unique_prefix(&id);
     let fname = crate::ident::filename(&prefix, &slug(&n.title));
-    crate::vault::atomic_write(&vault.dir.join(&fname), &file_text)?;
+    // the embed cannot be written into a file changed on disk (§11.2), and
+    // a block file without it would be embedded nowhere: check first
+    let file = r.0;
+    vault.check_unchanged(file)?;
+    let full = vault.dir.join(&fname);
+    crate::vault::atomic_write(&full, &file_text)?;
     // replace the node's span with an embed in the node's form (§6.1.3,
     // §4.7), keeping the blank lines that separated it from what follows
-    let file = r.0;
     let span = n.span;
     let indent = " ".repeat(n.indent);
+    // at its level, but kept a sibling of the sections around it as they
+    // are written: no deeper than the one before it, which would take the
+    // embed as its child, nor shallower than the one after it
+    let kids = n.parent.map(|p| vault.tree.raw_children((file, p))).unwrap_or_default();
+    let at = kids.iter().position(|&c| c == r);
+    let prev = at.and_then(|i| i.checked_sub(1)).map(|i| kids[i]);
+    let next = at.and_then(|i| kids.get(i + 1).copied());
     let mut embed = match n.kind {
-        Kind::Section => format!("{}{} ![[{}]]\n", indent, "#".repeat(vault.tree.level(r)), id),
+        Kind::Section => {
+            let line = format!("{}{} ![[{}]]\n", indent, "#".repeat(vault.tree.level(r)), id);
+            level_among(&vault.tree, prev, next, &line)
+        }
         _ => format!("{}![[{}]]\n", indent, id),
     };
     let old = span.text(&vault.tree.files[file].text);
@@ -1170,7 +1340,12 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     for _ in 1..trailing {
         embed.push('\n');
     }
-    vault.write_span(file, span, &embed)?;
+    if let Err(e) = vault.write_span(file, span, &embed) {
+        // changed in between after all: nothing refers to the new file yet,
+        // and the node is still in its parent
+        let _ = std::fs::remove_file(&full);
+        return Err(e);
+    }
     vault.reload()?;
     Ok(id)
 }
@@ -1181,7 +1356,7 @@ pub fn set_property(vault: &mut Vault, r: NRef, key: &str, value: &str) -> std::
     let target = if vault.tree.node(r).is_block() {
         r
     } else if vault.tree.node(r).is_embed() {
-        vault.tree.resolved_child(r)
+        write_target(&vault.tree, r)?
     } else {
         // make_block reloads, so `r` is stale: find the new block by its id
         let id = make_block(vault, r)?;
@@ -1247,9 +1422,12 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
         }
         Span { start: sp.start, end: e }
     };
-    let a = core(vault.tree.node(r).span);
-    let b = core(vault.tree.node(other).span);
-    let (first, second) = if a.start < b.start { (a, b) } else { (b, a) };
+    let (fr, sr) = if vault.tree.node(r).span.start < vault.tree.node(other).span.start {
+        (r, other)
+    } else {
+        (other, r)
+    };
+    let (first, second) = (core(vault.tree.node(fr).span), core(vault.tree.node(sr).span));
     let with_nl = |t: &str| {
         if t.ends_with('\n') {
             t.to_string()
@@ -1257,12 +1435,29 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
             format!("{}\n", t)
         }
     };
+    // The written level and indent decide the parent: a sibling written
+    // deeper than the one after it (a skipped heading level, §4.7, or a
+    // wider indent) would nest under that one once below it, and J/K keep
+    // every other node's parent (§15.6). So the node moving down is written
+    // at the level and indent of the one moving up, its subtree re-levelled
+    // with it, as a moved node is (§4.2).
+    let (fnode, snode) = (vault.tree.node(fr), vault.tree.node(sr));
+    let lower = if (fnode.level, fnode.indent) == (snode.level, snode.indent) {
+        with_nl(first.text(&text))
+    } else {
+        let base = snode.level.unwrap_or_else(|| vault.tree.level(fr));
+        let pad = " ".repeat(snode.indent);
+        render(&vault.tree, fr, base, false)
+            .lines()
+            .map(|l| if l.is_empty() { "\n".to_string() } else { format!("{}{}\n", pad, l) })
+            .collect()
+    };
     let mut new_text = format!(
         "{}{}{}{}",
         &text[..first.start],
         with_nl(second.text(&text)),
         &text[first.end..second.start],
-        with_nl(first.text(&text)),
+        lower,
     );
     let rest = &text[second.end..];
     new_text.push_str(rest);
@@ -1280,13 +1475,36 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
         return Ok(false);
     }
     let to_section = n.kind == Kind::Item;
+    // an embed still here after resolving is broken: there is no block to
+    // respell, so only the embed's form changes and its id stays (§4.7)
+    if n.is_embed() {
+        return respell_embed(vault, r, to_section);
+    }
+    // `## ---` spelled as an item is `- ---`, a thematic break (§4.4)
+    if !to_section && n.task.is_none() {
+        item_line(&n.title)?;
+    }
     let stand = stand_in(&vault.tree, r);
     let file = r.0;
     let text = vault.tree.files[file].text.clone();
     let span = Span { start: n.span.start, end: n.span.end.min(text.len()) };
+    // respelled from the subtree as a move writes it (§4.2): every heading
+    // in it ATX, a setext one converted, at the level its position gives,
+    // so re-levelling keeps each under the node it was under; at the node's
+    // indent, with the blank lines that end its span
+    let blanks = span.text(&text).lines().rev().take_while(|l| l.trim().is_empty()).count();
+    let rendered: String = crate::render::render_lines(&vault.tree, r, vault.tree.level(r), false)
+        .into_iter()
+        .map(|l| l.text + "\n")
+        .collect();
+    let src = shift_lines(&rendered, 0, n.indent as isize) + &"\n".repeat(blanks);
     if stand != r {
-        // a block: respell its file's root at level 1, then its embed
-        let respelled = respell(span.text(&text), to_section, 1);
+        // a block: respell its file's root at level 1, then its embed. The
+        // embed cannot be written into a file changed on disk (§11.2), and
+        // the block would be left under an embed of the other form (§4.7):
+        // check first
+        vault.check_unchanged(stand.0)?;
+        let respelled = respell(&src, to_section, 1);
         let id = n.block.as_ref().and_then(|b| b.id.clone());
         vault.write_span(file, span, &respelled)?;
         let Some(e) = id.and_then(|id| vault.tree.embed_of(&id)) else {
@@ -1296,7 +1514,7 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
         return respell_embed(vault, e, to_section);
     }
     let Some(parent) = n.parent.map(|p| (file, p)) else { return Ok(false) };
-    let respelled = respell(span.text(&text), to_section, vault.tree.level(parent) + 1);
+    let respelled = respell(&src, to_section, vault.tree.level(parent) + 1);
     reposition(vault, r, parent, respelled, to_section)
 }
 
@@ -1335,6 +1553,8 @@ fn reposition(
     let kind = if to_section { Kind::Section } else { Kind::Item };
     if clamp_index(tree, &others, pos, &[kind]) == pos {
         let span = tree.node(r).span;
+        let prev = pos.checked_sub(1).map(|i| others[i]);
+        let new = level_among(tree, prev, others.get(pos).copied(), &new);
         vault.write_span(r.0, span, &new)?;
         vault.reload()?;
         return Ok(false);
@@ -1420,7 +1640,25 @@ pub fn append_child_public(
     parent: NRef,
     title: &str,
 ) -> std::io::Result<NRef> {
-    append_child_line(vault, parent, &format!("- {}", title), true)
+    append_child_line(vault, parent, &item_line(title)?, true)
+}
+
+/// The item line titled `title`, refused when it would not read back as
+/// one: a title of dashes (`---`, `- -`) makes it a thematic break, which
+/// CommonMark reads before a bullet, and body text (§4.4). Checked before
+/// anything is written, as the TUI won't create an invalid title (§4.3).
+fn item_line(title: &str) -> std::io::Result<String> {
+    let line = format!("- {}", title);
+    not_a_break(&line)?;
+    Ok(line)
+}
+
+/// Refuse an item's title line that reads as a thematic break (§4.4).
+fn not_a_break(line: &str) -> std::io::Result<()> {
+    if crate::parse::is_thematic_break(line.trim_start_matches([' ', '\t'])) {
+        return Err(io_err("a title of dashes reads as a thematic break, not an item"));
+    }
+    Ok(())
 }
 
 fn io_err(msg: &str) -> std::io::Error {

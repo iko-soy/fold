@@ -311,3 +311,348 @@ fn retitled_block_root_conflicts_and_keep_theirs_keeps_the_filename() {
     assert!(text.contains(&format!("id: {}", BID)) && text.contains("- new"), "{}", text);
     assert!(merge::conflict_pairs(&v).is_empty());
 }
+
+#[test]
+fn deep_headings_are_canonical() {
+    // §3.1 / §4.2: no upper bound on heading level; levels beyond six are ours
+    // (§4.2 "What is ours"), not non-canonical syntax for `notes check` to report.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "# 1\n\n## 2\n\n### 3\n\n#### 4\n\n##### 5\n\n###### 6\n\n####### 7\n",
+    )
+    .unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let diags = fold_core::check::check(&v);
+    assert!(
+        diags.is_empty(),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn crlf_separated_text_is_not_flagged_or_padded() {
+    // "text" already follows `a` after a blank line; only the line endings
+    // are CRLF, which is read cleanly (§4.2) and must not count as missing
+    // the separator, nor make --fix invent a second blank line (§3.3).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\r\n\r\n- a\r\n\r\ntext\r\n").unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let diags = fold_core::check::check(&v);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("text right after a child node")),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    fold_core::check::fix(&mut v).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert_eq!(text, "# A\n\n- a\n\ntext\n");
+}
+
+#[test]
+fn merge_rewrite_keeps_embeds() {
+    // §12.4: embeds match by id and every node from O and T survives; a
+    // re-rendered merge (T adds a node) must not turn `![[id]]` into `- `
+    let o = format!("# A\n\n![[{}]]\n\n# B\n", BID);
+    let t = format!("# A\n\n![[{}]]\n\n# B\n\n- new\n", BID);
+    let out = merge::merge_texts(&o, &t, "d", "ts");
+    assert!(out.text.contains(&format!("![[{}]]", BID)), "{}", out.text);
+    assert!(out.text.contains("- new"), "{}", out.text);
+    // a T-only embed (block made on the other device) must survive too
+    let o2 = "# A\n\n- x\n";
+    let t2 = format!("# A\n\n- x\n![[{}]]\n", BID);
+    let out2 = merge::merge_texts(o2, &t2, "d", "ts");
+    assert!(out2.text.contains(&format!("![[{}]]", BID)), "{}", out2.text);
+    // heading form
+    let o3 = format!("# A\n\n## ![[{}]]\n\n# B\n", BID);
+    let t3 = format!("# A\n\n## ![[{}]]\n\n# B\n\n- new\n", BID);
+    let out3 = merge::merge_texts(&o3, &t3, "d", "ts");
+    assert!(out3.text.contains(&format!("## ![[{}]]", BID)), "{}", out3.text);
+    // idempotent (§12.4): merging T into the result again adds nothing
+    for (out, t) in [(&out, &t), (&out2, &t2), (&out3, &t3)] {
+        assert_eq!(merge::merge_texts(&out.text, t, "d", "ts").text, out.text);
+    }
+}
+
+#[test]
+fn sync_conflict_merge_keeps_embeds_in_the_merged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n\n# B\n", BID)).unwrap();
+    std::fs::write(dir.path().join("racfer~t.md"), format!("---\nid: {}\n---\n\n- t\n", BID)).unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        format!("# A\n\n![[{}]]\n\n# B\n\n- new\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert!(text.contains(&format!("![[{}]]", BID)), "{}", text);
+    assert!(text.contains("- new"), "{}", text);
+}
+
+#[test]
+fn merge_leaves_ignored_files_alone() {
+    // §4.1/§11.4: a `.md` file without an id is ignored — never parsed,
+    // never written. A sync-conflict copy of it is not ours to merge.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    std::fs::write(dir.path().join("readme.md"), "* [ ] first\n").unwrap();
+    std::fs::write(
+        dir.path().join("readme.sync-conflict-20260912-100000-phone.md"),
+        "* [x] first\n",
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(outcomes.iter().any(|o| o.contains("left alone")), "{:?}", outcomes);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("readme.md")).unwrap(),
+        "* [ ] first\n"
+    );
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "readme.md".to_string(),
+            "readme.sync-conflict-20260912-100000-phone.md".to_string(),
+            "root.md".to_string(),
+        ]
+    );
+    let diags = fold_core::check::check(&v);
+    assert!(
+        diags.iter().all(|d| !d.message.contains("unresolved conflict")),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn merge_with_missing_base_keeps_theirs_frontmatter() {
+    // X.md is gone (deleted, or its deletion synced in first): with no O to
+    // merge against, T must survive with its frontmatter (id, due) intact
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
+    let theirs = format!("---\nid: {}\ndue: 2026-09-20\n---\n\n- t\n", BID);
+    let c = "racfer~t.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), &theirs).unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("racfer~t.md")).unwrap();
+    assert_eq!(text, theirs);
+    assert!(!dir.path().join(c).exists());
+    assert!(v.tree.block_by_id(&fold_core::Id::parse(BID).unwrap()).is_some());
+    // a block renamed since (§6.4) is still O: found by its id, merged
+    // into, never duplicated
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
+    std::fs::write(dir.path().join("racfer~new.md"), format!("---\nid: {}\n---\n\n- [ ] t\n", BID)).unwrap();
+    std::fs::write(dir.path().join(c), format!("---\nid: {}\n---\n\n- [x] t\n", BID)).unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(!dir.path().join("racfer~t.md").exists());
+    assert_eq!(merge::conflict_pairs(&v).len(), 1, "{}", v.tree.files[0].text);
+    // the copy of a foreign file that is gone is not ours either (§4.1)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    let c = "readme.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), "* [x] first\n").unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(outcomes.iter().any(|o| o.contains("left alone")), "{:?}", outcomes);
+    assert!(dir.path().join(c).exists() && !dir.path().join("readme.md").exists());
+}
+
+#[test]
+fn merge_places_insertions_by_their_neighbours() {
+    // §12.4: a node present on one side only is an insertion, placed
+    // relative to its matched neighbours — `new` sits between `a` and `b`
+    let o = "# A\n\n- a\n- b\n- c\n";
+    let t = "# A\n\n- a\n- new\n- b\n- c\n";
+    let out = merge::merge_texts(o, t, "dev", "ts");
+    assert_eq!(out.conflicts, 0, "{}", out.text);
+    let p = |s: &str| out.text.find(s).unwrap();
+    assert!(p("- a") < p("- new") && p("- new") < p("- b"), "{}", out.text);
+    // one inserted after the text that follows its neighbour in T stays
+    // after that text, so merging T in again changes nothing
+    let o = "# P\n\n- a\n\nnote\n";
+    let t = "# P\n\n- a\n\nnote\n\n- new\n";
+    let out = merge::merge_texts(o, t, "dev", "ts");
+    assert_eq!(out.conflicts, 0, "{}", out.text);
+    assert_eq!(out.text, t);
+}
+
+#[test]
+fn merge_places_inserted_sections_by_their_neighbours() {
+    // the same for a section: `B` sits between `A` and `C`, not last
+    let o = "# A\n\n# C\n";
+    let t = "# A\n\n# B\n\n# C\n";
+    let out = merge::merge_texts(o, t, "dev", "ts");
+    assert_eq!(out.conflicts, 0, "{}", out.text);
+    let p = |s: &str| out.text.find(s).unwrap();
+    assert!(p("# A") < p("# B") && p("# B") < p("# C"), "{}", out.text);
+}
+
+#[test]
+fn check_reports_embed_cycles() {
+    // two blocks that embed each other: neither is reachable from root.md,
+    // and §6.2 / §15.7 say a cycle is a diagnostic
+    let a = "racfer-hattes-mislup-nodrys";
+    let b = "dozzod-binwes-talsun-worbec";
+    let c = "lacnum-walbyn-dirlyn-havtyp";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~x.md"),
+        format!("---\nid: {}\n---\n\n- x\n  ![[{}]]\n", a, b),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~y.md"),
+        format!("---\nid: {}\n---\n\n- y\n  ![[{}]]\n  ![[{}]]\n", b, a, c),
+    )
+    .unwrap();
+    // c hangs off the cycle without being on it
+    std::fs::write(dir.path().join("lacnum~z.md"), format!("---\nid: {}\n---\n\n- z\n", c)).unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    // every block loads and every embed resolves: the only fault is the cycle
+    for id in [a, b, c] {
+        let id = fold_core::Id::parse(id).unwrap();
+        assert!(v.tree.block_by_id(&id).is_some(), "block {} not loaded", id);
+        assert!(v.tree.embed_of(&id).is_some(), "embed of {} not parsed", id);
+    }
+    let diags = fold_core::check::check(&v);
+    let msgs: Vec<&String> = diags.iter().map(|d| &d.message).collect();
+    assert_eq!(
+        diags.iter().filter(|d| d.message.contains("cycl")).count(),
+        2,
+        "one cyclic-embed diagnostic per block on the cycle: {:?}",
+        msgs
+    );
+    // the same blocks in a chain from root.md: no cycle
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", a)).unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~y.md"),
+        format!("---\nid: {}\n---\n\n- y\n  ![[{}]]\n", b, c),
+    )
+    .unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let diags = fold_core::check::check(&v);
+    assert!(diags.is_empty(), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+}
+
+#[test]
+fn orphan_block_conflict_is_not_paired_with_an_unrelated_node() {
+    // the block racfer~t.md is embedded nowhere: its conflict block has no
+    // embed to follow, so it must not end up as the next sibling of some
+    // unrelated node that 'keep theirs' would then overwrite (§12.4, §12.5)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- keep me\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.md"),
+        format!("---\nid: {}\n---\n\n- [ ] t\n", BID),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
+        format!("---\nid: {}\n---\n\n- [x] t\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let root = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    let pairs = merge::conflict_pairs(&v);
+    for &(ours, _) in &pairs {
+        assert_ne!(v.tree.node(ours).title, "keep me", "root.md:\n{}", root);
+    }
+    // it pairs with the block it conflicts with, and keep theirs lands there
+    assert_eq!(pairs.len(), 1, "root.md:\n{}", root);
+    let bid = fold_core::Id::parse(BID).unwrap();
+    assert_eq!(Some(pairs[0].0), v.tree.block_by_id(&bid), "root.md:\n{}", root);
+    merge::resolve_keep_theirs(&mut v, pairs[0].0, pairs[0].1).unwrap();
+    assert!(std::fs::read_to_string(dir.path().join("root.md")).unwrap().contains("- keep me"));
+    let block = std::fs::read_to_string(dir.path().join("racfer~t.md")).unwrap();
+    assert!(block.contains("- [x] t"), "{}", block);
+    assert!(fold_core::check::check(&v).is_empty());
+    // a section-spelled orphan: heading embeds, still a pair (§4.7)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- keep me\n").unwrap();
+    std::fs::write(dir.path().join("racfer~t.md"), format!("---\nid: {}\n---\n\n# T\n\nbody o\n", BID))
+        .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
+        format!("---\nid: {}\n---\n\n# T\n\nbody t\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let root = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert!(root.starts_with(&format!("# A\n\n- keep me\n\n# ![[{}]]\n\n# ![[", BID)), "{}", root);
+    let pairs = merge::conflict_pairs(&v);
+    assert_eq!(pairs.len(), 1, "root.md:\n{}", root);
+    assert_eq!(Some(pairs[0].0), v.tree.block_by_id(&bid), "root.md:\n{}", root);
+    let diags = fold_core::check::check(&v);
+    assert!(
+        diags.iter().all(|d| d.message == "unresolved conflict block"),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn crlf_root_md_keeps_its_blank_lines_under_fix() {
+    // check --fix lays root.md's top-level nodes out itself; a blank line
+    // is blank whatever its line ending, so a loose list stays loose
+    // (§4.2) and none is added after text that already ends in one (§3.3)
+    for (before, after) in [
+        ("- a\r\n\r\n- b\r\n", "- a\n\n- b\n"),
+        ("intro\r\n\r\n- a\r\n", "intro\r\n\r\n- a\n"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.md"), before).unwrap();
+        let mut v = Vault::open(dir.path()).unwrap();
+        fold_core::check::fix(&mut v).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+        assert_eq!(text, after, "{:?}", before);
+    }
+}
+
+#[test]
+fn sync_conflict_on_a_block_embedded_twice_pairs_where_it_is_shown() {
+    // t is shown under X, where the walk from the root meets it first; its
+    // second embed, in root.md under B, comes first in file order and reads
+    // as broken (§6.2). The conflict block goes after t's own embed, so it
+    // pairs with t (§12.4), not with the broken line
+    let x = "dozzod-binwes-talsun-worbec";
+    let dir = tempfile::tempdir().unwrap();
+    let root = format!("# A\n\n![[{}]]\n\n# B\n\n![[{}]]\n", x, BID);
+    std::fs::write(dir.path().join("root.md"), &root).unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~x.md"),
+        format!("---\nid: {}\n---\n\n- X\n  ![[{}]]\n", x, BID),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.md"),
+        format!("---\nid: {}\n---\n\n- [ ] t\n", BID),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
+        format!("---\nid: {}\n---\n\n- [x] t\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let pairs = merge::conflict_pairs(&v);
+    assert_eq!(pairs.len(), 1);
+    let ours = v.tree.node(pairs[0].0).block.as_ref().and_then(|b| b.id.as_ref());
+    assert_eq!(ours.map(|i| i.to_string()), Some(BID.to_string()));
+    assert_eq!(std::fs::read_to_string(dir.path().join("root.md")).unwrap(), root);
+}

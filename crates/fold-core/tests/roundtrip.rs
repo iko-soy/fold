@@ -13,11 +13,7 @@ fn tree_of(text: &str) -> Tree {
     };
     let pf = parse_file("root.md", text, 0, Some(block));
     assert!(pf.diagnostics.is_empty(), "diags: {:?}", pf.diagnostics);
-    Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    }
+    Tree::new(vec![pf])
 }
 
 #[test]
@@ -181,7 +177,7 @@ fn block_file_tree() -> Tree {
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
     let id = Id::parse("dozzod-binwes-talsun-worbec").unwrap();
     let block = Block {
-        id: Some(id.clone()),
+        id: Some(id),
         path: "dozzod~zfs-layout.md".into(),
         props: fm.props,
         frontmatter_raw: fm.raw,
@@ -189,11 +185,7 @@ fn block_file_tree() -> Tree {
     };
     let bf = parse_file("dozzod~zfs-layout.md", block_text, 1, Some(block));
     assert!(bf.diagnostics.is_empty(), "diags: {:?}", bf.diagnostics);
-    Tree {
-        root: (0, 0),
-        blocks: vec![((1, bf.nodes[0].children[0]), id)],
-        files: vec![root, bf],
-    }
+    Tree::new(vec![root, bf])
 }
 
 #[test]
@@ -251,11 +243,7 @@ fn bullet_root_block_file() {
     assert_eq!(n.kind, Kind::Item);
     assert_eq!(n.title, "Order new switch");
     assert_eq!(n.task, Some(TaskState::Open));
-    let t = Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    };
+    let t = Tree::new(vec![pf]);
     let r = render(&t, (0, root_node), 1, false);
     assert_eq!(r, text);
 }
@@ -274,18 +262,14 @@ fn tree_with_block(root_text: &str, block_text: &str, block_path: &str) -> Tree 
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
     let id = Id::parse(fm.props.get("id").unwrap()).unwrap();
     let block = Block {
-        id: Some(id.clone()),
+        id: Some(id),
         path: block_path.into(),
         props: fm.props,
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
     };
     let bf = parse_file(block_path, block_text, 1, Some(block));
-    Tree {
-        root: (0, 0),
-        blocks: vec![((1, bf.nodes[0].children[0]), id)],
-        files: vec![root, bf],
-    }
+    Tree::new(vec![root, bf])
 }
 
 const SPEC_ROOT: &str = "# Homelab\n\nTwo boxes in the closet, one at Hetzner.\n\n## NAS\n\n![[dozzod-binwes-talsun-worbec]]\n\n## Networking\n\n- [ ] Replace the flaky switch\n![[racfer-hattes-mislup-nodrys]]\n\n# Inbox\n\n## 2026-09-10\n\n- Talked to Anya about the venue.\n  ### Options\n  Warehouse on Ligovsky, or the old bakery. Both need a licence.\n- [x] Send the deposit\n";
@@ -429,11 +413,7 @@ fn empty_title_nodes_parse_everywhere() {
     ];
     for (text, kids) in cases {
         let pf = parse_file("root.md", text, 0, None);
-        let t = Tree {
-            files: vec![pf],
-            root: (0, 0),
-            blocks: vec![],
-        };
+        let t = Tree::new(vec![pf]);
         let a = t.resolved_children(t.root)[0];
         let ch = t.resolved_children(a);
         assert_eq!(ch.len(), *kids, "{:?}", text);
@@ -449,4 +429,97 @@ fn empty_title_nodes_parse_everywhere() {
     }
     let pf = parse_file("root.md", "# A\n\n- [ ] \n", 0, None);
     assert!(pf.nodes.iter().any(|n| n.task == Some(TaskState::Open) && n.title.is_empty()));
+}
+
+#[test]
+fn render_keeps_child_sections_under_items_nested() {
+    // A skipped-level section (§3.1) re-levelled by base − level(node)
+    // (§5.1) can push a section under an item below level 1; its child
+    // section must still print deeper than it, so that
+    // parse(render(t, 1, false)) keeps the tree's shape.
+    let t = tree_of("### Meeting\n- topic\n  ## Notes\n  ### Sub\n");
+    let m = t.resolved_children(t.root)[0];
+    let topic = t.resolved_children(m)[0];
+    let notes = t.resolved_children(topic)[0];
+    assert_eq!(t.resolved_children(notes).len(), 1, "Sub is a child of Notes");
+    let r = render(&t, m, 1, false);
+    assert_eq!(r, "# Meeting\n- topic\n  # Notes\n  ## Sub\n");
+    let t2 = tree_of(&r);
+    let m2 = t2.resolved_children(t2.root)[0];
+    let topic2 = t2.resolved_children(m2)[0];
+    assert_eq!(t2.resolved_children(topic2).len(), 1, "Notes and Sub became siblings:\n{r}");
+    let notes2 = t2.resolved_children(topic2)[0];
+    assert_eq!(t2.node(notes2).title, "Notes");
+    assert_eq!(t2.resolved_children(notes2).len(), 1, "{r}");
+}
+
+#[test]
+fn inline_triple_backticks_do_not_open_a_fence() {
+    // CommonMark: a backtick fence's info string may not contain backticks,
+    // so "```npm i``` first" is a paragraph with inline code, not a fence.
+    let t = tree_of("# A\n\n```npm i``` first\n\n## B\n\n- item\n");
+    let a = t.resolved_children(t.root)[0];
+    let kids = t.resolved_children(a);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(t.node(kids[0]).title, "B");
+    assert_eq!(t.resolved_children(kids[0]).len(), 1);
+}
+
+#[test]
+fn fence_line_with_info_string_does_not_close_a_fence() {
+    // CommonMark: a closing fence may be followed only by spaces or tabs,
+    // so "```rust" inside an open ``` fence is code, not a closer.
+    let t = tree_of("# A\n\n```\n```rust\n# not a heading\n```\n\n## B\n");
+    let top = t.resolved_children(t.root);
+    assert_eq!(top.len(), 1);
+    let kids = t.resolved_children(top[0]);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(t.node(kids[0]).title, "B");
+}
+
+#[test]
+fn shifting_keeps_code_after_a_fence_line_with_info_string() {
+    // the re-levelling passes of paste/refile and of splice read fences as
+    // the parser does: the code line stays as written
+    let doc = "# B\n\n```\n```rust\n# not a heading\n```\n";
+    assert_eq!(
+        fold_core::ops::shift_document(doc, 1, 0),
+        "## B\n\n```\n```rust\n# not a heading\n```\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let text = "# Top\n\n## B\n\n```\n```rust\n# not a heading\n```\n";
+    std::fs::write(dir.path().join("root.md"), text).unwrap();
+    let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+    let top = v.tree.resolved_children(v.tree.root)[0];
+    let b = v.tree.resolved_children(top)[0];
+    let mut buf = fold_core::edit::open_editor(&v, b);
+    for o in buf.owners.keys().copied().collect::<Vec<_>>() {
+        buf.mark_dirty(o);
+    }
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, text);
+}
+
+#[test]
+fn spaced_thematic_breaks_are_text() {
+    // §4.2/§4.4: CommonMark thematic breaks (which win over list items) are
+    // body text, however they are spelled — not bullets titled "* *" / "- -".
+    for text in [
+        "# A\n\npara\n\n* * *\n\nmore\n",
+        "# A\n\npara\n\n- - -\n\nmore\n",
+        "# A\n\npara\n\n-  -  - -\n\nmore\n",
+        "# A\n\n- x\n\n  * * *\n",
+    ] {
+        let t = tree_of(text);
+        let a = t.resolved_children(t.root)[0];
+        let mut kids: Vec<String> = Vec::new();
+        t.walk(a, &mut |t, k| kids.push(t.node(k).title.clone()));
+        kids.retain(|k| k != "A" && k != "x");
+        assert!(kids.is_empty(), "{:?} parsed as nodes {:?}", text, kids);
+        assert_eq!(render(&t, a, 1, false), text);
+    }
+    // two marks are not a break: still an (empty-ish) bullet
+    let t = tree_of("# A\n\n- -\n");
+    let a = t.resolved_children(t.root)[0];
+    assert_eq!(t.resolved_children(a).len(), 1);
 }

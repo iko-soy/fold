@@ -101,11 +101,7 @@ fn standalone_tree(text: &str) -> Tree {
         frontmatter_span: fm.as_ref().map(|f| f.span),
     };
     let pf = parse_file("m.md", text, 0, Some(block));
-    Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    }
+    Tree::new(vec![pf])
 }
 
 fn node_sig(t: &Tree, r: NRef) -> (String, Option<TaskState>, String) {
@@ -234,9 +230,10 @@ fn merge_children(
 ) -> String {
     let o_kids = o.resolved_children(op);
     let t_kids = t.resolved_children(tp);
-    // match: embed by id, else by exact title among unmatched siblings
-    let mut t_used = vec![false; t_kids.len()];
-    let mut pairs: Vec<(Option<NRef>, Option<NRef>)> = Vec::new();
+    // match: embed by id, else by exact title among unmatched siblings;
+    // `t_match[i]` is the O kid that T kid `i` matched
+    let mut t_match: Vec<Option<usize>> = vec![None; t_kids.len()];
+    let mut pairs: Vec<(NRef, Option<NRef>)> = Vec::new();
     // a block file's root is the same node on both sides, whatever its
     // title: match it by the file's id (§12.4 rule 1)
     let file_id = |tr: &Tree, r: NRef| tr.node(r).block.as_ref().and_then(|b| b.id.clone());
@@ -246,18 +243,18 @@ fn merge_children(
         }
         _ => None,
     };
-    for &ok in &o_kids {
+    for (j, &ok) in o_kids.iter().enumerate() {
         let on = o.node(ok);
         if let Some((rok, rtk)) = root_pair {
             if ok == rok {
-                t_used[0] = true;
-                pairs.push((Some(ok), Some(rtk)));
+                t_match[0] = Some(j);
+                pairs.push((ok, Some(rtk)));
                 continue;
             }
         }
         let mut found = None;
         for (i, &tk) in t_kids.iter().enumerate() {
-            if t_used[i] {
+            if t_match[i].is_some() {
                 continue;
             }
             let tn = t.node(tk);
@@ -274,21 +271,40 @@ fn merge_children(
             }
         }
         if let Some(i) = found {
-            t_used[i] = true;
-            pairs.push((Some(ok), Some(t_kids[i])));
-        } else {
-            pairs.push((Some(ok), None));
+            t_match[i] = Some(j);
         }
+        pairs.push((ok, found.map(|i| t_kids[i])));
     }
+    // T-only nodes are insertions, placed relative to their matched
+    // neighbours (§12.4): after the O partner of the nearest matched node
+    // before them in T — and after O's text there too, when T has text
+    // between the two — or first, when no matched node precedes them
+    let t_trailing = trailing_runs(t, tp);
+    let mut first: Vec<NRef> = Vec::new();
+    let mut after_node: Vec<Vec<NRef>> = vec![Vec::new(); o_kids.len()];
+    let mut after_text: Vec<Vec<NRef>> = vec![Vec::new(); o_kids.len()];
+    let mut anchor: Option<(usize, usize)> = None; // (T kid, its O kid)
     for (i, &tk) in t_kids.iter().enumerate() {
-        if !t_used[i] {
-            pairs.push((None, Some(tk)));
+        match (t_match[i], anchor) {
+            (Some(j), _) => anchor = Some((i, j)),
+            (None, None) => first.push(tk),
+            (None, Some((ti, j))) => {
+                let text_between = t_trailing
+                    .iter()
+                    .any(|&(pos, sp)| (ti..i).contains(&pos) && !run_lines(t, tp, sp).is_empty());
+                if text_between {
+                    after_text[j].push(tk);
+                } else {
+                    after_node[j].push(tk);
+                }
+            }
         }
     }
+    ctx.insertions += t_match.iter().filter(|m| m.is_none()).count();
+    let inserted = |&b: &NRef| Piece::Node(t.node(b).kind, emit_subtree(t, b, level, indent));
     // Emit: matched pairs merge field-by-field; single-sided nodes are
     // insertions; differing fields raise conflict pairs (§12.4). O's text
-    // children stay where O has them; T-only nodes are placed by the
-    // ordering rule (§3.1): items before the first section, sections last.
+    // children stay where O has them.
     let mut pieces: Vec<Piece> = Vec::new();
     if o.node(op).kind == Kind::Root {
         // the root's own text: O's, plus T's when it differs (never lost)
@@ -302,42 +318,27 @@ fn merge_children(
             }
         }
     }
+    pieces.extend(first.iter().map(inserted));
     let o_trailing = trailing_runs(o, op);
-    let mut t_items: Vec<Piece> = Vec::new();
-    let mut t_sections: Vec<Piece> = Vec::new();
-    for (ok, tk) in pairs {
-        match (ok, tk) {
-            (Some(a), tk) => {
-                let text = match tk {
-                    Some(b) => merge_pair(o, t, a, b, ctx, level, indent),
-                    None => emit_subtree(o, a, level, indent),
-                };
-                pieces.push(Piece::Node(o.node(a).kind, text));
-                let j = o_kids.iter().position(|&k| k == a).unwrap_or(usize::MAX);
-                for (_, sp) in o_trailing.iter().filter(|(pos, _)| *pos == j) {
-                    pieces.push(Piece::Text(emit_text(o, op, *sp, indent)));
-                }
-            }
-            (None, Some(b)) => {
-                ctx.insertions += 1;
-                let piece = Piece::Node(t.node(b).kind, emit_subtree(t, b, level, indent));
-                if t.node(b).kind == Kind::Section {
-                    t_sections.push(piece);
-                } else {
-                    t_items.push(piece);
-                }
-            }
-            (None, None) => {}
+    for (j, (a, tk)) in pairs.into_iter().enumerate() {
+        let text = match tk {
+            Some(b) => merge_pair(o, t, a, b, ctx, level, indent),
+            None => emit_subtree(o, a, level, indent),
+        };
+        pieces.push(Piece::Node(o.node(a).kind, text));
+        pieces.extend(after_node[j].iter().map(inserted));
+        for (_, sp) in o_trailing.iter().filter(|(pos, _)| *pos == j) {
+            pieces.push(Piece::Text(emit_text(o, op, *sp, indent)));
         }
+        pieces.extend(after_text[j].iter().map(inserted));
     }
-    let first_section = pieces
-        .iter()
-        .position(|p| matches!(p, Piece::Node(Kind::Section, _)))
-        .unwrap_or(pieces.len());
-    let tail = pieces.split_off(first_section);
-    pieces.extend(t_items);
-    pieces.extend(tail);
-    pieces.extend(t_sections);
+    // clamped by the ordering rule (§3.1): an inserted item or text goes no
+    // later than just before the first section, an inserted section no
+    // earlier than just after the last item; O's own order already obeys it
+    let (mut pieces, sections): (Vec<Piece>, Vec<Piece>) = pieces
+        .into_iter()
+        .partition(|p| !matches!(p, Piece::Node(Kind::Section, _)));
+    pieces.extend(sections);
     join_pieces(pieces)
 }
 
@@ -433,6 +434,12 @@ fn emit_node_with(o: &Tree, a: NRef, level: usize, indent: usize, kids: &str) ->
     let mut out = String::new();
     let ind = " ".repeat(indent);
     match n.kind {
+        // embeds stay unresolved here (§12.4): the line is the reference
+        // itself, in its own form (§4.7), never an empty title
+        Kind::Section | Kind::Item if n.embed.is_some() => {
+            out.push_str(&crate::render::embed_line(n, level, indent));
+            out.push('\n');
+        }
         Kind::Section => {
             out.push_str(&ind);
             out.push_str(&"#".repeat(level.max(1)));
@@ -538,15 +545,49 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
         let base = cfile.split(".sync-conflict-").next().unwrap().to_string() + ".md";
         let cpath = vault.dir.join(&cfile);
         let bpath = vault.dir.join(&base);
+        // only root.md and block files are ours to merge: the conflict copy
+        // of an ignored file is left alone, like the file (§4.1, §11.4)
+        let parsed = base == "root.md" || vault.file_index(&base).is_some();
+        if !parsed && bpath.exists() {
+            outcomes.push(format!("{}: {} is not a vault file, left alone", cfile, base));
+            continue;
+        }
         let theirs = std::fs::read_to_string(&cpath)?;
-        let ours = std::fs::read_to_string(&bpath).unwrap_or_default();
+        let tid = crate::parse::parse_frontmatter(&theirs)
+            .and_then(|f| f.props.get("id").cloned())
+            .and_then(|v| Id::parse(&v));
+        // X.md gone: a block renamed since is still found by its id (§6.4)
+        let bpath = match tid.as_ref().and_then(|id| vault.tree.block_by_id(id)) {
+            Some(r) if !bpath.exists() => {
+                vault.dir.join(&vault.tree.node(r).block.as_ref().unwrap().path)
+            }
+            _ => bpath,
+        };
+        let ours = match std::fs::read_to_string(&bpath) {
+            Ok(text) => text,
+            // nothing to merge against: T wins as it is, frontmatter and
+            // all, rather than being merged into an empty O that has none
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && (parsed || tid.is_some()) => {
+                outcomes.push(format!("{}: {} missing, keeping theirs", cfile, base));
+                if !dry_run {
+                    std::fs::rename(&cpath, &bpath)?;
+                }
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                outcomes.push(format!("{}: not a block file, left alone", cfile));
+                continue;
+            }
+            // an O that cannot be read is never overwritten
+            Err(e) => {
+                outcomes.push(format!("{}: cannot read {}: {}, left alone", cfile, base, e));
+                continue;
+            }
+        };
         // device + timestamp from the filename
         let (device, stamp) = parse_conflict_name(&cfile);
         // id check: differing ids mean a prefix collision, not a conflict (§12.2)
         let oid = crate::parse::parse_frontmatter(&ours)
-            .and_then(|f| f.props.get("id").cloned())
-            .and_then(|v| Id::parse(&v));
-        let tid = crate::parse::parse_frontmatter(&theirs)
             .and_then(|f| f.props.get("id").cloned())
             .and_then(|v| Id::parse(&v));
         match (&oid, &tid) {
@@ -575,6 +616,10 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
             cfile, outcome.conflicts
         ));
         if !dry_run {
+            // the trash first, so a trash that cannot be made stops the
+            // merge before anything is written
+            let trash = crate::vault::trash_dir();
+            std::fs::create_dir_all(&trash)?;
             crate::vault::atomic_write(&bpath, &outcome.text)?;
             for (fname, text) in &outcome.conflict_blocks {
                 let fname = fresh_block_name(vault, fname, text);
@@ -584,11 +629,11 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
                 vault.reload()?;
                 place_sibling_embeds(vault, oid.as_ref(), &outcome.sibling_embeds)?;
             }
-            // the conflict file goes to trash (§12.4)
-            let trash = crate::vault::trash_dir();
-            std::fs::create_dir_all(&trash)?;
+            // the conflict file goes to trash (§12.4), which is often on
+            // another filesystem: a rename alone would fail there and leave
+            // it to be merged again
             let stamp2 = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
-            std::fs::rename(&cpath, trash.join(format!("{}-{}", stamp2, cfile.to_lowercase())))?;
+            crate::vault::move_file(&cpath, &trash.join(format!("{}-{}", stamp2, cfile.to_lowercase())))?;
         }
     }
     if !dry_run {
@@ -619,19 +664,17 @@ fn fresh_block_name(vault: &Vault, fname: &str, text: &str) -> String {
 /// Insert embeds right after the embed of block `owner` in its parent file,
 /// at its indent, so each conflict block is the next sibling of the block it
 /// conflicts with (§12.4). Without an embed to follow (an orphan block),
-/// they go at the end of `root.md` so they are still reachable.
+/// the owner is embedded at the end of `root.md` with them right after it:
+/// placed alone, they would pair with whatever node happened to be last.
 fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> std::io::Result<()> {
-    let found = owner.and_then(|oid| {
-        vault.tree.files.iter().enumerate().find_map(|(fi, f)| {
-            f.nodes
-                .iter()
-                .find(|nd| nd.embed.as_ref() == Some(oid))
-                .map(|nd| {
-                    // the same form as the owner's embed (§4.7)
-                    let heading = (nd.kind == Kind::Section).then(|| nd.level.unwrap_or(1));
-                    (fi, nd.title_span.end.min(f.text.len()), nd.indent, heading)
-                })
-        })
+    // the embed the owner is stitched in at: a second one reads as broken
+    // (§6.2) and pairs with nothing
+    let found = owner.and_then(|oid| vault.tree.embed_of(oid)).map(|(fi, ni)| {
+        let f = &vault.tree.files[fi];
+        let nd = &f.nodes[ni];
+        // the same form as the owner's embed (§4.7)
+        let heading = (nd.kind == Kind::Section).then(|| nd.level.unwrap_or(1));
+        (fi, nd.title_span.end.min(f.text.len()), nd.indent, heading)
     });
     let mut insert = String::new();
     match found {
@@ -651,14 +694,22 @@ fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> st
             vault.write_span(fi, crate::parse::Span { start: end, end }, &insert)
         }
         None => {
-            let text = vault.tree.files[0].text.clone();
-            let mut new_text = text.clone();
+            // in the form of the owner's spelling (§4.7); a heading embed at
+            // the end of root.md is top-level
+            let heading = owner
+                .and_then(|oid| vault.tree.block_by_id(oid))
+                .is_some_and(|r| vault.tree.node(r).kind == Kind::Section);
+            let lines: Vec<String> = owner
+                .into_iter()
+                .chain(ids)
+                .map(|id| format!("{}![[{}]]\n", if heading { "# " } else { "" }, id))
+                .collect();
+            let mut new_text = vault.tree.files[0].text.clone();
             if !new_text.is_empty() && !new_text.ends_with("\n\n") {
                 new_text.push_str(if new_text.ends_with('\n') { "\n" } else { "\n\n" });
             }
-            for id in ids {
-                new_text.push_str(&format!("![[{}]]\n", id));
-            }
+            // sibling sections a blank line apart, items tight (§4.2)
+            new_text.push_str(&lines.join(if heading { "\n" } else { "" }));
             vault.write_file_text(0, &new_text)
         }
     }

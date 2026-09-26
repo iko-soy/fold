@@ -1,7 +1,7 @@
 //! The Vim keymap: normal, insert and visual modes; counts; motions,
 //! operators and text objects; `.` repeat; `:` and `/`.
 
-use super::{order, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, Class, Editor, Group, Mode, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
@@ -34,6 +34,7 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
     if !e.vim.replaying {
         if e.vim.record.is_empty() {
             e.vim.record_changes = e.changes;
+            e.vim.record = select_keys(e);
         }
         e.vim.record.push(key);
     }
@@ -45,12 +46,75 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.vim.record.clear();
     } else if idle(e) && !e.vim.replaying {
         let rec = std::mem::take(&mut e.vim.record);
-        let first = rec.first().map(|k| k.code);
-        let is_undo = matches!(first, Some(KeyCode::Char('u') | KeyCode::Char('.')))
-            || rec.first().is_some_and(|k| k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL));
+        // undo, redo and `.` itself (after any count) are not changes to repeat
+        let ctl = |k: &KeyEvent| k.modifiers.contains(KeyModifiers::CONTROL);
+        let is_undo = rec.get(count_end(&rec, 0)).is_some_and(|k| match k.code {
+            KeyCode::Char('u') | KeyCode::Char('.') => !ctl(k),
+            KeyCode::Char('r') => ctl(k),
+            _ => false,
+        });
         if e.changes != e.vim.record_changes && !is_undo {
             e.vim.last_change = rec;
         }
+    }
+    out
+}
+
+/// A visual selection no recorded key made (a drag or a double-click, or one
+/// left by a `:` command): keys that select as much from the cursor, for the
+/// record to start with, so `.` acts on as much text as Vim's does. Insert
+/// mode no recorded key entered (the app's `n`/`N` typing a new node's
+/// title, §10.6, or an editor re-rendered while typing, §11.2) starts with
+/// `a`, so `.` types the text again rather than running it as commands.
+fn select_keys(e: &Editor) -> Vec<KeyEvent> {
+    let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    if e.mode == Mode::Insert {
+        return vec![key('a')];
+    }
+    let (Mode::Visual { line }, Some(a)) = (e.mode, e.anchor) else { return Vec::new() };
+    let (s, en) = order(a, e.cursor);
+    let counted = |n: usize, c: char| -> Vec<KeyEvent> {
+        if n == 0 { Vec::new() } else { n.to_string().chars().chain([c]).map(key).collect() }
+    };
+    let mut keys = vec![key(if line { 'V' } else { 'v' })];
+    if en.line > s.line {
+        // as many lines down, then (charwise) the same end column
+        keys.extend(counted(en.line - s.line, 'j'));
+        if !line {
+            keys.push(key('0'));
+            keys.extend(counted(en.col, 'l'));
+        }
+    } else if !line {
+        keys.extend(counted(en.col - s.col, 'l'));
+    }
+    keys
+}
+
+/// Where a count starting at `i` in recorded keys ends (`i` if there is none).
+fn count_end(keys: &[KeyEvent], i: usize) -> usize {
+    let mut j = i;
+    while keys.get(j).is_some_and(|k| {
+        !k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char(c) if c.is_ascii_digit() && (c != '0' || j > i))
+    }) {
+        j += 1;
+    }
+    j
+}
+
+/// A recorded change with its count replaced by `n`, as Vim's `.` does with
+/// a count: the count before the command and the one after an operator both
+/// go (`2d3w` becomes `{n}dw`).
+fn with_count(keys: &[KeyEvent], n: usize) -> Vec<KeyEvent> {
+    let mut out: Vec<KeyEvent> = n.to_string().chars().map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).collect();
+    let rest = &keys[count_end(keys, 0)..];
+    let op = rest.first().is_some_and(|k| {
+        !k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('d' | 'c' | 'y' | '>' | '<'))
+    });
+    if op {
+        out.push(rest[0]);
+        out.extend_from_slice(&rest[count_end(rest, 1)..]);
+    } else {
+        out.extend_from_slice(rest);
     }
     out
 }
@@ -64,6 +128,11 @@ fn to_insert(e: &mut Editor) {
 
 fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // a key that moves the cursor ends a run of typing: what is typed
+    // after it is its own undo step, as in Vim
+    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
+        e.group = Group::None;
+    }
     match key.code {
         KeyCode::Esc => leave_insert(e),
         KeyCode::Char('c') | KeyCode::Char('[') if ctl => leave_insert(e),
@@ -102,9 +171,29 @@ fn leave_insert(e: &mut Editor) {
     e.cursor.col = e.cursor.col.saturating_sub(1);
 }
 
+/// The largest count, as in Vim: more digits than that are this.
+const MAX_COUNT: usize = 999_999_999;
+
+/// The most text a count may make one command put in (Vim's "text too long").
+const MAX_TEXT: usize = 4 << 20;
+
 fn take_count(st: &mut State) -> Option<usize> {
-    let c = std::mem::take(&mut st.count).parse().ok();
-    c
+    let s = std::mem::take(&mut st.count);
+    (!s.is_empty()).then(|| s.parse().map_or(MAX_COUNT, |c: usize| c.min(MAX_COUNT)))
+}
+
+/// `f` applied `n` times from `x`, stopping once it no longer moves: a count
+/// past the end of the text stops there.
+fn repeat<T: PartialEq + Copy>(n: usize, x: T, f: impl Fn(T) -> T) -> T {
+    let mut x = x;
+    for _ in 0..n {
+        let y = f(x);
+        if y == x {
+            break;
+        }
+        x = y;
+    }
+    x
 }
 
 fn reset(e: &mut Editor) {
@@ -118,11 +207,11 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
     let n = count.unwrap_or(1).max(1);
     let p = e.cursor;
     let last = e.lines() - 1;
-    let rep = |e: &Editor, f: &dyn Fn(&Editor, Pos) -> Pos| (0..n).fold(p, |q, _| f(e, q));
+    let rep = |e: &Editor, f: &dyn Fn(&Editor, Pos) -> Pos| repeat(n, p, |q| f(e, q));
     Some(match c {
         'h' => (Pos::new(p.line, p.col.saturating_sub(n)), Kind::Excl),
-        'l' | ' ' => (Pos::new(p.line, (p.col + n).min(e.len(p.line))), Kind::Excl),
-        'j' => (Pos::new((p.line + n).min(last), p.col), Kind::Line),
+        'l' | ' ' => (Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line))), Kind::Excl),
+        'j' => (Pos::new(p.line.saturating_add(n).min(last), p.col), Kind::Line),
         'k' => (Pos::new(p.line.saturating_sub(n), p.col), Kind::Line),
         'w' => (rep(e, &|e, q| e.word_fwd(q, false)), Kind::Excl),
         'W' => (rep(e, &|e, q| e.word_fwd(q, true)), Kind::Excl),
@@ -133,19 +222,28 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
         '0' => (Pos::new(p.line, 0), Kind::Excl),
         '^' => (Pos::new(p.line, e.first_non_blank(p.line)), Kind::Excl),
         '$' => {
-            let l = (p.line + n - 1).min(last);
+            let l = p.line.saturating_add(n - 1).min(last);
             (Pos::new(l, e.len(l)), Kind::Excl)
         }
         'G' => {
             let l = count.map(|c| c.saturating_sub(1)).unwrap_or(last).min(last);
             (Pos::new(l, e.first_non_blank(l)), Kind::Line)
         }
-        '}' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, true)), 0), Kind::Excl),
-        '{' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, false)), 0), Kind::Excl),
+        '}' => {
+            let l = repeat(n, p.line, |l| e.paragraph(l, true));
+            if l == last && e.len(l) > 0 {
+                // no blank line below: on the last character, inclusive (Vim's findpar)
+                (Pos::new(l, e.len(l) - 1), Kind::Incl)
+            } else {
+                (Pos::new(l, 0), Kind::Excl)
+            }
+        }
+        '{' => (Pos::new(repeat(n, p.line, |l| e.paragraph(l, false)), 0), Kind::Excl),
         '%' => (e.match_bracket(p)?, Kind::Incl),
+        // `n` the way the last search went, `N` the other way
         'n' | 'N' => {
             let pat = e.search.clone()?;
-            (e.find(&pat, p, c == 'n')?, Kind::Excl)
+            (e.find(&pat, p, (c == 'n') == e.search_fwd)?, Kind::Excl)
         }
         ';' | ',' => {
             let (kind, ch) = e.vim.last_find?;
@@ -159,15 +257,40 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
             } else {
                 kind
             };
-            find(e, kind, ch, n)?
+            // a repeat moves: it skips a `t`/`T` target next to the cursor,
+            // unless given a count (Vim's 'cpoptions' without `;`)
+            find(e, kind, ch, n, n == 1)?
         }
         _ => return None,
     })
 }
 
-fn find(e: &Editor, kind: char, ch: char, n: usize) -> Option<(Pos, Kind)> {
-    let to = e.find_char(e.cursor, ch, kind, n)?;
+fn find(e: &Editor, kind: char, ch: char, n: usize, skip: bool) -> Option<(Pos, Kind)> {
+    let to = e.find_char(e.cursor, ch, kind, n, skip)?;
     Some((to, if kind == 'f' || kind == 't' { Kind::Incl } else { Kind::Excl }))
+}
+
+/// `ge`: back to the end of the `n`th word before `p`, as Vim's
+/// bckend_word: off the word `p` is in, then back over blanks and line ends,
+/// stopping at an empty line.
+fn end_back(e: &Editor, p: Pos, n: usize) -> Pos {
+    let class_at = |q: Pos| e.char_at(q).map(|ch| class(ch, false));
+    let blank = |q: Pos| class_at(q) == Some(Class::Space) && !(q.col == 0 && e.len(q.line) == 0);
+    let mut q = p;
+    for _ in 0..n.max(1) {
+        let k = class_at(q).filter(|k| *k != Class::Space);
+        let Some(mut r) = e.prev(q) else { break };
+        while k.is_some() && class_at(r) == k {
+            let Some(x) = e.prev(r) else { return r };
+            r = x;
+        }
+        while blank(r) {
+            let Some(x) = e.prev(r) else { return r };
+            r = x;
+        }
+        q = r;
+    }
+    q
 }
 
 fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
@@ -244,31 +367,43 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
     if let Some(op) = e.vim.op {
         if c == op || (op == 'c' && c == 'c') {
             // dd, cc, yy, >>, <<: whole lines
-            let n = count.unwrap_or(1) * e.vim.op_count.max(1);
-            let l2 = (e.cursor.line + n - 1).min(e.lines() - 1);
+            let n = count.unwrap_or(1).saturating_mul(e.vim.op_count.max(1)).min(MAX_COUNT);
+            let l2 = e.cursor.line.saturating_add(n - 1).min(e.lines() - 1);
             let from = Pos::new(e.cursor.line, 0);
             e.vim.op = None;
             apply(e, op, from, Pos::new(l2, 0), Kind::Line);
             return out;
         }
+        // the count before the operator multiplies the motion's (`2d3w` is `d6w`)
+        let n = count.map(|c| c.saturating_mul(e.vim.op_count.max(1)).min(MAX_COUNT)).or(Some(e.vim.op_count).filter(|c| *c > 0));
+        e.vim.op_count = 0;
         match c {
             'i' | 'a' | 'f' | 'F' | 't' | 'T' | 'g' => {
                 e.vim.prefix = Some(c);
-                e.vim.count = count.map(|c| c.to_string()).unwrap_or_default();
+                e.vim.count = n.map(|c| c.to_string()).unwrap_or_default();
                 return out;
             }
             _ => {}
         }
-        let n = count.map(|c| c * e.vim.op_count.max(1)).or(Some(e.vim.op_count).filter(|c| *c > 0));
         e.vim.op = None;
-        e.vim.op_count = 0;
         // cw on a word is ce; dw stops at the end of the line
-        let c = if op == 'c' && (c == 'w' || c == 'W') && e.char_at(e.cursor).is_some_and(|ch| !ch.is_whitespace()) {
+        let cw = op == 'c' && (c == 'w' || c == 'W') && e.char_at(e.cursor).is_some_and(|ch| !ch.is_whitespace());
+        let c = if cw {
             if c == 'w' { 'e' } else { 'E' }
         } else {
             c
         };
-        if let Some((mut to, kind)) = motion(e, c, n) {
+        // but from the last character of a word, that character is the
+        // first word (Vim's end_word with stop): `cw` there changes just it
+        let m = if cw && e.word_at(e.cursor, c == 'E').1.col == e.cursor.col + 1 {
+            match n.unwrap_or(1) {
+                1 => Some((e.cursor, Kind::Incl)),
+                k => motion(e, c, Some(k - 1)),
+            }
+        } else {
+            motion(e, c, n)
+        };
+        if let Some((mut to, kind)) = m {
             if (c == 'w' || c == 'W') && to.line > e.cursor.line {
                 to = Pos::new(e.cursor.line, e.len(e.cursor.line));
             }
@@ -327,7 +462,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         'x' | 'X' => {
             let p = e.cursor;
             let (a, b) = if c == 'x' {
-                (p, Pos::new(p.line, (p.col + n).min(e.len(p.line))))
+                (p, Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line))))
             } else {
                 (Pos::new(p.line, p.col.saturating_sub(n)), p)
             };
@@ -340,14 +475,14 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         's' => {
             let p = e.cursor;
-            let b = Pos::new(p.line, (p.col + n).min(e.len(p.line)));
+            let b = Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)));
             to_insert(e);
             let t = e.delete(p, b);
             e.copy(t, false);
         }
         'S' => {
             let l = e.cursor.line;
-            apply(e, 'c', Pos::new(l, 0), Pos::new((l + n - 1).min(e.lines() - 1), 0), Kind::Line);
+            apply(e, 'c', Pos::new(l, 0), Pos::new(l.saturating_add(n - 1).min(e.lines() - 1), 0), Kind::Line);
         }
         'D' | 'C' | 'Y' => {
             let op = match c {
@@ -357,9 +492,9 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             };
             if c == 'Y' {
                 let l = e.cursor.line;
-                apply(e, 'y', Pos::new(l, 0), Pos::new((l + n - 1).min(e.lines() - 1), 0), Kind::Line);
+                apply(e, 'y', Pos::new(l, 0), Pos::new(l.saturating_add(n - 1).min(e.lines() - 1), 0), Kind::Line);
             } else {
-                let l = (e.cursor.line + n - 1).min(e.lines() - 1);
+                let l = e.cursor.line.saturating_add(n - 1).min(e.lines() - 1);
                 let from = e.cursor;
                 apply(e, op, from, Pos::new(l, e.len(l)), Kind::Excl);
             }
@@ -375,7 +510,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         '~' => {
             let p = e.cursor;
-            let b = Pos::new(p.line, (p.col + n).min(e.len(p.line)));
+            let b = Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)));
             e.checkpoint();
             e.change_case(p, b, '~');
             e.cursor = Pos::new(p.line, b.col);
@@ -386,18 +521,28 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         'u' => {
             for _ in 0..n {
-                e.undo();
-            }
-        }
-        '.' => {
-            let keys = e.vim.last_change.clone();
-            e.vim.replaying = true;
-            for _ in 0..n {
-                for k in &keys {
-                    handle(e, *k);
+                if !e.undo() {
+                    break;
                 }
             }
+        }
+        // never inside a replay: `.` would replay itself
+        '.' if !e.vim.replaying => {
+            // a count replaces the change's own, and stays for the next `.`
+            if let Some(n) = count.filter(|_| !e.vim.last_change.is_empty()) {
+                e.vim.last_change = with_count(&e.vim.last_change, n);
+            }
+            let keys = e.vim.last_change.clone();
+            e.vim.replaying = true;
+            for k in keys {
+                handle(e, k);
+            }
             e.vim.replaying = false;
+            // a replay cut short (say, its selection was not made by keys)
+            // leaves no operator waiting for the next key
+            if e.mode == Mode::Normal {
+                reset(e);
+            }
         }
         'v' | 'V' => {
             e.mode = Mode::Visual { line: c == 'V' };
@@ -410,6 +555,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             let w = e.text(s, en);
             if !w.trim().is_empty() {
                 e.search = Some(w);
+                e.search_fwd = c == '*';
                 e.set_cursor(s);
                 e.search_next(c == '*');
             }
@@ -427,7 +573,7 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
     match p {
         'f' | 'F' | 't' | 'T' => {
             e.vim.last_find = Some((p, c));
-            if let Some((to, kind)) = find(e, p, c, count.unwrap_or(1)) {
+            if let Some((to, kind)) = find(e, p, c, count.unwrap_or(1), false) {
                 if let Some(op) = e.vim.op.take() {
                     let from = e.cursor;
                     apply(e, op, from, to, kind);
@@ -441,10 +587,9 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
         'r' => {
             if matches!(e.mode, Mode::Visual { .. }) {
                 if let Some((s, en)) = e.selection() {
+                    // each character where it is: line ends and tags stay (§5.2)
                     e.checkpoint();
-                    let t: String = e.text(s, en).chars().map(|ch| if ch == '\n' { ch } else { c }).collect();
-                    e.delete(s, en);
-                    e.insert(s, &t);
+                    e.map_chars(s, en, |_| c);
                     e.cursor = s;
                     e.anchor = None;
                     e.mode = Mode::Normal;
@@ -452,7 +597,7 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
             } else {
                 let n = count.unwrap_or(1);
                 let pos = e.cursor;
-                if pos.col + n <= e.len(pos.line) {
+                if pos.col.checked_add(n).is_some_and(|end| end <= e.len(pos.line)) {
                     e.checkpoint();
                     e.delete(pos, Pos::new(pos.line, pos.col + n));
                     e.insert(pos, &c.to_string().repeat(n));
@@ -471,15 +616,27 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
                     e.set_cursor(to);
                 }
             }
+            // ge: back to the end of the previous word, inclusive
             'e' => {
-                let to = e.word_back(e.cursor, false);
-                let to = e.prev(to).unwrap_or(to);
-                e.set_cursor(to);
+                let to = end_back(e, e.cursor, count.unwrap_or(1));
+                if let Some(op) = e.vim.op.take() {
+                    let from = e.cursor;
+                    apply(e, op, from, to, Kind::Incl);
+                } else {
+                    e.set_cursor(to);
+                }
             }
-            // gj / gk: by screen row through wrapped lines
+            // gj / gk: by screen row through wrapped lines; with an operator
+            // they are charwise and exclusive, not linewise like j / k
             'j' | 'k' => {
                 let n = count.unwrap_or(1) as isize;
+                let from = e.cursor;
                 e.move_visual(if c == 'j' { n } else { -n });
+                if let Some(op) = e.vim.op.take() {
+                    let to = e.cursor;
+                    e.cursor = from;
+                    apply(e, op, from, to, Kind::Excl);
+                }
             }
             _ => e.vim.op = None,
         },
@@ -518,9 +675,9 @@ fn apply(e: &mut Editor, op: char, from: Pos, to: Pos, kind: Kind) {
         let (l1, l2) = (s.line, en.line);
         match op {
             'd' => {
+                // cut, so a nested block's title line put back moves the block (§5.2)
                 e.checkpoint();
-                let t = e.delete_lines(l1, l2);
-                e.copy(t, true);
+                e.cut_lines(l1, l2);
                 e.cursor = Pos::new(e.cursor.line, e.first_non_blank(e.cursor.line));
             }
             'y' => {
@@ -587,11 +744,17 @@ fn put(e: &mut Editor, after: bool, n: usize) {
     if clip.text.is_empty() {
         return;
     }
+    if n > 1 && clip.text.len().saturating_mul(n) > MAX_TEXT {
+        e.message = Some("text too long".into());
+        return;
+    }
     e.checkpoint();
     let text = clip.text.repeat(n.max(1));
     if clip.linewise {
+        // one put of cut lines moves a nested block they hold (§5.2);
+        // more are copies
         let l = e.cursor.line;
-        let first = e.put_lines(l, &text, after);
+        let first = if n > 1 { e.put_lines(l, &text, after) } else { e.put_clip_lines(l, after) };
         e.cursor = Pos::new(first, e.first_non_blank(first));
     } else {
         let at = if after { Pos::new(e.cursor.line, (e.cursor.col + 1).min(e.len(e.cursor.line))) } else { e.cursor };
@@ -643,10 +806,16 @@ fn visual_cmd(e: &mut Editor, c: char, n: usize) -> Outcome {
             let clip = e.clip.clone();
             let (a, b) = e.selection().unwrap_or((s, en));
             e.checkpoint();
-            let gone = e.delete(a, b);
+            // in V-LINE the lines' text goes and one line is left for the new
+            // text, so whole lines go in without their last newline, and the
+            // lines replaced are kept whole
+            let mut gone = e.delete(a, b);
+            if line {
+                gone.push('\n');
+            }
             e.cursor = a;
-            let end = e.insert(a, clip.text.strip_suffix('\n').filter(|_| clip.linewise && !line).unwrap_or(&clip.text));
-            e.cursor = e.prev(end).unwrap_or(end);
+            let end = e.insert(a, clip.text.strip_suffix('\n').filter(|_| clip.linewise).unwrap_or(&clip.text));
+            e.cursor = if line { Pos::new(a.line, e.first_non_blank(a.line)) } else { e.prev(end).unwrap_or(end) };
             e.copy(gone, line);
             exit(e);
         }
@@ -748,6 +917,17 @@ mod tests {
         assert_eq!(body(&e), "abc def\nghi\njkl");
         keys(&mut e, "wv$~");
         assert_eq!(body(&e), "abc DEF\nghi\njkl");
+    }
+
+    #[test]
+    fn dot_after_typing_in_insert_mode_no_key_entered() {
+        // the app can start the editor typing (`n`/`N`, a re-render while
+        // typing): `.` types the text again, never runs it as commands
+        let (_d, mut e) = editor("x\n", Keys::Vim);
+        e.mode = Mode::Insert;
+        e.cursor = Pos::new(2, 1);
+        keys(&mut e, "Dog<Esc>.");
+        assert_eq!(body(&e), "xDogDog");
     }
 
     #[test]

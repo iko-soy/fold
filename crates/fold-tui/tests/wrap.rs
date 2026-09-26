@@ -129,3 +129,228 @@ fn clicking_a_wrapped_row_in_the_editor_places_the_cursor_there() {
     let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
     assert!(text.contains("the #offsite box"), "{}", text);
 }
+
+#[test]
+fn tabs_in_code_keep_their_indentation() {
+    // a tab-indented line (Go, a Makefile recipe) is drawn indented, not
+    // flush with the line above: raw text is never hidden (§10.9)
+    let (_d, mut app) = app_with("# A\n\n```\nflush\n\tindented\n```\n");
+    let s = draw(&mut app);
+    let f = s.iter().find(|l| l.contains("flush")).unwrap();
+    let i = s.iter().find(|l| l.contains("indented")).unwrap();
+    // a tab reaches the next stop, every 4 columns
+    assert_eq!(col(i, "indented"), col(f, "flush") + 4, "reading pane: {:#?}", s);
+}
+
+#[test]
+fn tabs_in_code_keep_their_indentation_in_the_editor() {
+    // the editor shows the tab as whitespace too, and its cursor agrees
+    let (_d, mut app) = app_with("# A\n\n```\nflush\n\tindented\n```\n");
+    app.show_reading = false;
+    keys(&mut app, "e");
+    let s = draw(&mut app);
+    let f = s.iter().find(|l| l.contains("flush")).unwrap();
+    let y = s.iter().position(|l| l.contains("indented")).unwrap();
+    assert_eq!(col(&s[y], "indented"), col(f, "flush") + 4, "editor: {:#?}", s);
+    // the cursor just past the tab (Home from the line's end goes to the
+    // first non-blank) sits on the `i`
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Home);
+    let mut t = Terminal::new(TestBackend::new(W, H)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let p = t.get_cursor_position().unwrap();
+    assert_eq!((p.x, p.y), (col(&s[y], "indented"), y as u16), "editor: {:#?}", s);
+}
+
+#[test]
+fn a_very_long_line_does_not_overflow_the_styler() {
+    // over 65,535 columns in all, with a stray `*` so the styler pushes it in
+    // several pieces, and a link 65,541 columns in
+    let (_d, mut app) = app_with(&format!("# A\n\n{} * {} [docs](x)\n", "a".repeat(40000), "b".repeat(25536)));
+    let s = draw(&mut app);
+    assert!(s.iter().any(|l| l.contains("aaaa")), "{:#?}", s);
+    // zw: cut at the edge; the link is far off screen, not wrapped round
+    // into a u16 over the start of the line
+    keys(&mut app, "zw");
+    let s = draw(&mut app);
+    let y = s.iter().position(|l| l.contains("aaaa")).unwrap();
+    for x in 0..W {
+        assert_ne!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+    }
+}
+
+#[test]
+fn a_link_after_wide_text_is_clickable_where_drawn() {
+    // 28 wide characters fill the first row; the link is drawn on the second
+    let line = format!("{} see [docs](https://x.org)", "漢".repeat(28));
+    let (_d, mut app) = app_with(&format!("# A\n\n{}\n", line));
+    let s = draw(&mut app);
+    let y = s.iter().position(|l| l.contains("[docs]")).unwrap();
+    let x = col(&s[y], "docs");
+    assert_eq!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+}
+
+#[test]
+fn wide_text_on_an_earlier_row_does_not_shift_the_link_region() {
+    // 13 wide characters fill the first row, the link sits early on the second
+    let line = format!("{} {}see [docs](x) and plain words", "漢".repeat(13), "word ".repeat(6));
+    let (_d, mut app) = app_with(&format!("# A\n\n{}\n", line));
+    let s = draw(&mut app);
+    let y = s.iter().position(|l| l.contains("[docs]")).unwrap();
+    let docs = col(&s[y], "docs");
+    let plain = col(&s[y], "plain");
+    assert_eq!(app.hit_at(plain, y as u16), Some(Hit::DocLine(2)), "plain text is not the link: {:#?}", s);
+    assert_eq!(app.hit_at(docs, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+}
+
+#[test]
+fn a_checkbox_and_link_after_a_tab_are_clickable_where_drawn() {
+    // a tab before them is drawn as spaces to its tab stop
+    let (_d, mut app) = app_with("# A\n\n- [ ] x\tsee [docs](x)\n");
+    let s = draw(&mut app);
+    // the reading pane's row with the item (the outline may show it too, on
+    // the left)
+    let y = s.iter().rposition(|l| l.contains("[docs]")).unwrap();
+    let rcol = |n: &str| s[y][..s[y].rfind(n).unwrap()].chars().count() as u16;
+    assert_eq!(app.hit_at(rcol("☐"), y as u16), Some(Hit::DocCheck(2)), "{:#?}", s);
+    // exactly the link text is the link, not the brackets around it
+    let docs = rcol("docs");
+    for x in docs..docs + 4 {
+        assert_eq!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+    }
+    for x in [docs - 1, docs + 4] {
+        assert_eq!(app.hit_at(x, y as u16), Some(Hit::DocLine(2)), "{:#?}", s);
+    }
+}
+
+#[test]
+fn a_link_wrapped_onto_the_next_row_is_clickable_on_both() {
+    let line = format!("{} [alpha beta gamma delta epsilon zeta](u) end", "x".repeat(40));
+    let (_d, mut app) = app_with(&format!("# A\n\n{}\n", line));
+    let s = draw(&mut app);
+    let y0 = s.iter().position(|l| l.contains("[alpha")).unwrap();
+    let y1 = s.iter().position(|l| l.contains("gamma")).unwrap();
+    assert_eq!(y1, y0 + 1, "{:#?}", s);
+    assert_eq!(app.hit_at(col(&s[y0], "alpha"), y0 as u16), Some(Hit::Link(2)), "{:#?}", s);
+    assert_eq!(app.hit_at(col(&s[y1], "gamma"), y1 as u16), Some(Hit::Link(2)), "{:#?}", s);
+    assert_eq!(app.hit_at(col(&s[y1], "end"), y1 as u16), Some(Hit::DocLine(2)), "{:#?}", s);
+}
+
+#[test]
+fn a_selection_over_wide_text_covers_it() {
+    let (_d, mut app) = app_with("# 漢字漢字\n");
+    keys(&mut app, "e");
+    // normal keymap: Ctrl-A selects all
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let mut t = Terminal::new(TestBackend::new(W, H)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    // the editor's row: the last one on screen showing the heading's text
+    let y = (0..H).rev().find(|&y| (0..W).any(|x| b[(x, y)].symbol() == "漢")).unwrap();
+    let x0 = (0..W).find(|&x| b[(x, y)].symbol() == "#").unwrap();
+    // "# 漢字漢字" spans 2 + 4 * 2 = 10 cells; each character's cell (a wide
+    // one's second cell is its continuation) carries the selection
+    let cells: Vec<_> = (x0..x0 + 10).map(|x| (x - x0, b[(x, y)].symbol().to_string(), b[(x, y)].bg)).collect();
+    for (dx, want) in [(0, "#"), (1, " "), (2, "漢"), (4, "字"), (6, "漢"), (8, "字")] {
+        let (_, sym, bg) = &cells[dx];
+        assert_eq!(sym, want, "{:?}", cells);
+        assert_eq!(*bg, ratatui::style::Color::Indexed(24), "{:?} at x0+{} is not selected: {:?}", want, dx, cells);
+    }
+}
+
+#[test]
+fn a_selection_over_a_tab_covers_its_spaces_and_no_more() {
+    let (_d, mut app) = app_with("# A\n\n```\n\tλ\n```\n");
+    app.show_reading = false;
+    keys(&mut app, "e");
+    // select the tab alone: Shift-Right from the start of its line
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Home);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    let mut t = Terminal::new(TestBackend::new(W, H)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    let y = (0..H).find(|&y| (0..W).any(|x| b[(x, y)].symbol() == "λ")).unwrap();
+    let xx = (0..W).find(|&x| b[(x, y)].symbol() == "λ").unwrap();
+    let bgs: Vec<_> = (xx - 4..=xx).map(|x| b[(x, y)].bg).collect();
+    let sel = ratatui::style::Color::Indexed(24);
+    assert_eq!(bgs[..4], [sel; 4], "the tab's four cells are selected: {:?}", bgs);
+    assert_ne!(bgs[4], sel, "the λ is not: {:?}", bgs);
+}
+
+#[test]
+fn typing_resets_the_editors_screen_row_goal_column() {
+    // wrapping on: after typing, Down aims for the column the cursor is at,
+    // not the one the previous Down aimed for (as with wrapping off)
+    let (_d, mut app) = app_with("# A\n\nabcdef\nx\nabcdef\n");
+    keys(&mut app, "e");
+    draw(&mut app);
+    // to column 1 of the first "abcdef", then Down onto the end of "x"
+    for c in [KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Down] {
+        key(&mut app, c);
+    }
+    keys(&mut app, "yz");
+    // the cursor is at column 3 of "xyz"; Down lands at column 3 below
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "Q");
+    key(&mut app, KeyCode::Esc);
+    let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
+    assert!(text.contains("\nxyz\nabcQdef\n"), "{}", text);
+}
+
+#[test]
+fn undo_resets_the_editors_screen_row_goal_column() {
+    // wrapping on: Ctrl-Z moves the cursor back to where the typing was, and
+    // the next Down aims from there, not from the column before the undo
+    let (_d, mut app) = app_with("# A\n\nabcdef\nx\nabcdef\n");
+    keys(&mut app, "e");
+    draw(&mut app);
+    for c in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        key(&mut app, c);
+    }
+    keys(&mut app, "yz");
+    // Home, then Down onto column 0 of "x": the goal column is now 0
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Down);
+    // undo puts the cursor back at column 6 of "abcdef"
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "Q");
+    key(&mut app, KeyCode::Esc);
+    let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
+    assert!(text.contains("\nabcdef\nxQ\nabcdef\n"), "{}", text);
+}
+
+#[test]
+fn a_tab_in_a_title_is_drawn_as_whitespace() {
+    // the terminal drops a tab: a title shows it as the spaces to its next
+    // stop, counted from the title's start (raw text is never hidden, §10.9)
+    let (_d, mut app) = app_with("- x\ty\n  - c\n");
+    app.set_edit_keys(EditKeys::Normal);
+    key(&mut app, KeyCode::Enter); // zoom into it
+    let s = draw(&mut app);
+    assert!(s[0].contains("fold › x   y"), "breadcrumb: {:#?}", s);
+    assert!(s[1].contains("╭ x   y "), "reading pane: {:#?}", s);
+    assert!(s[2].contains("▾ x   y"), "outline: {:#?}", s);
+    // a node's parents in the filter's hits
+    key(&mut app, KeyCode::Tab);
+    keys(&mut app, "/c");
+    assert!(draw(&mut app).iter().any(|l| l.contains("c  x   y")), "{:#?}", draw(&mut app));
+    key(&mut app, KeyCode::Esc);
+    // the node menu, the property form and the editor name it too
+    keys(&mut app, "zpm");
+    assert!(draw(&mut app).iter().any(|l| l.contains("╭ x   y ")), "{:#?}", draw(&mut app));
+    key(&mut app, KeyCode::Esc);
+    keys(&mut app, "a");
+    assert!(draw(&mut app).iter().any(|l| l.contains("Properties — x   y")), "{:#?}", draw(&mut app));
+    key(&mut app, KeyCode::Esc);
+    keys(&mut app, "e");
+    assert!(draw(&mut app).iter().any(|l| l.contains("Editing x   y")), "{:#?}", draw(&mut app));
+}

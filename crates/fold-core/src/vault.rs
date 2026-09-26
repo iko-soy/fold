@@ -36,11 +36,7 @@ impl Vault {
         }
         let mut v = Vault {
             dir: dir.to_path_buf(),
-            tree: Tree {
-                files: Vec::new(),
-                root: (0, 0),
-                blocks: Vec::new(),
-            },
+            tree: Tree::new(Vec::new()),
         };
         v.reload()?;
         Ok(v)
@@ -100,25 +96,7 @@ impl Vault {
         }
 
         // Stitch: collect blocks, resolve embed edges (§4.7).
-        let mut blocks: Vec<(NRef, Id)> = Vec::new();
-        for (fi, f) in files.iter().enumerate() {
-            if fi == 0 {
-                continue;
-            }
-            if let Some(&first) = f.nodes[f.root_node].children.first() {
-                if let Some(b) = &f.nodes[first].block {
-                    if let Some(id) = &b.id {
-                        blocks.push(((fi, first), id.clone()));
-                    }
-                }
-            }
-        }
-
-        self.tree = Tree {
-            files,
-            root: (0, 0),
-            blocks,
-        };
+        self.tree = Tree::new(files);
         Ok(())
     }
 
@@ -180,14 +158,34 @@ impl Vault {
         self.write_file_text(file, &new_text)
     }
 
-    /// Write a whole file atomically, then re-parse it.
+    /// Write a whole file atomically, then re-parse it. Refuses, writing
+    /// nothing, when the file on disk is no longer the text it was parsed
+    /// from (`check_unchanged`).
     pub fn write_file_text(&mut self, file: usize, new_text: &str) -> std::io::Result<()> {
+        self.check_unchanged(file)?;
         let path = self.tree.files[file].path.clone();
         atomic_write(&self.dir.join(&path), new_text)?;
         self.reparse(file, new_text)
     }
 
-    /// Re-parse one file from given text (after our own write) and re-stitch.
+    /// Refuse when the file on disk is no longer the text it was parsed
+    /// from: every op computes its new text from the tree, so writing would
+    /// silently drop a change (a sync, another editor) not reloaded yet
+    /// (§1 principle 4, §5.2 step 5, §11.2).
+    pub fn check_unchanged(&self, file: usize) -> std::io::Result<()> {
+        let path = &self.tree.files[file].path;
+        // a missing file reads as empty, as `reload` reads a missing root.md
+        if read_if_exists(&self.dir.join(path))?.unwrap_or_default() != self.tree.files[file].text {
+            return Err(std::io::Error::other(format!(
+                "{} changed on disk; not overwriting",
+                path
+            )));
+        }
+        Ok(())
+    }
+
+    /// Re-parse one file from given text (after our own write, or as read
+    /// from disk) and re-stitch.
     pub fn reparse(&mut self, file: usize, text: &str) -> std::io::Result<()> {
         let path = self.tree.files[file].path.clone();
         let old_block = self.tree.files[file]
@@ -218,26 +216,8 @@ impl Vault {
             })
         };
         self.tree.files[file] = parse_file(&path, text, file, block);
-        self.restitch();
+        self.tree.restitch();
         Ok(())
-    }
-
-    /// Rebuild the block list and edge spans after a re-parse.
-    fn restitch(&mut self) {
-        let mut blocks: Vec<(NRef, Id)> = Vec::new();
-        for (fi, f) in self.tree.files.iter().enumerate() {
-            if fi == 0 {
-                continue;
-            }
-            if let Some(&first) = f.nodes[f.root_node].children.first() {
-                if let Some(b) = &f.nodes[first].block {
-                    if let Some(id) = &b.id {
-                        blocks.push(((fi, first), id.clone()));
-                    }
-                }
-            }
-        }
-        self.tree.blocks = blocks;
     }
 
     /// Shortest prefix of `id` not already used by another file (§6.4).
@@ -263,14 +243,24 @@ impl Vault {
             .collect()
     }
 
-    /// Move a file to the trash (§11.5) and remove it from the vault.
+    /// Move a file to the trash (§11.5) and remove it from the vault. Only
+    /// that file leaves the index: the others are not read again, so a
+    /// change another program made to one of them (a sync) is not taken in
+    /// as part of the operation, nor into its op-log entry (§10.10).
     pub fn trash_file(&mut self, file: usize) -> std::io::Result<()> {
         let path = self.tree.files[file].path.clone();
         let trash = trash_dir();
         std::fs::create_dir_all(&trash)?;
         let target = trash_target(&trash, &path);
         move_file(&self.dir.join(&path), &target)?;
-        self.reload()?;
+        self.tree.files.remove(file);
+        // the files after it move down one place
+        for (fi, f) in self.tree.files.iter_mut().enumerate().skip(file) {
+            for n in &mut f.nodes {
+                n.file = fi;
+            }
+        }
+        self.tree.restitch();
         Ok(())
     }
 
@@ -464,6 +454,27 @@ impl Vault {
         Some(cur)
     }
 
+    /// Every node at a case-insensitive title path from the root (§3.4):
+    /// each step keeps every child whose title matches, so a path is
+    /// ambiguous only when it names two nodes, whatever titles repeat on
+    /// the way.
+    fn find_all_by_path(&self, segs: &[String]) -> Vec<NRef> {
+        let mut found = vec![self.tree.root];
+        for seg in segs {
+            let mut next = Vec::new();
+            for &p in &found {
+                for c in self.tree.resolved_children(p) {
+                    // a block embedded twice is still one node
+                    if title_eq(&self.tree.node(c).title, seg) && !next.contains(&c) {
+                        next.push(c);
+                    }
+                }
+            }
+            found = next;
+        }
+        found
+    }
+
     /// Resolve a command target: id (or unique leading run), then path, then
     /// unique title (§3.4).
     pub fn resolve_target(&self, text: &str) -> Result<NRef, String> {
@@ -494,10 +505,13 @@ impl Vault {
                 None => self.tree.root,
             };
             let _ = base;
-            if let Some(r) = self.find_by_path(&segs) {
-                return Ok(r);
-            }
-            return Err(format!("no node at path {:?}", text));
+            // a path that matches twice is an ambiguity, never a guess
+            let found = self.find_all_by_path(&segs);
+            return match found.len() {
+                1 => Ok(found[0]),
+                0 => Err(format!("no node at path {:?}", text)),
+                _ => Err(format!("path {:?} is ambiguous", text)),
+            };
         }
         // 3. unique title
         let mut found: Vec<NRef> = Vec::new();

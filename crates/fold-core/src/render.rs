@@ -154,6 +154,9 @@ impl Walk<'_> {
         // parent's file (an embed's target sits at the embed's position).
         let cindent = dindent + tree.indent(c).saturating_sub(tree.indent(r));
         if self.resolve && cn.is_embed() {
+            // only the block's own embed resolves; a second embed of the
+            // id renders as broken (§6.2), so the block's lines appear, and
+            // are owned, once whatever the zoom
             let t = tree.resolved_child(c);
             if t != c {
                 // A section at this position is one below the parent; an
@@ -179,7 +182,12 @@ impl Walk<'_> {
                 return;
             }
         }
-        let clevel = (dlevel as isize + tree.level(c) as isize - tree.level(r) as isize).max(0);
+        // A section under an item can sit shallower than the item's section
+        // (§3.1: a skipped level above it is honoured), so the shift can
+        // take it below level 1. It prints at 1 then, and its subtree is
+        // levelled from there, so a child section still prints deeper.
+        let min = if cn.kind == Kind::Section { 1 } else { 0 };
+        let clevel = (dlevel as isize + tree.level(c) as isize - tree.level(r) as isize).max(min);
         self.node(c, clevel as usize, cindent, owner, outer);
     }
 
