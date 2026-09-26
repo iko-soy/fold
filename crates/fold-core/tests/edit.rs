@@ -740,3 +740,38 @@ fn a_held_block_title_is_in_transit_not_deleted() {
     assert!(!d.path().join(&block_path).exists());
     assert!(buf.dirty.is_empty(), "{:?}", buf.dirty);
 }
+
+#[test]
+fn a_held_block_still_in_the_buffer_is_not_in_transit() {
+    // the clipboard holding a copy of a block's title line keeps the block
+    // only while nothing of it is in the buffer; a title line re-spelled in
+    // place, or deleted while a block nested in it stays, deletes the block
+    // (§5.2) at once
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    ops::make_block(&mut v, t).unwrap();
+    let block_path = v.tree.files[1].path.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.hold(vec![buf.lines[i].owner]);
+    buf.set_line(i, "task".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# A\n\n- one\ntask\n");
+    assert!(!d.path().join(&block_path).exists());
+
+    let (d, mut v) = vault_with("# A\n\n- one\n- b\n  - c\n- two\n");
+    let c = v.find_by_path(&["A".into(), "b".into(), "c".into()]).unwrap();
+    let c = ops::make_block(&mut v, c).unwrap();
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    ops::make_block(&mut v, b).unwrap();
+    let b_path = v.tree.files.iter().find(|f| f.text.contains(&format!("![[{}]]", c.as_str()))).unwrap().path.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- b").unwrap();
+    buf.hold(vec![buf.lines[i].owner]);
+    buf.delete_line(i);
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n  ![[{}]]\n- two\n", c.as_str()));
+    assert!(!d.path().join(&b_path).exists());
+}

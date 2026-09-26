@@ -186,11 +186,12 @@ impl EditBuffer {
 
     /// The nested blocks whose title line the editor's clipboard holds
     /// (§5.2: cutting a block's title line and pasting it moves the block).
-    /// While held, a block with no title line in the buffer is in transit:
-    /// the enclosing block is written without its embed, and the block and
-    /// its file are left alone until the line is pasted back. A block
-    /// released with no line in the buffer is dirty again, so the next
-    /// save deletes it, as deleting its title line does.
+    /// While held, a block with nothing in the buffer (no line of its own or
+    /// of a block nested in it) is in transit: the enclosing block is
+    /// written without its embed, and the block and its file are left alone
+    /// until the line is pasted back. A block released with no line in the
+    /// buffer is dirty again, so the next save deletes it, as deleting its
+    /// title line does.
     pub fn hold(&mut self, owners: Vec<Owner>) {
         for o in std::mem::replace(&mut self.held, owners) {
             if !self.held.contains(&o) && !self.lines.iter().any(|l| l.owner == o) {
@@ -289,7 +290,7 @@ impl EditBuffer {
     /// line deletes the block: every line it still owned is re-tagged to
     /// the enclosing block, the blocks nested in it are nested in that
     /// block, and its file goes to trash once that block is written without
-    /// its embed — unless the title line is held in the clipboard (`hold`).
+    /// its embed — unless it is in transit, its title line cut (`hold`).
     fn settle(&mut self) {
         // lines of a deleted block put back (by the editor's own undo) are
         // the enclosing block's text like the rest of them
@@ -315,6 +316,11 @@ impl EditBuffer {
                 if title.is_none() && first.is_some_and(|l| l.text.trim().is_empty()) {
                     continue;
                 }
+                // one whose title line the clipboard holds, with nothing of
+                // it or of the blocks in it left here, is in transit (`hold`)
+                let transit = first.is_none()
+                    && self.held.contains(&o)
+                    && !self.lines.iter().any(|l| self.nested_in(l.owner, o).is_some());
                 let mut moved = title.is_none();
                 let above = title.unwrap_or(self.lines.len());
                 for l in self.lines[..above].iter_mut().filter(|l| l.owner == o) {
@@ -324,7 +330,7 @@ impl EditBuffer {
                 if title.is_none() {
                     self.dirty.retain(|d| *d != o);
                 }
-                if title.is_none() && !self.held.contains(&o) {
+                if title.is_none() && !transit {
                     for i in self.owners.values_mut() {
                         if i.parent == Some(o) {
                             i.parent = Some(parent);
