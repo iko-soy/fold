@@ -658,3 +658,35 @@ fn toggle_taskness_on_a_setext_heading_makes_it_a_task() {
     ops::toggle_taskness(&mut v, r.unwrap()).unwrap();
     assert_eq!(v.tree.files[0].text, "# Title\n\nbody\n");
 }
+
+#[test]
+fn demote_keeps_a_fenced_code_body_with_its_node() {
+    // b's body is a fenced code block; demoting b under a must re-indent the
+    // fence with b, or the code falls out of b's region and becomes a's text
+    let (d, mut v) = vault_with("- a\n- b\n  ```\n  code\n  ```\n");
+    let b = at(&v, &["b"]);
+    ops::demote(&mut v, b).unwrap();
+    assert_eq!(read(&d, "root.md"), "- a\n  - b\n    ```\n    code\n    ```\n");
+    let b = at(&v, &["a", "b"]);
+    let text = v.tree.files[0].text.clone();
+    assert!(
+        v.tree.node(b).text_lines(&text).iter().any(|l| l.contains("code")),
+        "code block is no longer b's body:\n{}",
+        text
+    );
+}
+
+#[test]
+fn respelling_keeps_code_in_a_fence_as_written() {
+    // a fence moves with its node; the code inside keeps its own indent, a
+    // tab included, and a `#` line in it is code, not a heading (§3.3)
+    let src = "# P\n\n## S\n\n```\n\tx\n  # not a heading\n```\n";
+    let (_d, mut v) = vault_with(src);
+    let s = at(&v, &["P", "S"]);
+    ops::toggle_spelling(&mut v, s).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert_eq!(text, "# P\n\n- S\n\n  ```\n  \tx\n    # not a heading\n  ```\n");
+    let s = at(&v, &["P", "S"]);
+    ops::toggle_spelling(&mut v, s).unwrap();
+    assert_eq!(v.tree.files[0].text, src);
+}

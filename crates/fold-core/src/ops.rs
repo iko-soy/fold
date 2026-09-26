@@ -761,19 +761,27 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
 }
 
 /// Shift every line of a rendered document by (level_delta, indent_delta).
+/// Fenced code is shifted too, so it stays in its node's region (§3.3), but
+/// never re-levelled.
 fn shift_lines(raw: &str, level_delta: isize, indent_delta: isize) -> String {
     let mut out = String::new();
     let mut fence: Option<(char, usize)> = None;
     for line in raw.split_inclusive('\n') {
         let l = line.strip_suffix('\n').unwrap_or(line);
         let nl = if line.ends_with('\n') { "\n" } else { "" };
-        if fence_transition(l, &mut fence) || fence.is_some() {
-            out.push_str(l);
+        let in_code = fence_transition(l, &mut fence) || fence.is_some();
+        let trimmed = l.trim_start();
+        if trimmed.is_empty() {
             out.push_str(nl);
             continue;
         }
-        let trimmed = l.trim_start();
-        if trimmed.is_empty() {
+        if in_code {
+            // only the leading spaces change: a tab, or any indentation
+            // inside the code, stays as written
+            let code = l.trim_start_matches(' ');
+            let cur_indent = l.len() - code.len();
+            out.push_str(&" ".repeat((cur_indent as isize + indent_delta).max(0) as usize));
+            out.push_str(code);
             out.push_str(nl);
             continue;
         }
