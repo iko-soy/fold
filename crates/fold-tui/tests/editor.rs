@@ -1280,3 +1280,16 @@ fn ctrl_x_of_a_selected_block_title_line_then_ctrl_v_moves_the_block() {
     assert_eq!(root(&d), format!("# A\n\n- one\n  body\n{}\n- two\n", embed));
     assert!(std::fs::read_to_string(&block).unwrap().ends_with("\n- task\n"));
 }
+
+#[test]
+fn vim_dot_after_titling_a_new_node_does_not_run_the_title_as_commands() {
+    // `n` opens the editor typing the new node's title, as after Vim's `o`
+    // (§10.6); `.` then repeats that insertion or does nothing, but never
+    // replays the typed letters as normal-mode commands (`D`, `o`, ...)
+    let (d, mut app) = app_with("- a\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "nDog⎋.:wq⏎");
+    assert_eq!(app.mode_pub(), "normal");
+    let r = root(&d);
+    assert!(r.starts_with("- a\n- ") && r.contains("Dog") && r.lines().count() == 2, "{:?}", r);
+}

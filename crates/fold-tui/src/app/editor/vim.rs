@@ -62,11 +62,17 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 /// A visual selection no recorded key made (a drag or a double-click, or one
 /// left by a `:` command): keys that select as much from the cursor, for the
-/// record to start with, so `.` acts on as much text as Vim's does.
+/// record to start with, so `.` acts on as much text as Vim's does. Insert
+/// mode no recorded key entered (the app's `n`/`N` typing a new node's
+/// title, §10.6, or an editor re-rendered while typing, §11.2) starts with
+/// `a`, so `.` types the text again rather than running it as commands.
 fn select_keys(e: &Editor) -> Vec<KeyEvent> {
+    let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    if e.mode == Mode::Insert {
+        return vec![key('a')];
+    }
     let (Mode::Visual { line }, Some(a)) = (e.mode, e.anchor) else { return Vec::new() };
     let (s, en) = order(a, e.cursor);
-    let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
     let counted = |n: usize, c: char| -> Vec<KeyEvent> {
         if n == 0 { Vec::new() } else { n.to_string().chars().chain([c]).map(key).collect() }
     };
@@ -911,6 +917,17 @@ mod tests {
         assert_eq!(body(&e), "abc def\nghi\njkl");
         keys(&mut e, "wv$~");
         assert_eq!(body(&e), "abc DEF\nghi\njkl");
+    }
+
+    #[test]
+    fn dot_after_typing_in_insert_mode_no_key_entered() {
+        // the app can start the editor typing (`n`/`N`, a re-render while
+        // typing): `.` types the text again, never runs it as commands
+        let (_d, mut e) = editor("x\n", Keys::Vim);
+        e.mode = Mode::Insert;
+        e.cursor = Pos::new(2, 1);
+        keys(&mut e, "Dog<Esc>.");
+        assert_eq!(body(&e), "xDogDog");
     }
 
     #[test]
