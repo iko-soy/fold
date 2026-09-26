@@ -358,8 +358,11 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             e.anchor = a;
         }
         ('J', false) => {
+            // the selected lines (a line selection ends on the last one's
+            // line end), or this one and the next
             let (s, en) = range(e);
-            let lines = en.line.saturating_sub(s.line).max(1);
+            let l2 = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
+            let lines = l2.saturating_sub(s.line).max(1);
             e.join(s.line, lines);
             e.anchor = None;
         }

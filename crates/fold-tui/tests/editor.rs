@@ -566,3 +566,12 @@ fn helix_repeated_b_selects_the_previous_word() {
     keys(&mut app, "ejjglbbd:wq⏎");
     assert_eq!(root(&d), "# A\n\none three\n");
 }
+
+#[test]
+fn helix_join_two_selected_lines() {
+    // `xx` selects lines a and b; `J` joins those two, as Helix does, not c too
+    let (d, mut app) = app_with("# A\n\na\nb\nc\nd\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjxxJ:wq⏎");
+    assert_eq!(root(&d), "# A\n\na b\nc\nd\n");
+}
