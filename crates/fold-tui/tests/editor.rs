@@ -273,3 +273,21 @@ fn paste_goes_into_the_open_vim_command_line() {
     keys(&mut app, ":q⏎");
     assert_eq!(root(&d), "# A\n\nhello world\n");
 }
+
+#[test]
+fn helix_search_after_dotted_capital_i_selects_the_match() {
+    // 'İ' lowercases to two chars ("i̇"); the match column must still be
+    // counted in the real line, so `/ab` selects the "ab" at col 1
+    let (d, mut app) = app_with("# A\n\nİab ab\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejj/ab⏎d:wq⏎");
+    assert_eq!(root(&d), "# A\n\nİ ab\n");
+}
+
+#[test]
+fn vim_search_after_dotted_capital_i_lands_on_the_match() {
+    let (d, mut app) = app_with("# A\n\nİİ xab\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejj/ab⏎x:wq⏎");
+    assert_eq!(root(&d), "# A\n\nİİ xb\n");
+}

@@ -1234,11 +1234,20 @@ impl Editor {
         let pat = pat.to_lowercase();
         let n = self.lines();
         let hits = |l: usize| -> Vec<usize> {
-            let line = self.line(l).to_lowercase();
+            // a character can lowercase to several ('İ' to "i̇"): count
+            // columns in the line itself, not in its lowercase
+            let mut line = String::new();
+            let mut col_of = Vec::new();
+            for (col, c) in self.line(l).chars().enumerate() {
+                for lc in c.to_lowercase() {
+                    line.push(lc);
+                    col_of.push(col);
+                }
+            }
             let mut out = Vec::new();
             let mut start = 0;
             while let Some(i) = line[start..].find(&pat) {
-                out.push(line[..start + i].chars().count());
+                out.push(col_of[line[..start + i].chars().count()]);
                 start += i + pat.len().max(1);
             }
             out
