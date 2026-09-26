@@ -40,8 +40,32 @@ pub fn hang(text: &str) -> usize {
     h
 }
 
-fn width(c: char) -> usize {
-    UnicodeWidthChar::width(c).unwrap_or(0)
+/// Tab stops are every 4 columns, as CommonMark and fold-core count them.
+pub const TAB: usize = 4;
+
+/// Where each character of a line starts on screen, counted from the line's
+/// start, then where the line ends. A tab reaches the next tab stop and is
+/// drawn as that many spaces (raw text is never hidden, §10.9); anything
+/// else takes its display width.
+pub fn columns(text: &str) -> Vec<usize> {
+    let mut xs = vec![0];
+    let mut x = 0;
+    for c in text.chars() {
+        x += if c == '\t' { TAB - x % TAB } else { UnicodeWidthChar::width(c).unwrap_or(0) };
+        xs.push(x);
+    }
+    xs
+}
+
+/// Characters `[start, end)` of a line as drawn: tabs become spaces.
+pub fn shown(text: &str, start: usize, end: usize) -> String {
+    let xs = columns(text);
+    text.chars()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .map(|(i, c)| if c == '\t' { " ".repeat(xs[i + 1] - xs[i]) } else { c.to_string() })
+        .collect()
 }
 
 /// The rows of a line at `cols` columns. `hard` breaks anywhere and keeps
@@ -49,7 +73,9 @@ fn width(c: char) -> usize {
 /// space when they can. A line always has at least one row.
 pub fn wrap(text: &str, cols: usize, hard: bool) -> Vec<Row> {
     let chars: Vec<char> = text.chars().collect();
-    if cols < 4 || chars.iter().map(|c| width(*c)).sum::<usize>() <= cols {
+    let xs = columns(text);
+    let width = |i: usize| xs[i + 1] - xs[i];
+    if cols < 4 || xs[chars.len()] <= cols {
         return vec![Row { start: 0, end: chars.len(), indent: 0 }];
     }
     let indent = if hard { 0 } else { hang(text).min(cols / 2) };
@@ -61,8 +87,8 @@ pub fn wrap(text: &str, cols: usize, hard: bool) -> Vec<Row> {
         // how many characters fit
         let mut w = 0;
         let mut i = start;
-        while i < chars.len() && w + width(chars[i]) <= avail {
-            w += width(chars[i]);
+        while i < chars.len() && w + width(i) <= avail {
+            w += width(i);
             i += 1;
         }
         let end = if i >= chars.len() {
@@ -86,21 +112,21 @@ pub fn wrap(text: &str, cols: usize, hard: bool) -> Vec<Row> {
 /// The row and screen column of a character column, given a line's rows.
 /// A column at a row's end belongs to the next row, except at the line's end.
 pub fn locate(rows: &[Row], text: &str, col: usize) -> (usize, usize) {
-    let chars: Vec<char> = text.chars().collect();
+    let xs = columns(text);
     let r = rows.iter().rposition(|r| col >= r.start).unwrap_or(0);
     let row = rows[r];
-    let x = row.indent + chars[row.start..col.min(chars.len()).max(row.start)].iter().map(|c| width(*c)).sum::<usize>();
+    let x = row.indent + xs[col.min(xs.len() - 1).max(row.start)] - xs[row.start];
     (r, x)
 }
 
 /// The character column under screen column `x` of row `r`.
 pub fn column_at(rows: &[Row], text: &str, r: usize, x: usize) -> usize {
-    let chars: Vec<char> = text.chars().collect();
+    let xs = columns(text);
     let row = rows[r.min(rows.len() - 1)];
     let mut w = row.indent;
     let mut col = row.start;
-    while col < row.end && w + width(chars[col]) <= x {
-        w += width(chars[col]);
+    while col < row.end && w + xs[col + 1] - xs[col] <= x {
+        w += xs[col + 1] - xs[col];
         col += 1;
     }
     // the last row reaches the line's end; earlier rows stop before theirs
@@ -148,5 +174,16 @@ mod tests {
         // the end of the line sits on the last row
         let (r, _) = locate(&rows, t, t.len());
         assert_eq!(r, rows.len() - 1);
+    }
+
+    #[test]
+    fn tabs_reach_the_next_tab_stop() {
+        assert_eq!(columns("\tx"), [0, 4, 5]);
+        assert_eq!(columns("ab\tc"), [0, 1, 2, 4, 5]);
+        assert_eq!(shown("ab\tc", 0, 4), "ab  c");
+        let rows = wrap("ab\tc", 20, false);
+        assert_eq!(locate(&rows, "ab\tc", 3), (0, 4));
+        // a click inside the tab lands on it
+        assert_eq!(column_at(&rows, "ab\tc", 0, 3), 2);
     }
 }

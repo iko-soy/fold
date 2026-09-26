@@ -198,16 +198,18 @@ struct Drawn {
 }
 
 /// Break a styled line into screen rows at `cols` columns (§10.1): each row
-/// its own `Line`, continuation rows indented, and code rows that go on
-/// ending in `↪`.
+/// its own `Line`, continuation rows indented, code rows that go on ending
+/// in `↪`, and tabs as the spaces to their tab stop (the terminal would
+/// drop them).
 fn wrap_styled(line: &Line<'static>, cols: usize, hard: bool) -> Vec<(Line<'static>, super::wrap::Row)> {
     let cells: Vec<(char, Style)> = line.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, s.style))).collect();
     let text: String = cells.iter().map(|c| c.0).collect();
     let rows = super::wrap::wrap(&text, cols, hard);
     let n = rows.len();
-    if n == 1 {
+    if n == 1 && !text.contains('\t') {
         return vec![(line.clone(), rows[0])];
     }
+    let xs = super::wrap::columns(&text);
     rows.iter()
         .enumerate()
         .map(|(i, r)| {
@@ -217,12 +219,16 @@ fn wrap_styled(line: &Line<'static>, cols: usize, hard: bool) -> Vec<(Line<'stat
             }
             let mut run = String::new();
             let mut style = None;
-            for &(c, st) in &cells[r.start..r.end] {
+            for (k, &(c, st)) in cells.iter().enumerate().take(r.end).skip(r.start) {
                 if style != Some(st) && !run.is_empty() {
                     spans.push(Span::styled(std::mem::take(&mut run), style.unwrap_or_default()));
                 }
                 style = Some(st);
-                run.push(c);
+                if c == '\t' {
+                    run.push_str(&" ".repeat(xs[k + 1] - xs[k]));
+                } else {
+                    run.push(c);
+                }
             }
             if !run.is_empty() {
                 spans.push(Span::styled(run, style.unwrap_or_default()));
@@ -953,7 +959,7 @@ impl App {
             // context
             let style = if *own { Style::default() } else { Style::default().fg(ratatui::style::Color::Gray) };
             let chars: Vec<char> = text.chars().collect();
-            let part: String = chars[row.start..row.end].iter().collect();
+            let part = super::wrap::shown(text, row.start, row.end);
             let x0 = inner.x + row.indent as u16;
             put(buf, x0, y, &part, inner.width.saturating_sub(row.indent as u16), style);
             if codes[*l] && !last {
@@ -1262,7 +1268,7 @@ impl App {
         ] {
             let text = render(&self.vault.tree, r, 1, true);
             let block = WBlock::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(color)).title(title);
-            let lines: Vec<Line> = text.lines().map(|l| style_line(l, false).line).collect();
+            let lines: Vec<Line> = text.lines().map(|l| style_line(&super::wrap::shown(l, 0, usize::MAX), false).line).collect();
             f.render_widget(Paragraph::new(lines).block(block), rect);
         }
     }

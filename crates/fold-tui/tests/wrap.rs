@@ -129,3 +129,38 @@ fn clicking_a_wrapped_row_in_the_editor_places_the_cursor_there() {
     let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
     assert!(text.contains("the #offsite box"), "{}", text);
 }
+
+#[test]
+fn tabs_in_code_keep_their_indentation() {
+    // a tab-indented line (Go, a Makefile recipe) is drawn indented, not
+    // flush with the line above: raw text is never hidden (§10.9)
+    let (_d, mut app) = app_with("# A\n\n```\nflush\n\tindented\n```\n");
+    let s = draw(&mut app);
+    let f = s.iter().find(|l| l.contains("flush")).unwrap();
+    let i = s.iter().find(|l| l.contains("indented")).unwrap();
+    // a tab reaches the next stop, every 4 columns
+    assert_eq!(col(i, "indented"), col(f, "flush") + 4, "reading pane: {:#?}", s);
+}
+
+#[test]
+fn tabs_in_code_keep_their_indentation_in_the_editor() {
+    // the editor shows the tab as whitespace too, and its cursor agrees
+    let (_d, mut app) = app_with("# A\n\n```\nflush\n\tindented\n```\n");
+    app.show_reading = false;
+    keys(&mut app, "e");
+    let s = draw(&mut app);
+    let f = s.iter().find(|l| l.contains("flush")).unwrap();
+    let y = s.iter().position(|l| l.contains("indented")).unwrap();
+    assert_eq!(col(&s[y], "indented"), col(f, "flush") + 4, "editor: {:#?}", s);
+    // the cursor just past the tab (Home from the line's end goes to the
+    // first non-blank) sits on the `i`
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Home);
+    let mut t = Terminal::new(TestBackend::new(W, H)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let p = t.get_cursor_position().unwrap();
+    assert_eq!((p.x, p.y), (col(&s[y], "indented"), y as u16), "editor: {:#?}", s);
+}
