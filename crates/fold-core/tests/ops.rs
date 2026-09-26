@@ -1208,3 +1208,18 @@ fn verbs_that_write_into_a_node_refuse_a_second_embed() {
         assert!(res.is_err(), "{} did nothing and said nothing", name);
     }
 }
+
+#[test]
+fn a_key_set_in_root_md_goes_into_its_own_frontmatter() {
+    // root.md's frontmatter holds vault-level properties (§4.9): a key set
+    // there joins them, never a second frontmatter above them that turns
+    // them into text
+    let (d, mut v) = vault_with("---\nfoo: bar\n---\n\n# A\n");
+    ops::set_frontmatter_key(&mut v, 0, "due", Some("2026-10-01")).unwrap();
+    assert_eq!(read(&d, "root.md"), "---\nfoo: bar\ndue: 2026-10-01\n---\n\n# A\n");
+    ops::set_frontmatter_key(&mut v, 0, "foo", None).unwrap();
+    assert_eq!(read(&d, "root.md"), "---\ndue: 2026-10-01\n---\n\n# A\n");
+    let root = v.tree.root;
+    ops::set_property(&mut v, root, "due", "2026-10-02").unwrap();
+    assert_eq!(read(&d, "root.md"), "---\ndue: 2026-10-02\n---\n\n# A\n");
+}

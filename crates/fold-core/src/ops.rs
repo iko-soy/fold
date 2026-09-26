@@ -497,8 +497,7 @@ pub fn set_frontmatter_key(
     value: Option<&str>,
 ) -> std::io::Result<()> {
     let f = vault.tree.files[file].clone();
-    let root_node = f.nodes[f.root_node].children.get(0).copied();
-    let block = root_node.and_then(|rn| f.nodes[rn].block.clone());
+    let block = file_block(&f).cloned();
     let (mut raw, fm_span) = match &block {
         Some(b) => (b.frontmatter_raw.clone(), b.frontmatter_span),
         None => (String::new(), None),
@@ -554,14 +553,18 @@ pub fn set_frontmatter_key(
     vault.write_file_text(file, &new_text)
 }
 
+/// The block whose frontmatter a file holds: a block file's root, its
+/// first node (§4.9); root.md's, the implicit Root, whose frontmatter holds
+/// vault-level properties.
+fn file_block(f: &crate::parse::ParsedFile) -> Option<&crate::parse::Block> {
+    let root = &f.nodes[f.root_node];
+    root.block.as_ref().or_else(|| f.nodes[*root.children.first()?].block.as_ref())
+}
+
 /// All top-level keys of a block's frontmatter, for the property editor.
 pub fn frontmatter_lines(vault: &Vault, file: usize) -> Vec<(String, String, bool)> {
     // (key, value, editable) — unknown-structure lines are read-only (§10.6)
-    let f = &vault.tree.files[file];
-    let Some(&rn) = f.nodes[f.root_node].children.first() else {
-        return Vec::new();
-    };
-    let Some(b) = &f.nodes[rn].block else {
+    let Some(b) = file_block(&vault.tree.files[file]) else {
         return Vec::new();
     };
     let mut out = Vec::new();
