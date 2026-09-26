@@ -155,6 +155,9 @@ struct Prompt {
     /// clicked or picked with ↑/↓ and Enter.
     picks: Vec<NRef>,
     sel: usize,
+    /// The node *Move to…* moves, fixed when the prompt opens: a menu's
+    /// target is dropped once its item has run, long before the pick.
+    moving: Option<NRef>,
 }
 
 #[derive(Clone)]
@@ -618,8 +621,8 @@ impl App {
         }
     }
 
-    fn refile_to(&mut self, dest: NRef) {
-        let Some(r) = self.subject() else { return };
+    /// *Move to…* (§6.5): the prompt's moving node goes under `dest`.
+    fn refile_to(&mut self, r: NRef, dest: NRef) {
         self.push_undo("move to");
         let key = self.vault.key_of(r);
         match ops::refile(&mut self.vault, r, dest) {
@@ -1001,7 +1004,11 @@ impl App {
         let picked = p.picks.get(p.sel).copied();
         match p.action {
             PromptAction::Refile => match picked.map(Ok).unwrap_or_else(|| self.vault.resolve_target(&p.text)) {
-                Ok(dest) => self.refile_to(dest),
+                Ok(dest) => {
+                    if let Some(r) = p.moving {
+                        self.refile_to(r, dest);
+                    }
+                }
                 Err(e) => self.say(e),
             },
             PromptAction::GoTo => match picked.map(Ok).unwrap_or_else(|| self.vault.resolve_target(&p.text)) {
@@ -1062,12 +1069,17 @@ impl App {
     }
 
     fn open_prompt(&mut self, label: &str, action: PromptAction, text: String) {
+        let moving = match action {
+            PromptAction::Refile => self.subject(),
+            _ => None,
+        };
         self.prompt = Some(Prompt {
             label: label.into(),
             text,
             action,
             picks: Vec::new(),
             sel: 0,
+            moving,
         });
         self.refresh_picks();
     }
@@ -1081,10 +1093,7 @@ impl App {
         }
         let q = p.text.to_lowercase();
         // a node cannot move into its own subtree
-        let moving = match p.action {
-            PromptAction::Refile => self.subject().map(|r| self.vault.tree.resolved_child(r)),
-            _ => None,
-        };
+        let moving = p.moving.map(|r| self.vault.tree.resolved_child(r));
         let mut nodes: Vec<NRef> = Vec::new();
         self.vault.tree.walk(self.vault.tree.root, &mut |t, r| {
             if t.node(r).kind != Kind::Root && !t.node(r).is_embed() {

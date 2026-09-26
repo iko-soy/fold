@@ -370,3 +370,19 @@ fn a_short_hint_where_the_long_one_does_not_fit() {
     let last: String = (0..70).map(|x| b[(x, 9)].symbol()).collect();
     assert!(last.contains("right-click for actions · ? help"), "{}", last);
 }
+
+#[test]
+fn move_to_from_a_menu_moves_the_menus_node() {
+    // B is folded away under A, so it has no outline row: its menu comes
+    // from its line in the reading pane, and Move to… must move B, not A
+    let (d, mut app) = app_with("# A\n\n## B\n\n# C\n");
+    typing(&mut app, "h");
+    assert_eq!(app.rows().len(), 2, "A folded");
+    let s = draw(&mut app);
+    assert!(s.contains("## B"), "{}", s);
+    right_click(&mut app, Hit::DocLine(2));
+    click(&mut app, Hit::MenuItem(fold_tui::app::node_menu_index(Action::Refile)));
+    typing(&mut app, "C");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(root(&d), "# A\n\n# C\n\n## B\n");
+}
