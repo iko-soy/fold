@@ -1004,3 +1004,47 @@ fn a_cut_block_title_is_deleted_when_a_reload_re_renders_the_editor() {
     assert!(!block.exists());
     assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n\n# C\n");
 }
+
+#[test]
+fn review_undoing_a_saved_block_title_deletion_keeps_the_block_nested_in_it() {
+    // §5.2: re-spelling b's title line as plain text deletes b: the save
+    // embeds c (nested in b) in A and trashes b's file. Undo puts "- b"
+    // back as A's plain text; the next save must keep c embedded, not write
+    // an embed of the trashed b in its place (leaving c embedded nowhere)
+    let (d, mut app, b, c, b_file) = editing_nested_blocks();
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), format!("# A\n\n- one\nb\n  {}\n- two\n", c));
+    assert!(!b_file.exists());
+    ctrl(&mut app, 'z');
+    keys(&mut app, "⎋");
+    let r = root(&d);
+    assert!(!r.contains(&b) && r.contains(&c), "b = {} (trashed), c = {}; root.md:\n{}", b, c, r);
+}
+
+#[test]
+fn review_undo_after_a_save_that_deleted_a_block_keeps_the_block_in_it() {
+    // b's title line joined onto "- one" and saved: b is deleted, its file
+    // trashed, and c's embed goes to A (§5.2). Undo in the editor puts the
+    // text back; b's lines are A's text now, and A must embed c, not the
+    // trashed b
+    let (d, mut app, b, c, b_file) = editing_nested_blocks();
+    for k in [
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+    ] {
+        app.handle_key(k);
+    }
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), format!("# A\n\n- one- b\n  {}\n- two\n", c));
+    assert!(!b_file.exists(), "b's file is trashed");
+    ctrl(&mut app, 'z');
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n- one\n- b\n  {}\n- two\n", c), "b is {}, trashed", b);
+}

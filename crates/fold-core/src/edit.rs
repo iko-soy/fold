@@ -303,6 +303,21 @@ impl EditBuffer {
                 self.mark_dirty(s);
             }
         }
+        // and so are the blocks nested in it, whatever parents the editor's
+        // undo put back: no embed is written into a deleted block
+        let parents: Vec<(Owner, Owner)> = self
+            .owners
+            .iter()
+            .filter_map(|(&o, i)| Some((o, i.parent?)))
+            .filter(|&(o, p)| !dropped.contains(&o) && self.surviving(p) != p)
+            .collect();
+        for (o, p) in parents {
+            let s = self.surviving(p);
+            if let Some(i) = self.owners.get_mut(&o) {
+                i.parent = Some(s);
+            }
+            self.mark_dirty(s);
+        }
         loop {
             let mut changed = false;
             for o in self.dirty.clone() {
