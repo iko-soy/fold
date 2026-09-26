@@ -1,7 +1,7 @@
 //! The Helix keymap: selection first. Motions select, actions act on the
 //! selection; `v` makes motions extend it. One selection (no multi-cursor).
 
-use super::{order, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, Editor, Group, Mode, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
@@ -34,6 +34,68 @@ fn select_to(e: &mut Editor, from: Pos, to: Pos) {
     if e.anchor == Some(e.cursor) && e.mode != Mode::Select {
         e.anchor = None;
     }
+}
+
+/// Helix's word boundary: a change of class, a line end being a class of
+/// its own.
+fn boundary(a: char, b: char, big: bool) -> bool {
+    class(a, big) != class(b, big) || (a == '\n') != (b == '\n')
+}
+
+/// Select the `n`th word forward or back, as Helix's word motions do: each
+/// walks from the cursor until `target` holds between the character behind
+/// and the one ahead, and selects what it walked over. A target right at the
+/// cursor (it ends a word, or the whitespace after one) and line ends right
+/// ahead move the start past them, so a repeated `w` or `b` selects the next
+/// word rather than keeping the last character of this one.
+fn select_words(e: &mut Editor, n: usize, fwd: bool, target: &dyn Fn(char, char) -> bool) {
+    let mut sel = None;
+    for _ in 0..n {
+        let cur = sel.map_or(e.cursor, |(_, c)| c);
+        match word_step(e, cur, fwd, target) {
+            Some(s) => sel = Some(s),
+            None => break,
+        }
+    }
+    if let Some((from, to)) = sel {
+        select_to(e, from, to);
+    }
+}
+
+/// One word from `cur`: the selection's anchor and cursor, or `None` at the
+/// end (start) of the text. A place between two characters is named by the
+/// position of the one after it.
+fn word_step(e: &Editor, cur: Pos, fwd: bool, target: &dyn Fn(char, char) -> bool) -> Option<(Pos, Pos)> {
+    let ahead = |g: Pos| if fwd { e.char_at(g) } else { e.prev(g).and_then(|q| e.char_at(q)) };
+    let step = |g: Pos| if fwd { e.next(g) } else { e.prev(g) };
+    // the walk starts on the cursor's far side, the selection's other end
+    // is on its near side
+    let (mut h, mut anchor) = if fwd { (e.next(cur)?, cur) } else { (cur, e.next(cur).unwrap_or(cur)) };
+    ahead(h)?;
+    let mut behind = e.char_at(cur).unwrap_or('\n');
+    while ahead(h) == Some('\n') {
+        behind = '\n';
+        h = step(h)?;
+    }
+    if behind == '\n' {
+        anchor = h;
+    }
+    let start = h;
+    while let Some(ch) = ahead(h) {
+        if target(behind, ch) {
+            if h != start {
+                break;
+            }
+            anchor = h;
+        }
+        behind = ch;
+        h = step(h)?;
+    }
+    Some(if fwd {
+        (anchor, e.prev(h).filter(|q| *q >= anchor).unwrap_or(anchor))
+    } else {
+        (e.prev(anchor).filter(|q| *q >= h).unwrap_or(h), h)
+    })
 }
 
 /// Move the cursor, collapsing the selection (or extending it in select mode).
@@ -163,18 +225,9 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             e.move_visual(if c == 'j' { n as isize } else { -(n as isize) });
         }
         ('w' | 'W', false) => {
+            // up to the start of the next word, or a line end
             let big = c == 'W';
-            let mut from = p;
-            let mut to = p;
-            for _ in 0..n {
-                from = to;
-                let next = e.word_fwd(to, big);
-                to = if next > to { e.prev(next).unwrap_or(next) } else { next };
-                if to == from {
-                    to = e.word_fwd(e.next(to).unwrap_or(to), big);
-                }
-            }
-            select_to(e, from, to);
+            select_words(e, n, true, &|a, b| boundary(a, b, big) && (b == '\n' || !b.is_whitespace()));
         }
         ('e' | 'E', false) => {
             let big = c == 'E';
@@ -189,14 +242,9 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             select_to(e, from.min(to), to);
         }
         ('b' | 'B', false) => {
+            // back to the start of a word (`a` is the character after `b`)
             let big = c == 'B';
-            let mut from = p;
-            let mut to = p;
-            for _ in 0..n {
-                from = to;
-                to = e.word_back(to, big);
-            }
-            select_to(e, from, to);
+            select_words(e, n, false, &|a, b| boundary(a, b, big) && (a == '\n' || !a.is_whitespace()));
         }
         ('x', false) => {
             // select the line; again, extend by a line

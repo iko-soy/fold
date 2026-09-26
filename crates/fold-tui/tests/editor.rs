@@ -533,3 +533,36 @@ fn vim_visual_line_put_saves_the_replaced_line_whole() {
     keys(&mut app, "2p:w⏎");
     assert_eq!(root(&d), "# A\n\na\na\nb\nb\nc\n");
 }
+
+#[test]
+fn helix_repeated_w_selects_the_next_word() {
+    // the second `w` selects "two ", not " two t" from the previous selection's end
+    let (d, mut app) = app_with("# A\n\none two three\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjwwd:wq⏎");
+    assert_eq!(root(&d), "# A\n\none three\n");
+    // `2w` is the same
+    let (d, mut app) = app_with("# A\n\none two three\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejj2wd:wq⏎");
+    assert_eq!(root(&d), "# A\n\none three\n");
+    // the last word of a line is selected without the line end, and the next
+    // `w` selects the first word of the next line: nothing joins the lines
+    let (d, mut app) = app_with("# A\n\none two\nthree four\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjwwd:wq⏎");
+    assert_eq!(root(&d), "# A\n\none \nthree four\n");
+    let (d, mut app) = app_with("# A\n\none two\nthree four\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjwwwd:wq⏎");
+    assert_eq!(root(&d), "# A\n\none two\nfour\n");
+}
+
+#[test]
+fn helix_repeated_b_selects_the_previous_word() {
+    // after `glb` selects "three", a second `b` selects "two ", not "two t"
+    let (d, mut app) = app_with("# A\n\none two three\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjglbbd:wq⏎");
+    assert_eq!(root(&d), "# A\n\none three\n");
+}
