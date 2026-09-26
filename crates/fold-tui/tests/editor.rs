@@ -306,14 +306,17 @@ fn helix_xd_above_a_block_keeps_the_block() {
 }
 
 #[test]
-fn vim_d_paragraph_above_a_block_keeps_the_block() {
+fn vim_dgj_above_a_block_keeps_the_block() {
+    // `dgj` from column 0 of "- one" deletes up to column 0 of the block's
+    // title line, exclusive: "- one" goes whole, with its tag, and the title
+    // line stays the block's
     let (d, block) = vault_with_bullet_block();
     let before = std::fs::read_to_string(&block).unwrap();
     let mut app = App::new(d.path()).unwrap();
     app.set_edit_keys(fold_tui::app::EditKeys::Vim);
-    keys(&mut app, "ejjd}:w⏎");
+    keys(&mut app, "ejjdgj:w⏎");
     let r = root(&d);
-    assert!(r.contains("![[") && !r.contains("- two"), "{}", r);
+    assert!(r.starts_with("# A\n\n![[") && !r.contains("- "), "{}", r);
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
 }
 
