@@ -519,3 +519,27 @@ fn shifting_keeps_code_after_a_fence_line_with_info_string() {
     buf.save_all(&mut v).unwrap();
     assert_eq!(v.tree.files[0].text, text);
 }
+
+#[test]
+fn spaced_thematic_breaks_are_text() {
+    // §4.2/§4.4: CommonMark thematic breaks (which win over list items) are
+    // body text, however they are spelled — not bullets titled "* *" / "- -".
+    for text in [
+        "# A\n\npara\n\n* * *\n\nmore\n",
+        "# A\n\npara\n\n- - -\n\nmore\n",
+        "# A\n\npara\n\n-  -  - -\n\nmore\n",
+        "# A\n\n- x\n\n  * * *\n",
+    ] {
+        let t = tree_of(text);
+        let a = t.resolved_children(t.root)[0];
+        let mut kids: Vec<String> = Vec::new();
+        t.walk(a, &mut |t, k| kids.push(t.node(k).title.clone()));
+        kids.retain(|k| k != "A" && k != "x");
+        assert!(kids.is_empty(), "{:?} parsed as nodes {:?}", text, kids);
+        assert_eq!(render(&t, a, 1, false), text);
+    }
+    // two marks are not a break: still an (empty-ish) bullet
+    let t = tree_of("# A\n\n- -\n");
+    let a = t.resolved_children(t.root)[0];
+    assert_eq!(t.resolved_children(a).len(), 1);
+}

@@ -308,6 +308,8 @@ fn classify_title(raw: &str) -> Option<(usize, TitleInfo)> {
             TitleKind::Section { level: hashes },
             after.strip_prefix(' ').unwrap_or(after),
         )
+    } else if is_thematic_break(rest) {
+        return None; // `- - -`, `* * *`: a break, not a bullet (§4.4)
     } else if let Some(after) = rest.strip_prefix("- ") {
         (TitleKind::Item, after)
     } else if let Some(after) = rest.strip_prefix("* ").or_else(|| rest.strip_prefix("+ ")) {
@@ -392,6 +394,25 @@ pub(crate) fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> b
             }
         }
     }
+}
+
+/// A thematic break, however it is spaced: three or more of one of `-`, `*`,
+/// `_` with nothing but spaces or tabs between. CommonMark reads it before a
+/// list item, so `- - -` and `* * *` are body text like `---` (§4.4).
+/// `rest` starts at the line's first non-blank character.
+fn is_thematic_break(rest: &str) -> bool {
+    let Some(mark) = rest.chars().next().filter(|c| matches!(c, '-' | '*' | '_')) else {
+        return false;
+    };
+    let mut n = 0;
+    for c in rest.chars() {
+        if c == mark {
+            n += 1;
+        } else if c != ' ' && c != '\t' {
+            return false;
+        }
+    }
+    n >= 3
 }
 
 /// A setext underline. Only `=` underlines count: a line of dashes is a
