@@ -185,8 +185,7 @@ fn cut(e: &mut Editor) {
         }
         None => {
             let l = e.cursor.line;
-            let t = e.delete_lines(l, l);
-            e.copy(t, true);
+            e.cut_lines(l, l);
         }
     }
 }
@@ -204,7 +203,7 @@ fn paste(e: &mut Editor) {
     let clip = e.clip.clone();
     if clip.linewise {
         let l = e.cursor.line;
-        let first = e.put_lines(l, &clip.text, false);
+        let first = e.put_clip_lines(l, false);
         e.set_cursor(Pos::new(first + clip.text.matches('\n').count(), e.cursor.col));
     } else {
         let end = e.insert(e.cursor, &clip.text);
@@ -212,7 +211,8 @@ fn paste(e: &mut Editor) {
     }
 }
 
-/// Alt-Up / Alt-Down: move the current line (or the selected lines).
+/// Alt-Up / Alt-Down: move the current line (or the selected lines), each
+/// with its tag, so a nested block's title line takes its embed along (§5.2).
 fn move_lines(e: &mut Editor, down: bool) {
     let (s, en) = e.selection().map(|(s, en)| order(s, en)).unwrap_or((e.cursor, e.cursor));
     let (l1, l2) = (s.line, en.line);
@@ -220,18 +220,10 @@ fn move_lines(e: &mut Editor, down: bool) {
         return;
     }
     e.checkpoint();
-    // the selection moves with the lines (delete_lines resets the cursor)
-    let cur = e.cursor;
-    let t = e.delete_lines(l1, l2);
-    let at = if down { l1 + 1 } else { l1 - 1 };
-    if at >= e.lines() {
-        e.put_lines(e.lines() - 1, &t, true);
-    } else {
-        e.put_lines(at, &t, false);
-    }
+    e.move_lines(l1, l2, down);
     let d: isize = if down { 1 } else { -1 };
     let shift = |p: Pos| Pos::new((p.line as isize + d) as usize, p.col);
-    e.cursor = shift(if e.anchor.is_some() { cur } else { Pos::new(l1, 0) });
+    e.cursor = shift(if e.anchor.is_some() { e.cursor } else { Pos::new(l1, 0) });
     if let Some(a) = e.anchor {
         e.anchor = Some(shift(a));
     } else {

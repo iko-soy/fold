@@ -13,7 +13,7 @@ mod vim;
 use super::wrap::{self, Row};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fold_core::edit::{EditBuffer, EditLine, Owner};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A position: line, and column in characters.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Default)]
@@ -89,6 +89,9 @@ pub struct Outcome {
 pub struct Clip {
     pub text: String,
     pub linewise: bool,
+    /// Whole lines cut in this editor: each line's block, where that block's
+    /// title line was cut with it (§5.2: cut and paste moves its embed).
+    pub tags: Vec<Option<Owner>>,
 }
 
 /// An input line at the bottom of the editor: `:` commands or `/` search.
@@ -145,7 +148,9 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(buf: EditBuffer, keys: Keys, clip: Clip) -> Editor {
+    pub fn new(buf: EditBuffer, keys: Keys, mut clip: Clip) -> Editor {
+        // tags name blocks of the buffer they were cut from
+        clip.tags.clear();
         let mode = match keys {
             Keys::Normal => Mode::Insert,
             Keys::Vim | Keys::Helix => Mode::Normal,
@@ -475,11 +480,184 @@ impl Editor {
         Some(gone)
     }
 
+    // -------------------------------------------------------------- moving lines
+
+    /// Move whole lines `l1..=l2` one line down or up, past their neighbour.
+    /// Each line keeps its tag (§5.2), so moving a nested block's title line
+    /// moves its embed.
+    pub fn move_lines(&mut self, l1: usize, l2: usize, down: bool) {
+        let (lo, hi) = if down { (l1, l2 + 1) } else { (l1.wrapping_sub(1), l2) };
+        if (!down && l1 == 0) || hi >= self.buf.lines.len() {
+            return;
+        }
+        let titles = self.titles();
+        if down {
+            self.buf.lines[lo..=hi].rotate_right(1);
+        } else {
+            self.buf.lines[lo..=hi].rotate_left(1);
+        }
+        self.changes += 1;
+        for i in lo..=hi {
+            let o = self.buf.lines[i].owner;
+            self.buf.mark_dirty(o);
+        }
+        // where the line at `i` went: the neighbour to the far end, the rest by one
+        let to = |i: usize| {
+            if i < lo || i > hi {
+                i
+            } else if down {
+                if i == hi { lo } else { i + 1 }
+            } else if i == lo {
+                hi
+            } else {
+                i - 1
+            }
+        };
+        let mut moved = BTreeMap::new();
+        for (o, t) in titles {
+            if (lo..=hi).contains(&t) {
+                self.touch(o);
+            }
+            moved.insert(o, Some(to(t)));
+        }
+        self.retag_strays(&moved);
+    }
+
+    /// Cut whole lines `l1..=l2` to the clipboard. A nested block whose title
+    /// line goes keeps its tag there, and its lines left behind go to the
+    /// block they now sit in, so pasting the lines moves the block (§5.2).
+    pub fn cut_lines(&mut self, l1: usize, l2: usize) {
+        let l2 = l2.min(self.lines() - 1);
+        let titles = self.titles();
+        let nested = |e: &Editor, o: Owner| e.buf.owners.get(&o).is_some_and(|i| i.parent.is_some());
+        let tags = (l1..=l2)
+            .map(|l| {
+                let o = self.buf.lines.get(l)?.owner;
+                (nested(self, o) && titles.get(&o).is_some_and(|&t| t >= l1)).then_some(o)
+            })
+            .collect();
+        let text = self.delete_lines(l1, l2);
+        let n = l2 + 1 - l1;
+        let left = titles
+            .into_iter()
+            .map(|(o, t)| (o, if t < l1 { Some(t) } else if t > l2 { Some(t - n) } else { None }))
+            .collect();
+        self.retag_strays(&left);
+        self.copy(text, true);
+        self.clip.tags = tags;
+    }
+
+    /// Put the clipboard's whole lines above or below line `l`; returns the
+    /// first new line. They take the tag of the line above (§5.2), except the
+    /// lines of a nested block cut with its title line and no longer in the
+    /// buffer: those go back with their own tag, so the block moves.
+    pub fn put_clip_lines(&mut self, l: usize, below: bool) -> usize {
+        let clip = self.clip.clone();
+        let titles = self.titles();
+        let first = self.put_lines(l, &clip.text, below);
+        let n = clip.tags.len();
+        if n == 0 || clip.text.matches('\n').count() != n || first + n > self.buf.lines.len() {
+            return first;
+        }
+        let present: BTreeSet<Owner> =
+            self.buf.lines.iter().enumerate().filter(|(i, _)| *i < first || *i >= first + n).map(|(_, x)| x.owner).collect();
+        let mut back: BTreeMap<Owner, Option<usize>> = BTreeMap::new();
+        for (i, tag) in clip.tags.iter().enumerate() {
+            let Some(o) = tag.filter(|o| !present.contains(o)) else { continue };
+            let was = std::mem::replace(&mut self.buf.lines[first + i].owner, o);
+            self.buf.mark_dirty(was);
+            self.touch(o);
+            back.entry(o).or_insert(Some(first + i));
+        }
+        if !back.is_empty() {
+            for (o, t) in titles {
+                back.insert(o, Some(if t >= first { t + n } else { t }));
+            }
+            self.retag_strays(&back);
+        }
+        first
+    }
+
+    /// The first line of each block: its title line (§5.2).
+    fn titles(&self) -> BTreeMap<Owner, usize> {
+        let mut t = BTreeMap::new();
+        for (i, l) in self.buf.lines.iter().enumerate() {
+            t.entry(l.owner).or_insert(i);
+        }
+        t
+    }
+
+    /// Whether block `o` is `outer` or nested in it.
+    fn within(&self, mut o: Owner, outer: Owner) -> bool {
+        while o != outer {
+            match self.buf.owners.get(&o).and_then(|i| i.parent) {
+                Some(p) => o = p,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// A block changed and moved: it is dirty, and so is the block its embed
+    /// sits in (§5.2).
+    fn touch(&mut self, o: Owner) {
+        self.buf.mark_dirty(o);
+        if let Some(p) = self.buf.owners.get(&o).and_then(|i| i.parent) {
+            self.buf.mark_dirty(p);
+        }
+    }
+
+    /// After lines moved with their tags: a line of a nested block that is no
+    /// longer contiguous with the block's title line (at `titles`, or gone)
+    /// is re-tagged to the block it now sits in, that of the line above (§5.2).
+    fn retag_strays(&mut self, titles: &BTreeMap<Owner, Option<usize>>) {
+        let n = self.buf.lines.len();
+        for (&o, &title) in titles {
+            if self.buf.owners.get(&o).and_then(|i| i.parent).is_none() {
+                continue;
+            }
+            // the title line, then the lines of the block and the blocks in it
+            let (t, mut end) = match title {
+                Some(t) => (t, t + 1),
+                None => (n, n),
+            };
+            while end < n && self.within(self.buf.lines[end].owner, o) {
+                end += 1;
+            }
+            for i in 1..n {
+                if (i < t || i >= end) && self.buf.lines[i].owner == o {
+                    let above = self.buf.lines[i - 1].owner;
+                    self.buf.lines[i].owner = above;
+                    self.buf.mark_dirty(above);
+                    self.buf.mark_dirty(o);
+                }
+            }
+        }
+    }
+
+    /// What splice writes for each block (§5.2): its own lines, and the
+    /// first line of each block nested in it, where that block's embed goes.
+    fn splice_views(&self, lines: &[EditLine]) -> BTreeMap<Owner, Vec<(Owner, String)>> {
+        let mut views: BTreeMap<Owner, Vec<(Owner, String)>> = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        for l in lines {
+            views.entry(l.owner).or_default().push((l.owner, l.text.clone()));
+            let mut o = l.owner;
+            while let Some(p) = self.buf.owners.get(&o).and_then(|i| i.parent) {
+                if seen.insert(o) {
+                    views.entry(p).or_default().push((o, l.text.clone()));
+                }
+                o = p;
+            }
+        }
+        views
+    }
+
     // -------------------------------------------------------------- clipboard
 
     pub fn copy(&mut self, text: String, linewise: bool) {
         self.copied = Some(text.clone());
-        self.clip = Clip { text, linewise };
+        self.clip = Clip { text, linewise, tags: Vec::new() };
     }
 
     fn after_cursor(&self) -> Pos {
@@ -522,16 +700,14 @@ impl Editor {
         true
     }
 
-    /// Put a snapshot back; every block whose text differs is dirty again.
+    /// Put a snapshot back; every block whose text differs is dirty again,
+    /// and so is every block a nested block moved in.
     fn restore(&mut self, s: Snap) -> Snap {
         let cur = Snap { lines: std::mem::take(&mut self.buf.lines), cursor: self.cursor };
-        let text_of = |lines: &[EditLine], o: Owner| -> Vec<String> {
-            lines.iter().filter(|l| l.owner == o).map(|l| l.text.clone()).collect()
-        };
-        let owners: BTreeSet<Owner> = cur.lines.iter().chain(s.lines.iter()).map(|l| l.owner).collect();
-        for o in owners {
-            if text_of(&cur.lines, o) != text_of(&s.lines, o) {
-                self.buf.mark_dirty(o);
+        let (was, now) = (self.splice_views(&cur.lines), self.splice_views(&s.lines));
+        for o in was.keys().chain(now.keys()) {
+            if was.get(o) != now.get(o) {
+                self.buf.mark_dirty(*o);
             }
         }
         self.buf.lines = s.lines;
