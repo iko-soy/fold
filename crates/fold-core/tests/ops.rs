@@ -787,3 +787,25 @@ fn deleting_a_broken_embed_keeps_lines_nested_under_it() {
     ops::delete_subtree(&mut v, e).unwrap();
     assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n");
 }
+
+#[test]
+fn capture_with_an_item_spelled_inbox_does_not_leave_a_stray_day_heading() {
+    // `- Inbox` (e.g. after `~` on the Inbox section) is still the inbox
+    // (§3.1: spelling is presentation): today's day goes under it, never a
+    // top-level day heading written before failing
+    let (_d, mut v) = vault_with("- Inbox\n");
+    let r = ops::capture(&mut v, "x", false);
+    let text = v.tree.files[0].text.clone();
+    let r = r.unwrap_or_else(|e| panic!("capture failed: {}\n{}", e, text));
+    assert_eq!(v.tree.node(r).title, "x");
+    let path = v.tree.path(r);
+    assert_eq!(path.len(), 3, "{:?}\n{}", path, text);
+    assert_eq!(path[0], "Inbox");
+    // a second capture reuses the same day and adds nothing at the top
+    ops::capture(&mut v, "y", false).unwrap();
+    let top = v.tree.resolved_children(v.tree.root);
+    assert_eq!(top.len(), 1, "{}", v.tree.files[0].text);
+    let days = v.tree.resolved_children(top[0]);
+    assert_eq!(days.len(), 1, "{}", v.tree.files[0].text);
+    assert_eq!(v.tree.resolved_children(days[0]).len(), 2, "{}", v.tree.files[0].text);
+}

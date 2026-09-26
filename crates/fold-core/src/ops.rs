@@ -183,9 +183,10 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
             return Ok(c);
         }
     }
-    // `## <today>` as the last child of Inbox (§7)
+    // `## <today>` as the last child of Inbox (§7), at its child indent: an
+    // Inbox respelled as an item is still the inbox (§3.1)
     let level = vault.tree.level(inbox) + 1;
-    let indent = vault.tree.indent(inbox);
+    let indent = child_indent(&vault.tree, inbox);
     let heading = format!(
         "{}{} {}",
         " ".repeat(indent),
