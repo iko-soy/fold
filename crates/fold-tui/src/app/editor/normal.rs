@@ -220,6 +220,8 @@ fn move_lines(e: &mut Editor, down: bool) {
         return;
     }
     e.checkpoint();
+    // the selection moves with the lines (delete_lines resets the cursor)
+    let cur = e.cursor;
     let t = e.delete_lines(l1, l2);
     let at = if down { l1 + 1 } else { l1 - 1 };
     if at >= e.lines() {
@@ -229,7 +231,7 @@ fn move_lines(e: &mut Editor, down: bool) {
     }
     let d: isize = if down { 1 } else { -1 };
     let shift = |p: Pos| Pos::new((p.line as isize + d) as usize, p.col);
-    e.cursor = shift(if e.anchor.is_some() { e.cursor } else { Pos::new(l1, 0) });
+    e.cursor = shift(if e.anchor.is_some() { cur } else { Pos::new(l1, 0) });
     if let Some(a) = e.anchor {
         e.anchor = Some(shift(a));
     } else {

@@ -206,3 +206,23 @@ fn editor_message_in_a_short_terminal_does_not_panic() {
         draw(&mut app, w, h);
     }
 }
+
+#[test]
+fn alt_down_keeps_a_multi_line_selection() {
+    let with = |code, m| KeyEvent::new(code, m);
+    let (d, mut app) = app_with("# A\n\na\nb\nc\nd\n");
+    press(&mut app, "e");
+    draw(&mut app, 100, 24);
+    // the cursor opens on the title; go to "a", select "a" and "b", move them down twice
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(with(KeyCode::Down, KeyModifiers::SHIFT));
+    app.handle_key(with(KeyCode::End, KeyModifiers::SHIFT));
+    app.handle_key(with(KeyCode::Down, KeyModifiers::ALT));
+    app.handle_key(with(KeyCode::Down, KeyModifiers::ALT));
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    // the first move must leave "a" and "b" selected, so the second moves both
+    assert_eq!(root(&d), "# A\n\nc\nd\na\nb\n");
+}
