@@ -241,8 +241,22 @@ impl EditBuffer {
                 if !emitted.contains(&nested) {
                     emitted.push(nested);
                     if let Some(id) = self.owners.get(&nested).and_then(|i| i.id.clone()) {
-                        let indent = l.text.len() - l.text.trim_start_matches(' ').len();
-                        text_lines.push(Line::Embed(indent, id));
+                        // the embed takes the form of the block's title line:
+                        // a heading embed for a heading (§4.7)
+                        let trimmed = l.text.trim_start_matches(' ');
+                        let indent = l.text.len() - trimmed.len();
+                        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+                        let is_heading = hashes > 0 && trimmed[hashes..].starts_with(' ');
+                        // an existing embed keeps its form, so an unchanged
+                        // splice writes it back byte for byte
+                        let heading = match vault.tree.embed_of(&id) {
+                            Some(e) if vault.tree.node(e).kind == Kind::Section => {
+                                Some(if is_heading { hashes } else { info.level + 1 })
+                            }
+                            Some(_) => None,
+                            None => is_heading.then_some(hashes),
+                        };
+                        text_lines.push(Line::Embed(indent, heading, id));
                     }
                 }
             }
@@ -259,8 +273,12 @@ impl EditBuffer {
         let mut fence: Option<(char, usize)> = None;
         for l in &text_lines {
             let l = match l {
-                Line::Embed(indent, id) => {
+                Line::Embed(indent, heading, id) => {
                     out.push_str(&" ".repeat(shift(*indent)));
+                    if let Some(h) = heading {
+                        out.push_str(&"#".repeat((*h as isize + level_delta).max(1) as usize));
+                        out.push(' ');
+                    }
                     out.push_str("![[");
                     out.push_str(id.as_str());
                     out.push_str("]]\n");
@@ -352,10 +370,11 @@ impl EditBuffer {
 }
 
 /// A line collected for splice: owned text, or a nested block's embed at
-/// the display indent of its first line.
+/// the display indent of its first line, with the heading level of that line
+/// if it is a heading.
 enum Line {
     Text(String),
-    Embed(usize, Id),
+    Embed(usize, Option<usize>, Id),
 }
 
 fn hash(text: &str) -> String {

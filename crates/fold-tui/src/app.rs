@@ -2060,7 +2060,7 @@ impl App {
                 return;
             }
             // full-text over body
-            let body = t.node(r).body_lines(t.text_of(r)).join("\n").to_lowercase();
+            let body = t.node(r).text_lines(t.text_of(r)).join("\n").to_lowercase();
             if body.contains(&q) {
                 hits.push(r);
             }

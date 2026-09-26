@@ -126,6 +126,16 @@ impl Tree {
         r
     }
 
+    /// The embed node that references a block (§4.7), if any.
+    pub fn embed_of(&self, id: &Id) -> Option<NRef> {
+        self.files.iter().enumerate().find_map(|(fi, f)| {
+            f.nodes
+                .iter()
+                .position(|nd| nd.embed.as_ref() == Some(id))
+                .map(|ni| (fi, ni))
+        })
+    }
+
     pub fn block_by_id(&self, id: &Id) -> Option<NRef> {
         self.blocks
             .iter()
@@ -195,22 +205,34 @@ impl Node {
     pub fn is_embed(&self) -> bool {
         self.embed.is_some()
     }
-    /// Body lines exactly as found in the file text.
+    /// Body lines (the leading text children) exactly as found in the file.
     pub fn body_lines<'a>(&self, file_text: &'a str) -> Vec<&'a str> {
-        if self.body_span.start >= self.body_span.end {
-            return Vec::new();
+        match self.body_span() {
+            Some(sp) => content_lines(file_text, sp),
+            None => Vec::new(),
         }
-        let mut lines: Vec<&'a str> = file_text[self.body_span.start..self.body_span.end]
-            .split_inclusive('\n')
-            .map(|l| l.strip_suffix('\n').unwrap_or(l))
-            .map(|l| l.strip_suffix('\r').unwrap_or(l))
-            .collect();
-        // A blank line produced only by the separator before a child node is
-        // not body content, but it is remembered: the renderer uses it to
-        // reproduce the file's spacing.
-        if lines.iter().all(|l| l.trim().is_empty()) {
-            lines.clear();
-        }
-        lines
     }
+
+    /// The lines of every text child, in order: the node's own prose,
+    /// wherever it sits among its children (§3.3).
+    pub fn text_lines<'a>(&self, file_text: &'a str) -> Vec<&'a str> {
+        self.text_runs()
+            .into_iter()
+            .flat_map(|(_, sp)| content_lines(file_text, sp))
+            .collect()
+    }
+}
+
+/// The lines of a text run. A run of blank lines alone is a separator, not
+/// content: the renderer reproduces it, but it has no lines to show.
+fn content_lines(file_text: &str, sp: crate::parse::Span) -> Vec<&str> {
+    let mut lines: Vec<&str> = file_text[sp.start..sp.end]
+        .split_inclusive('\n')
+        .map(|l| l.strip_suffix('\n').unwrap_or(l))
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        lines.clear();
+    }
+    lines
 }

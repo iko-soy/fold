@@ -51,6 +51,14 @@ impl Block {
     }
 }
 
+/// One entry in a node's ordered content (§3.1): a run of text lines or a
+/// child node. Text runs are never adjacent to each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content {
+    Text(Span),
+    Node(usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub kind: Kind,
@@ -59,13 +67,12 @@ pub struct Node {
     pub task: Option<TaskState>,
     /// Byte span of the title line (no trailing newline).
     pub title_span: Span,
-    /// Byte span of the body region (after the title line, before children).
-    pub body_span: Span,
-    /// Body lines that follow children (text after a list, between child
-    /// items): `(number of children before the segment, span)`, in order.
-    pub tail: Vec<(usize, Span)>,
+    /// The node's children in document order: text runs and child nodes,
+    /// interleaved (§3.1, §3.3).
+    pub content: Vec<Content>,
     /// Byte span: title line through the whole subtree.
     pub span: Span,
+    /// The node children alone, in order (derived from `content`).
     pub children: Vec<usize>,
     pub parent: Option<usize>,
     /// Which file's text this node's spans index into.
@@ -82,7 +89,28 @@ pub struct Node {
     pub noncanonical: Vec<String>,
 }
 
-impl Node {}
+impl Node {
+    /// The leading text children: what precedes the first child node.
+    pub fn body_span(&self) -> Option<Span> {
+        match self.content.first() {
+            Some(Content::Text(sp)) => Some(*sp),
+            _ => None,
+        }
+    }
+
+    /// Every text child, with the number of child nodes before it.
+    pub fn text_runs(&self) -> Vec<(usize, Span)> {
+        let mut out = Vec::new();
+        let mut before = 0;
+        for c in &self.content {
+            match c {
+                Content::Text(sp) => out.push((before, *sp)),
+                Content::Node(_) => before += 1,
+            }
+        }
+        out
+    }
+}
 
 /// One parsed file: its text and the arena of nodes found in it.
 #[derive(Debug, Clone)]
@@ -213,7 +241,9 @@ fn indent_cols(raw: &str, tabbed: &mut bool) -> usize {
 enum TitleKind {
     Section { level: usize },
     Item,
-    Embed(Id),
+    /// `![[id]]`, bare (item position) or as a heading (`## ![[id]]`,
+    /// section position, with its level) (§4.7).
+    Embed(Id, Option<usize>),
 }
 
 struct TitleInfo {
@@ -243,7 +273,7 @@ fn classify_title(raw: &str) -> Option<(usize, TitleInfo)> {
             (
                 indent,
                 TitleInfo {
-                    kind: TitleKind::Embed(id),
+                    kind: TitleKind::Embed(id, None),
                     task: None,
                     title: String::new(),
                     noncanonical,
@@ -259,6 +289,24 @@ fn classify_title(raw: &str) -> Option<(usize, TitleInfo)> {
         }
         if hashes > 6 {
             noncanonical.push("heading level beyond six".into());
+        }
+        // a heading embed: the heading holds nothing but `![[id]]`
+        if let Some(inner) = after
+            .trim()
+            .strip_prefix("![[")
+            .and_then(|s| s.strip_suffix("]]"))
+        {
+            if let Some(id) = Id::parse(inner.trim()) {
+                return Some((
+                    indent,
+                    TitleInfo {
+                        kind: TitleKind::Embed(id, Some(hashes)),
+                        task: None,
+                        title: String::new(),
+                        noncanonical,
+                    },
+                ));
+            }
         }
         (
             TitleKind::Section { level: hashes },
@@ -376,8 +424,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         title: String::new(),
         task: None,
         title_span: Span::default(),
-        body_span: Span::default(),
-        tail: Vec::new(),
+        content: Vec::new(),
         span: Span {
             start: 0,
             end: text.len(),
@@ -455,7 +502,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         match classify_title(&raw) {
             Some((indent, info)) => {
                 pending_setext = None;
-                let is_embed = matches!(info.kind, TitleKind::Embed(_));
+                let is_embed = matches!(info.kind, TitleKind::Embed(..));
                 // Pop until the top can contain this node (§3.1). A node's
                 // parent is the nearest section above it, or the nearest item
                 // whose child indent it reaches — items that can't contain it
@@ -465,7 +512,9 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     let tnode = &nodes[top.node];
                     let can = match tnode.kind {
                         Kind::Root => true,
-                        _ if top.is_embed => indent > top.indent, // diagnostic, but keep spans sane
+                        // lines under a bare embed are a diagnostic, but keep
+                        // spans sane; a heading embed nests like a section
+                        Kind::Item if top.is_embed => indent > top.indent,
                         Kind::Item => {
                             // An item contains only what reaches its child
                             // indent; otherwise look through it.
@@ -487,7 +536,9 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                             // predecessor, so `## C` after `###### B` is a
                             // sibling of B, not a child. Look through
                             // intervening items.
-                            if let TitleKind::Section { level } = &info.kind {
+                            if let TitleKind::Section { level } | TitleKind::Embed(_, Some(level)) =
+                                &info.kind
+                            {
                                 let mut nearest = None;
                                 for f in stack.iter().rev() {
                                     if nodes[f.node].kind == Kind::Section {
@@ -509,8 +560,8 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                 let parent = stack.last().unwrap().node;
                 let mut node = Node {
                     kind: match info.kind {
-                        TitleKind::Section { .. } => Kind::Section,
-                        TitleKind::Item | TitleKind::Embed(_) => Kind::Item,
+                        TitleKind::Section { .. } | TitleKind::Embed(_, Some(_)) => Kind::Section,
+                        TitleKind::Item | TitleKind::Embed(_, None) => Kind::Item,
                     },
                     title: info.title,
                     task: info.task,
@@ -518,11 +569,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                         start: lstart,
                         end: lend,
                     },
-                    body_span: Span {
-                        start: lnext,
-                        end: lnext,
-                    },
-                    tail: Vec::new(),
+                    content: Vec::new(),
                     span: Span {
                         start: lstart,
                         end: lnext,
@@ -532,12 +579,14 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     file: file_idx,
                     block: None,
                     embed: match &info.kind {
-                        TitleKind::Embed(id) => Some(id.clone()),
+                        TitleKind::Embed(id, _) => Some(id.clone()),
                         _ => None,
                     },
                     indent,
                     level: match &info.kind {
-                        TitleKind::Section { level } => Some(*level),
+                        TitleKind::Section { level } | TitleKind::Embed(_, Some(level)) => {
+                            Some(*level)
+                        }
                         _ => None,
                     },
                     noncanonical: info.noncanonical,
@@ -570,6 +619,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                 }
                 let idx = nodes.len();
                 nodes[parent].children.push(idx);
+                nodes[parent].content.push(Content::Node(idx));
                 nodes.push(node);
                 extend_spans(&mut nodes, idx, lnext);
                 stack.push(Frame {
@@ -702,28 +752,14 @@ fn push_body(
         stack.pop();
     }
     let top = stack.last().unwrap().node;
-    let n = &mut nodes[top];
-    if !n.children.is_empty() {
-        // body text after children goes to a tail segment, so the body span
-        // never stretches over the children (§3.3)
-        let after = n.children.len();
-        match n.tail.last_mut() {
-            Some((k, sp)) if *k == after && sp.end == line.start => sp.end = line.next,
-            _ => n.tail.push((
-                after,
-                Span {
-                    start: line.start,
-                    end: line.next,
-                },
-            )),
-        }
-    } else {
-        // body_span starts empty (start == end, right after the title line);
-        // the first body line sets its start.
-        if n.body_span.start == n.body_span.end {
-            n.body_span.start = line.start;
-        }
-        n.body_span.end = line.next;
+    // consecutive lines extend the node's last text child; a line after a
+    // child node starts a new one, so text never spans a child (§3.3)
+    match nodes[top].content.last_mut() {
+        Some(Content::Text(sp)) if sp.end == line.start => sp.end = line.next,
+        _ => nodes[top].content.push(Content::Text(Span {
+            start: line.start,
+            end: line.next,
+        })),
     }
     extend_spans(nodes, top, line.next);
 }
@@ -737,27 +773,19 @@ fn make_setext_section(
     underline_li: usize,
     level: usize,
 ) {
-    // The title line is the last body line pushed, so it ends the top
-    // frame's body or its last tail segment; take it back out.
+    // The title line is the last text line pushed, so it ends the top
+    // frame's last text child; take it back out.
     let title = lines[title_li].raw.trim().to_string();
     let underline = &lines[underline_li];
     let tl = &lines[title_li];
     {
         let owner = stack.last().unwrap().node;
         let nd = &mut nodes[owner];
-        match nd.tail.last_mut() {
-            Some((_, sp)) if sp.end == tl.next => {
+        if let Some(Content::Text(sp)) = nd.content.last_mut() {
+            if sp.end == tl.next {
                 sp.end = tl.start;
                 if sp.start >= sp.end {
-                    nd.tail.pop();
-                }
-            }
-            _ => {
-                if nd.body_span.end == tl.next {
-                    nd.body_span.end = tl.start;
-                    if nd.body_span.start >= nd.body_span.end {
-                        nd.body_span.start = nd.body_span.end;
-                    }
+                    nd.content.pop();
                 }
             }
         }
@@ -786,11 +814,7 @@ fn make_setext_section(
             start: lines[title_li].start,
             end: lines[title_li].end,
         },
-        body_span: Span {
-            start: underline.next,
-            end: underline.next,
-        },
-        tail: Vec::new(),
+        content: Vec::new(),
         span: Span {
             start: lines[title_li].start,
             end: underline.next,
@@ -805,6 +829,7 @@ fn make_setext_section(
         noncanonical: vec!["setext heading".into()],
     });
     nodes[parent].children.push(idx);
+    nodes[parent].content.push(Content::Node(idx));
     extend_spans(nodes, idx, underline.next);
     stack.push(Frame {
         node: idx,

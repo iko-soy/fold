@@ -180,3 +180,14 @@ fn tiny_terminal_filter_does_not_panic() {
         draw(&mut app, 40, h);
     }
 }
+
+#[test]
+fn respelling_moves_the_node_and_keeps_the_cursor_on_it() {
+    let (d, mut app) = app_with("# P\n\n- a\n- b\n");
+    press(&mut app, "j~");
+    assert_eq!(root(&d), "# P\n\n- b\n\n## a\n");
+    assert_eq!(current_title(&app), "a");
+    // an item cannot move below a section: nothing changes
+    press(&mut app, "kJ");
+    assert_eq!(root(&d), "# P\n\n- b\n\n## a\n");
+}

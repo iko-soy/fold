@@ -1,7 +1,7 @@
 //! `notes check` diagnostics (§15.7) and `--fix` canonicalization (§4.2).
 
 use crate::ident::{filename, slug, split_filename, Id};
-use crate::parse::Kind;
+use crate::parse::{Content, Kind};
 use crate::render::render;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -51,6 +51,13 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                     None => out.push(Diagnostic {
                         file: f.path.clone(),
                         message: format!("broken embed: no block with id {}", id),
+                    }),
+                    Some(b) if form_mismatch(n.kind, t.node(b).kind) => out.push(Diagnostic {
+                        file: f.path.clone(),
+                        message: format!(
+                            "embed form does not match the block's spelling: {} (§4.7)",
+                            id
+                        ),
                     }),
                     Some(_) => {}
                 }
@@ -176,6 +183,11 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
     out
 }
 
+/// A heading embed must embed a section, a bare one an item (§4.7).
+fn form_mismatch(embed: Kind, block: Kind) -> bool {
+    (embed == Kind::Section) != (block == Kind::Section)
+}
+
 pub fn is_iso_date(v: &str) -> bool {
     v.len() == 10
         && v.as_bytes()[4] == b'-'
@@ -198,21 +210,45 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         let top: Vec<usize> = f.nodes[f.root_node].children.clone();
         let canonical = if i == 0 {
             let Some(&first) = top.first() else { continue };
-            // frontmatter and intro text, exactly as found
+            // frontmatter and intro text, exactly as found; then the root's
+            // children in order — nodes rendered, text children verbatim,
+            // one blank line between a node and what follows it unless both
+            // are items of a tight list (§4.2)
             let mut s = f.text[..f.nodes[first].span.start].to_string();
-            for (idx, &k) in top.iter().enumerate() {
-                let kr = (i, k);
-                let kn = vault.tree.node(kr);
-                if idx > 0 && (kn.kind == Kind::Section || vault.tree.node((i, top[idx - 1])).kind == Kind::Section) {
-                    s.push('\n');
-                }
-                match &kn.embed {
-                    Some(id) => {
-                        s.push_str("![[");
-                        s.push_str(id.as_str());
-                        s.push_str("]]\n");
+            let root = &f.nodes[f.root_node];
+            let from = root
+                .content
+                .iter()
+                .position(|c| *c == Content::Node(first))
+                .unwrap_or(0);
+            let mut prev: Option<usize> = None;
+            for c in &root.content[from..] {
+                let loose_after_prev = prev.map(|p| {
+                    let pn = &f.nodes[p];
+                    pn.kind == Kind::Section || pn.span.text(&f.text).ends_with("\n\n")
+                });
+                match *c {
+                    Content::Node(k) => {
+                        let kn = &f.nodes[k];
+                        let blank = match loose_after_prev {
+                            Some(loose) => loose || kn.kind == Kind::Section,
+                            None => !s.is_empty() && !s.ends_with("\n\n"),
+                        };
+                        if blank && !s.ends_with("\n\n") {
+                            s.push('\n');
+                        }
+                        s.push_str(&render(&vault.tree, (i, k), 1, false));
+                        prev = Some(k);
                     }
-                    None => s.push_str(&render(&vault.tree, kr, 1, false)),
+                    Content::Text(sp) => {
+                        if prev.is_some() && !s.ends_with("\n\n") {
+                            s.push('\n');
+                        }
+                        let t = sp.text(&f.text);
+                        s.push_str(t.trim_end_matches('\n'));
+                        s.push('\n');
+                        prev = None;
+                    }
                 }
             }
             s
@@ -230,6 +266,19 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             vault.write_file_text(i, &canonical)?;
             count += 1;
         }
+    }
+    // embeds in the form of their block's spelling (§4.7), one at a time:
+    // each respell may move an embed and re-parse its file
+    for _ in 0..vault.tree.blocks.len() {
+        let t = &vault.tree;
+        let wrong = t.blocks.iter().find_map(|(b, id)| {
+            let e = t.embed_of(id)?;
+            form_mismatch(t.node(e).kind, t.node(*b).kind)
+                .then(|| (e, t.node(*b).kind == Kind::Section))
+        });
+        let Some((e, to_section)) = wrong else { break };
+        crate::ops::respell_embed(vault, e, to_section)?;
+        count += 1;
     }
     // repair filenames (§6.4): an existing prefix that is a leading run of
     // the id is kept — prefixes are never lengthened — unless a file decided

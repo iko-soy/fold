@@ -4,7 +4,7 @@
 //! editing buffer (§5.2) all consume it, so what the user reads, what they
 //! edit and what splice writes back are the same text.
 
-use crate::parse::{Kind, Span, TaskState};
+use crate::parse::{Content, Kind, Span, TaskState};
 use crate::tree::{NRef, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +118,7 @@ impl Walk<'_> {
         };
         let title = match n.kind {
             Kind::Root => None,
-            _ if n.is_embed() => Some((
-                format!("{}![[{}]]", " ".repeat(dindent), n.embed.as_ref().unwrap()),
-                LineKind::Embed,
-            )),
+            _ if n.is_embed() => Some((embed_line(n, dlevel, dindent), LineKind::Embed)),
             Kind::Section => {
                 let mut s = " ".repeat(dindent);
                 s.push_str(&"#".repeat(dlevel.max(1)));
@@ -147,13 +144,10 @@ impl Walk<'_> {
         if let Some((text, kind)) = title {
             self.push(text, kind, r, owner, outer, dlevel, dindent);
         }
-        self.span_lines(r, n.body_span, dlevel, dindent, owner, outer);
-        for (i, &c) in n.children.iter().enumerate() {
-            self.child(r, (r.0, c), dlevel, dindent, owner, outer);
-            for (k, sp) in &n.tail {
-                if *k == i + 1 {
-                    self.span_lines(r, *sp, dlevel, dindent, owner, outer);
-                }
+        for c in &n.content {
+            match *c {
+                Content::Text(sp) => self.span_lines(r, sp, dlevel, dindent, owner, outer),
+                Content::Node(c) => self.child(r, (r.0, c), dlevel, dindent, owner, outer),
             }
         }
         self.seen.pop();
@@ -179,10 +173,14 @@ impl Walk<'_> {
                 };
                 self.node(t, tlevel, cindent, owner, outer);
                 // the embed line's own blank separators (and any lines
-                // wrongly indented under it) stay in the parent
-                self.span_lines(c, cn.body_span, dlevel, cindent, owner, outer);
-                for &cc in &cn.children {
-                    self.child(c, (c.0, cc), dlevel, cindent, owner, outer);
+                // wrongly placed under it) stay in the parent
+                for cc in &cn.content {
+                    match *cc {
+                        Content::Text(sp) => {
+                            self.span_lines(c, sp, dlevel, cindent, owner, outer)
+                        }
+                        Content::Node(k) => self.child(c, (c.0, k), dlevel, cindent, owner, outer),
+                    }
                 }
                 return;
             }
@@ -239,6 +237,16 @@ impl Walk<'_> {
             level,
             indent,
         });
+    }
+}
+
+/// An embed line at a display position: a heading embed (`## ![[id]]`) for
+/// a section-position embed, a bare `![[id]]` for an item position (§4.7).
+pub fn embed_line(n: &crate::parse::Node, dlevel: usize, dindent: usize) -> String {
+    let id = n.embed.as_ref().expect("embed node");
+    match n.kind {
+        Kind::Section => format!("{}{} ![[{}]]", " ".repeat(dindent), "#".repeat(dlevel.max(1)), id),
+        _ => format!("{}![[{}]]", " ".repeat(dindent), id),
     }
 }
 

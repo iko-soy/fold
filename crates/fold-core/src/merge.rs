@@ -111,8 +111,114 @@ fn standalone_tree(text: &str) -> Tree {
 
 fn node_sig(t: &Tree, r: NRef) -> (String, Option<TaskState>, String) {
     let n = t.node(r);
-    let body = n.body_lines(t.text_of(r)).join("\n");
-    (n.title.clone(), n.task, body)
+    (n.title.clone(), n.task, text_sig(t, r))
+}
+
+/// A node's text children as one field (§12.4): every run's lines, with the
+/// number of child nodes before it, blank separator lines ignored.
+fn text_sig(t: &Tree, r: NRef) -> String {
+    let n = t.node(r);
+    let mut out = String::new();
+    for (before, sp) in n.text_runs() {
+        let lines = run_lines(t, r, sp);
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{}\u{1}{}\u{2}", before, lines.join("\n")));
+    }
+    out
+}
+
+/// A text run's lines, dedented from the node's content indent, without
+/// leading or trailing blank lines.
+fn run_lines(t: &Tree, r: NRef, sp: crate::parse::Span) -> Vec<String> {
+    let n = t.node(r);
+    let from = match n.kind {
+        Kind::Item => n.indent + 2,
+        Kind::Section => n.indent,
+        Kind::Root => 0,
+    };
+    let mut lines: Vec<String> = sp
+        .text(t.text_of(r))
+        .lines()
+        .map(|l| {
+            let l = l.strip_suffix('\r').unwrap_or(l);
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                dedent(l, from).to_string()
+            }
+        })
+        .collect();
+    while lines.first().map(|l| l.is_empty()) == Some(true) {
+        lines.remove(0);
+    }
+    while lines.last().map(|l| l.is_empty()) == Some(true) {
+        lines.pop();
+    }
+    lines
+}
+
+/// A text run emitted at `indent`, ending in a newline ("" if it is blank).
+fn emit_text(t: &Tree, r: NRef, sp: crate::parse::Span, indent: usize) -> String {
+    let ind = " ".repeat(indent);
+    let mut out = String::new();
+    for l in run_lines(t, r, sp) {
+        if !l.is_empty() {
+            out.push_str(&ind);
+            out.push_str(&l);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// One emitted child: a node's text or a text child.
+enum Piece {
+    Node(Kind, String),
+    Text(String),
+}
+
+/// Join emitted children: a blank line before and after text and before a
+/// section; items follow each other tightly.
+fn join_pieces(pieces: Vec<Piece>) -> String {
+    let mut out = String::new();
+    let mut prev_node: Option<Option<Kind>> = None; // Some(None) = text
+    for p in pieces {
+        let (kind, text) = match p {
+            Piece::Node(k, t) => (Some(k), t),
+            Piece::Text(t) => (None, t),
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let blank = match prev_node {
+            None => false,
+            Some(prev) => {
+                kind.is_none()
+                    || prev.is_none()
+                    || kind == Some(Kind::Section)
+                    || prev == Some(Kind::Section)
+            }
+        };
+        if blank && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&text);
+        prev_node = Some(kind);
+    }
+    out
+}
+
+/// Text runs of `r` after its child nodes: child position (0-based) → the
+/// run that follows that child.
+fn trailing_runs(t: &Tree, r: NRef) -> Vec<(usize, crate::parse::Span)> {
+    t.node(r)
+        .text_runs()
+        .into_iter()
+        .filter(|(before, _)| *before > 0)
+        .map(|(before, sp)| (before - 1, sp))
+        .collect()
 }
 
 /// Match children of two parents: by embed id, then exact title (§12.4).
@@ -181,31 +287,59 @@ fn merge_children(
         }
     }
     // Emit: matched pairs merge field-by-field; single-sided nodes are
-    // insertions; differing fields raise conflict pairs (§12.4).
-    let mut out = String::new();
-    for (ok, tk) in pairs {
-        let first_is_section = ok
-            .map(|a| o.node(a).kind == Kind::Section)
-            .or_else(|| tk.map(|b| t.node(b).kind == Kind::Section))
-            .unwrap_or(false);
-        if !out.is_empty() && first_is_section && !out.ends_with("\n\n") {
-            out.push('\n');
+    // insertions; differing fields raise conflict pairs (§12.4). O's text
+    // children stay where O has them; T-only nodes are placed by the
+    // ordering rule (§3.1): items before the first section, sections last.
+    let mut pieces: Vec<Piece> = Vec::new();
+    if o.node(op).kind == Kind::Root {
+        // the root's own text: O's, plus T's when it differs (never lost)
+        if let Some(sp) = o.node(op).body_span() {
+            pieces.push(Piece::Text(emit_text(o, op, sp, indent)));
         }
-        match (ok, tk) {
-            (Some(a), Some(b)) => {
-                out.push_str(&merge_pair(o, t, a, b, ctx, level, indent));
+        if text_sig(o, op) != text_sig(t, tp) {
+            ctx.insertions += 1;
+            for (_, sp) in t.node(tp).text_runs() {
+                pieces.push(Piece::Text(emit_text(t, tp, sp, indent)));
             }
-            (Some(a), None) => {
-                out.push_str(&emit_subtree(o, a, level, indent));
+        }
+    }
+    let o_trailing = trailing_runs(o, op);
+    let mut t_items: Vec<Piece> = Vec::new();
+    let mut t_sections: Vec<Piece> = Vec::new();
+    for (ok, tk) in pairs {
+        match (ok, tk) {
+            (Some(a), tk) => {
+                let text = match tk {
+                    Some(b) => merge_pair(o, t, a, b, ctx, level, indent),
+                    None => emit_subtree(o, a, level, indent),
+                };
+                pieces.push(Piece::Node(o.node(a).kind, text));
+                let j = o_kids.iter().position(|&k| k == a).unwrap_or(usize::MAX);
+                for (_, sp) in o_trailing.iter().filter(|(pos, _)| *pos == j) {
+                    pieces.push(Piece::Text(emit_text(o, op, *sp, indent)));
+                }
             }
             (None, Some(b)) => {
                 ctx.insertions += 1;
-                out.push_str(&emit_subtree(t, b, level, indent));
+                let piece = Piece::Node(t.node(b).kind, emit_subtree(t, b, level, indent));
+                if t.node(b).kind == Kind::Section {
+                    t_sections.push(piece);
+                } else {
+                    t_items.push(piece);
+                }
             }
             (None, None) => {}
         }
     }
-    out
+    let first_section = pieces
+        .iter()
+        .position(|p| matches!(p, Piece::Node(Kind::Section, _)))
+        .unwrap_or(pieces.len());
+    let tail = pieces.split_off(first_section);
+    pieces.extend(t_items);
+    pieces.extend(tail);
+    pieces.extend(t_sections);
+    join_pieces(pieces)
 }
 
 fn merge_pair(
@@ -283,31 +417,24 @@ fn merge_pair(
     block_text.push_str("---\n\n");
     block_text.push_str(&emit_subtree_with_state(t, b, 1, 0));
     ctx.conflict_blocks.push((fname, block_text));
-    let embed = format!("{}![[{}]]\n", " ".repeat(indent), id);
     if is_file_block {
         // a block file has one column-0 node: the embed goes after this
         // file's own embed in the parent file (the caller places it)
         ctx.sibling_embeds.push(id);
-        emit_node_with(o, a, level, indent, &merged_kids)
-    } else if on.kind == Kind::Section {
-        // An embed after a section's children would parse as its last
-        // child; one right after its title and body, as its first child,
-        // is the closest a section's "next" position can be. The conflict
-        // view pairs a first-child conflict with its parent (§10.8).
-        let mut kids = embed;
-        if !merged_kids.trim().is_empty() {
-            if merged_kids.trim_start().starts_with('#') {
-                kids.push('\n');
-            }
-            kids.push_str(&merged_kids);
-        }
-        emit_node_with(o, a, level, indent, &kids)
-    } else {
-        // the embed goes right after ours, as its next sibling
-        let mut out = emit_node_with(o, a, level, indent, &merged_kids);
-        out.push_str(&embed);
-        out
+        return emit_node_with(o, a, level, indent, &merged_kids);
     }
+    // the embed goes right after ours, as its next sibling, in the form of
+    // ours' spelling (§4.7): a heading embed after a section's subtree
+    let mut out = emit_node_with(o, a, level, indent, &merged_kids);
+    if on.kind == Kind::Section {
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}{} ![[{}]]\n", " ".repeat(indent), "#".repeat(level.max(1)), id));
+    } else {
+        out.push_str(&format!("{}![[{}]]\n", " ".repeat(indent), id));
+    }
+    out
 }
 
 /// Render a node at (level, indent) with given already-rendered children.
@@ -398,14 +525,20 @@ fn emit_subtree_impl(t: &Tree, r: NRef, level: usize, indent: usize, show_block_
         Kind::Item => indent + 2,
         _ => indent,
     };
-    let mut kid_text = String::new();
-    for (i, &k) in kids.iter().enumerate() {
-        if i > 0 && t.node(k).kind == Kind::Section {
-            kid_text.push('\n');
+    // children in order: nodes and the text runs after them (the leading
+    // run is the body, emitted with the title)
+    let trailing = trailing_runs(t, r);
+    let mut pieces = Vec::new();
+    for (j, &k) in kids.iter().enumerate() {
+        pieces.push(Piece::Node(
+            t.node(k).kind,
+            emit_subtree_impl(t, k, child_level, child_indent, show_block_state),
+        ));
+        for (_, sp) in trailing.iter().filter(|(pos, _)| *pos == j) {
+            pieces.push(Piece::Text(emit_text(t, r, *sp, child_indent)));
         }
-        kid_text.push_str(&emit_subtree_impl(t, k, child_level, child_indent, show_block_state));
     }
-    emit_node_with_impl(t, r, level, indent, &kid_text, show_block_state)
+    emit_node_with_impl(t, r, level, indent, &join_pieces(pieces), show_block_state)
 }
 
 fn push_task(task: Option<TaskState>, out: &mut String) {
@@ -532,19 +665,29 @@ fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> st
             f.nodes
                 .iter()
                 .find(|nd| nd.embed.as_ref() == Some(oid))
-                .map(|nd| (fi, nd.span.end.min(f.text.len()), nd.indent))
+                .map(|nd| {
+                    // the same form as the owner's embed (§4.7)
+                    let heading = (nd.kind == Kind::Section).then(|| nd.level.unwrap_or(1));
+                    (fi, nd.title_span.end.min(f.text.len()), nd.indent, heading)
+                })
         })
     });
     let mut insert = String::new();
     match found {
-        Some((fi, end, indent)) => {
+        Some((fi, end, indent, heading)) => {
             for id in ids {
-                insert.push_str(&format!("\n{}![[{}]]", " ".repeat(indent), id));
+                match heading {
+                    Some(h) => insert.push_str(&format!(
+                        "\n\n{}{} ![[{}]]",
+                        " ".repeat(indent),
+                        "#".repeat(h),
+                        id
+                    )),
+                    None => insert.push_str(&format!("\n{}![[{}]]", " ".repeat(indent), id)),
+                }
             }
-            // the embed line's span may or may not include its newline
-            let text = &vault.tree.files[fi].text;
-            let at = if end > 0 && text.as_bytes()[end - 1] == b'\n' { end - 1 } else { end };
-            vault.write_span(fi, crate::parse::Span { start: at, end: at }, &insert)
+            // right after the embed's own line, before its blank separator
+            vault.write_span(fi, crate::parse::Span { start: end, end }, &insert)
         }
         None => {
             let text = vault.tree.files[0].text.clone();

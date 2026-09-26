@@ -1,8 +1,18 @@
 # SPEC — a tree-shaped plain-text notes and task manager for the terminal
 
-Status: draft 0.38 · 2026-09-12
+Status: draft 0.39 · 2026-09-26
 Working name: not chosen yet. This document uses `notes` as the binary name; rename freely.
 Language: Rust · TUI: ratatui · Sync: Syncthing · History: file versioning on one node
+
+Changes in 0.39: a node's children are an ordered list of **text children** and **child
+nodes**, interleaved as they are in the file; the body is just the leading text (§3.1, §3.3).
+Children obey one ordering rule, `(text | item)* section*`, because Markdown cannot close a
+heading: every verb that places a node keeps it, and `~` moves the node it respells to the
+boundary between items and sections instead of silently re-parenting its siblings (§3.1,
+§10.3). Text children are not outline rows and stay where they are when nodes around them
+move. A section block's embed is a **heading embed**, `## ![[id]]`, so it keeps its place
+among section siblings (§4.7). Merge compares a node's text children as one field and places
+insertions by the ordering rule (§12.4).
 
 Changes in 0.38: no external editor in 1.0. `E`, the inline-frontmatter spelling, the
 `inline` render mode and `$EDITOR` are gone; the built-in editor is the only editor (§10.6,
@@ -221,7 +231,9 @@ Principles, in priority order:
 |---|---|
 | Vault | A directory containing `root.md` and, optionally, block files. |
 | Tree | The single logical outline formed by `root.md` plus all block files stitched in. |
-| Node | One thing in the outline: a title line, a body, children. Spelled as a section or an item. |
+| Node | One thing in the outline: a title line and its children. Spelled as a section or an item. |
+| Children | A node's ordered content: text children and child nodes, interleaved (§3.1). |
+| Text child | A run of lines among a node's children that is not a node: prose, code, a quote (§3.3). |
 | Section | A node spelled as an ATX heading `#`, `##`, … (no upper bound). |
 | Item | A node spelled as a `- ` bullet. |
 | Spelling | Whether a node is written as a heading or a bullet. Presentation only (§3.1). |
@@ -230,11 +242,11 @@ Principles, in priority order:
 | Id | A random four-word phonemic name (`racfer-hattes-dozzod-binwes`) in a block's `id:` frontmatter; its stable identity. |
 | Name | The slug of a block's title. With a prefix of the id in front, its filename. Decoration, not identity. |
 | Property | A key in a block's YAML frontmatter. |
-| Body | Block content belonging to a node before its first child. |
+| Body | A node's leading text children: what comes before its first child node. |
 | Zoom | Viewing a node as a standalone block via `render(node, base)`. |
 | Splice | Writing an edited zoomed block back into its source span. |
 | Make a block | Giving a node an id and its own file, leaving an embed in the parent. |
-| Embed | `![[id]]` alone on a line at the node's position in the parent. |
+| Embed | `![[id]]` alone on a line (or as a heading, `## ![[id]]`) at the node's position in the parent. |
 | Span | A byte range in a file. Every node knows its span. |
 | Path | A node's address by ancestor titles: `Homelab/NAS/ZFS layout`. |
 
@@ -252,16 +264,47 @@ Section  — spelled as a heading; may hold prose; children of either spelling
 Item     — spelled as a bullet; may hold note lines; children of either spelling
 ```
 
+A node's **children** are an ordered list in which two things interleave: **child nodes**
+and **text children** (§3.3), in the order the file has them:
+
+```
+Trip                       ← section
+├─ text   "Plan below."
+├─ item   book flights
+├─ item   book hotel
+└─ text   "Budget is tight, so check both before paying."
+```
+
 Rules:
 
 - Any node may be the child of any node. A heading under a bullet is a section whose parent
   is an item; a bullet under a heading is an item whose parent is a section.
+- **Ordering rule.** Every node's children match
+
+  ```
+  children := (text | item)* section*
+  ```
+
+  Markdown has no way to close a heading: anything written after a section child — text or
+  an item at that position — belongs to that section. So once a section child appears, only
+  section children follow it. The parser produces nothing else; every verb that places a
+  node (§6.5, §10.3, §12.4) keeps the rule by **clamping**: an item goes no later than just
+  before its new parent's first section child, and a section no earlier than just after its
+  last item child. The *boundary* of a node's children is the position between its last
+  item or text child and its first section child.
+- **Text children are content, not outline.** They are not rows in the outline pane, not
+  targets, never blocks or tasks, and are never moved on their own. A verb that moves,
+  deletes or refiles a node moves exactly that node's own lines; the text children around it
+  stay where they are, with the siblings they were between. They move only with the node
+  that contains them.
 - Heading level and indent are **derived from position**, never stored:
   `level(n) = 1 + number of section ancestors of n`, and `indent(n) = 2 × number of item
   ancestors of n`. A section under an item is written at that item's child indent with its
   own level. There is no upper bound on levels.
-- Spelling is presentation: `~` toggles it (§10.3) and nothing else changes. Both spellings
-  can be tasks, hold bodies, be refiled anywhere, and be made into blocks.
+- Spelling is presentation: `~` toggles it (§10.3) and nothing else about the node changes.
+  Both spellings can be tasks, hold text, be refiled anywhere, and be made into blocks. The
+  one consequence of spelling is position: under the ordering rule a node respelled by `~`
+  moves to its parent's boundary, so its siblings keep their parent.
 - Sibling order is block order and is meaningful.
 - Any node may be a **block** (the root of its own file). Its file starts with the node
   as it is spelled — a heading or a bullet — so the file is the only place its spelling
@@ -302,16 +345,32 @@ nothing reorders it on insert.
 Everything else (`tags`, `priority`, `est`, `waiting`, `since`, `author`, `source`, …) is
 user-defined, and the app never looks at it.
 
-### 3.3 Bodies
+### 3.3 Text children
 
-A body is an ordered list of raw lines, opaque to the tree. The parser only needs to know
+A text child is a run of consecutive raw lines, opaque to the tree, between two structural
+points: the title line, a child node, or the end of the node. The parser only needs to know
 enough to find the *next title line*: it tracks fenced code blocks (```` ``` ```` and `~~~`,
 any indent) so that `#` or `- ` inside a fence never starts a node. Paragraphs, quotes,
-tables, images, HTML and code are all body.
+tables, images, HTML and code are all text.
 
-For items, body lines are those indented at least `indent + 2` that are not child title
-lines (bullets or headings). For sections, body is everything from the title line to the
-first child, at the section's own indent.
+A text line belongs to the deepest open node whose region it reaches:
+
+- an item's region is lines indented at least `indent + 2`;
+- a section's region is lines at or beyond its own indent;
+- the root's region is everything.
+
+So a line at column 0 after `- b` under `# Trip` is Trip's text, not b's: it ends the list.
+(CommonMark would read an unindented line right after a list item with no blank line between
+as a lazy continuation of that item; this format does not. Write a blank line before it and
+both agree.)
+
+A blank line belongs to the text run it is in, or — between nodes — to the deepest open node
+before it: the blank line after `- a` is `a`'s trailing separator. Blank lines are therefore
+never lost or invented when a node is rendered or moved.
+
+The **body** of a node is its leading text: the text children before its first child node.
+It is what the reading pane shows under the title before any child, and what "a node with a
+body" means elsewhere in this spec.
 
 ### 3.4 Identity and addressing
 
@@ -412,8 +471,8 @@ Canonicalization is **lazy**: a node is rewritten in canonical form only when it
 everything at once.
 
 **What is ours.** A standard Markdown renderer will mishandle exactly these four things:
-`![[id]]` embeds, heading levels beyond six, checkboxes on headings, and headings indented
-under bullets. Nothing else in a vault is non-standard.
+`![[id]]` embeds (bare or as a heading), heading levels beyond six, checkboxes on headings,
+and headings indented under bullets. Nothing else in a vault is non-standard.
 
 ### 4.3 Title lines
 
@@ -475,17 +534,31 @@ External links are ordinary Markdown `[text](url)` and are opened with `xdg-open
 
 ### 4.7 Embeds
 
-An embed is where a block is stitched into the tree: `![[id]]` alone on a line, at the
-indent the node has at that position.
+An embed is where a block is stitched into the tree. It has two forms, one per position in
+the ordering rule (§3.1):
+
+- **bare**, `![[id]]` alone on a line at the node's indent — an item position;
+- **heading**, `## ![[id]]` — a heading line holding nothing but the embed, at the level and
+  indent a section has at that position.
 
 ```
 ![[dozzod-binwes-talsun-worbec]]
   ![[racfer-hattes-mislup-nodrys]]     -- a child of the item above it
+## ![[lacnum-walbyn-dirlyn-havtyp]]    -- a section-position embed
 ```
 
-The embed names the block by id and nothing else; title, spelling, checkbox or `todo`,
-properties, body and children all live in the file. An embed line has no children in the
-parent file; child lines indented under an embed are a diagnostic.
+The app writes the form that matches the block's spelling: a block whose root is a section
+is embedded with a heading embed, a block whose root is an item with a bare one. The
+heading form exists because a bare embed after a section sibling would, like any line
+there, belong to that section (§3.1). Either form is read anywhere; an embed whose form
+does not match its block's spelling is a diagnostic (§15.7) that `notes check --fix`
+rewrites, and it is placed where its form puts it.
+
+The embed names the block by id and nothing else; title, checkbox or `todo`, properties,
+text and children all live in the file. The embed's form repeats the block's spelling so
+that the parent file parses into the right shape without opening the block. An embed line
+has no children in the parent file; lines indented under a bare embed, or nested under a
+heading embed, are a diagnostic.
 
 `![[` anywhere else is body text. The app does not implement general transclusion.
 
@@ -501,8 +574,7 @@ A block's file is exactly `render(node, 1, resolve_blocks = false)`:
 ```
 [frontmatter, always beginning with id; todo: if the block is a task]
 [the node's title line, as spelled: "# Title" or "- Title"]
-[body]
-[children]
+[its children: text and nodes, in order]
 ```
 
 - The root is written as it is spelled in the tree. A block that is a heading is a `#` at column 0; one
@@ -527,7 +599,7 @@ Two boxes in the closet, one at Hetzner.
 
 ## NAS
 
-![[dozzod-binwes-talsun-worbec]]
+### ![[dozzod-binwes-talsun-worbec]]
 
 ## Networking
 
@@ -576,8 +648,10 @@ due: 2026-09-20
   Two options, noted under Networking.
 ```
 
-Note that "Replace the flaky switch" is a one-line task with no file; "Order new switch"
-became a block the moment it got a due date, its checkbox became `todo: open`, and its
+Note that "Replace the flaky switch" is a one-line task with no file; "ZFS layout" is a
+section block, so its embed is a heading at the level it has under NAS, while "Order new
+switch" is an item block and is embedded bare. "Order new switch" became a block the moment
+it got a due date, its checkbox became `todo: open`, and its
 file starts with a bullet because that is what it is. "Options" is
 a section nested under an item, and "Snapshot policy" is a section that is itself a task.
 
@@ -592,10 +666,11 @@ Emits the node and its subtree, in document order, as a standalone Markdown docu
 1. If the node is a block and `base == 1` and `resolve_blocks = false`: its frontmatter.
 2. The node's title line — checkbox included — at level `base` for a section, or at
    indent 0 for an item.
-3. The node's body, verbatim (bodies dedented by the node's original indent).
-4. Each descendant, recursively: sections re-levelled by `base − level(node)`; everything
-   re-indented by `−indent(node)`.
-5. Embeds: with `resolve_blocks = false`, written as embeds. With `resolve_blocks = true`, the
+3. The node's children in order: each text child verbatim (dedented by the node's original
+   indent), each child node recursively — sections re-levelled by `base − level(node)`,
+   everything re-indented by `−indent(node)`.
+4. Blank lines are text and are reproduced where they are (§3.3); `render` adds none.
+5. Embeds: with `resolve_blocks = false`, written as embeds in their form (§4.7). With `resolve_blocks = true`, the
    block's subtree is inlined at the embed's position, its frontmatter omitted, its own
    embeds resolved in turn. The resolved text contains no embed, no id, no frontmatter and no
    file boundary: it is titles, checkboxes, bodies and nesting, nothing else.
@@ -628,7 +703,8 @@ A block is **dirty** when any line it owns changed, or when the position of a bl
 in it moved. `splice(block)` writes one dirty block:
 
 1. Collect the block's owned lines in buffer order, and put each nested block back as an
-   embed at the position of that block's title line. The result is exactly an edited
+   embed at the position of that block's title line — a heading embed if that title line is
+   a heading, a bare one if it is a bullet (§4.7). The result is exactly an edited
    `render(block, 1, false)`: one file's text, embeds intact, ids never typed.
 2. Parse it: title lines, bodies, nesting, embeds. Exactly one root-level node; a `---`
    line is body text.
@@ -683,8 +759,10 @@ demotes anything. The level-overflow rule of earlier drafts is gone.
 1. Generate an id and a name (§6.4). The file is `<prefix>~<name>.md` in the vault root.
 2. Write `render(node, 1, resolve_blocks = false)` to the file atomically, with frontmatter
    `id: <id>` and, if the block was made by setting a property, that property.
-3. Replace the node's span in its parent file with an embed, `![[id]]`, at the node's
-   indent. A checkbox on the node becomes `todo: <state>` in the frontmatter (§4.5).
+3. Replace the node's span in its parent file with an embed at the node's position: a
+   heading embed at its level for a section, a bare `![[id]]` at its indent for an item
+   (§4.7). The text children around the node stay in the parent. A checkbox on the node
+   becomes `todo: <state>` in the frontmatter (§4.5).
 4. Update the index.
 
 There is no inverse. A block stays a file until it is deleted (`d`, *clear done*, or
@@ -769,6 +847,12 @@ the re-levelled text at the destination (§5). Refiling a block moves only its e
 the file does not move. Any node may be refiled under any node;
 spelling is preserved. A task block's state travels with its file, not its embed.
 
+The subtree becomes the destination's **last child, clamped** by the ordering rule (§3.1): a
+section goes after everything; an item goes after the destination's last item or text child,
+just before its first section child. `Ctrl-Enter` (first child) is clamped the same way: a
+section as first child lands just after the destination's last item. Text children of the
+source's old parent stay behind.
+
 **Archive.** Archiving is refile with a fixed destination: the subtree is appended as the
 last child of the top-level section titled `Archive` (case-insensitive, like `Inbox`;
 created as the last top-level section of `root.md` if missing). Nothing else happens — no
@@ -786,7 +870,9 @@ delete it. Nothing in the archive is hidden or dimmed.
 - **Capture** (`c` in the TUI, `notes capture`, a global hotkey via the CLI) appends an item
   under today's day: the child section of `Inbox` titled with today's date, `YYYY-MM-DD`,
   created on demand as the last child. `--task` or a leading `[ ]` makes it a task.
-  `--to <target>` captures under any node instead. Capture never creates a block; dates
+  `--to <target>` captures under any node instead. A captured item is clamped like any
+  inserted item (§3.1): under a target with section children it lands just before the first
+  of them. Capture never creates a block; dates
   and properties are set in the TUI afterwards.
 - Days are ordinary sections, appended in order, so the inbox reads oldest to newest. They
   can hold prose, tasks and sub-sections like any section, and `2026-09-11` addresses
@@ -917,17 +1003,17 @@ aside (§17, open decision 16); the ```` ```query ```` fence is reserved for it 
 | `Ctrl-d` / `Ctrl-u` | half-page down / up |
 | `Enter` | zoom: reading pane shows the cursor node; reading pane takes focus |
 | `Backspace` | zoom out to parent |
-| `>` / `<` | demote / promote: become the last child of the previous sibling / the next sibling of the parent. Spelling unchanged |
-| `~` | toggle spelling, section ↔ item (subtree unchanged) |
-| `J` / `K` | move node down / up among siblings |
-| `n` / `N` | new sibling after cursor / new last child: inserts an empty node and opens it with `e` |
+| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged |
+| `~` | toggle spelling, section ↔ item (subtree unchanged). The node moves to its parent's boundary (§3.1): an item respelled as a section becomes the first section child, a section respelled as an item the last item child, so no sibling changes parent |
+| `J` / `K` | move node down / up past the next / previous sibling node; text children stay put. An item never moves below a section sibling, nor a section above an item: the move is refused with a message |
+| `n` / `N` | new sibling after cursor / new last child, spelled like the cursor node / like the last child node (a section if the parent has section children): inserts an empty node and opens it with `e` |
 | `e` | edit the subtree's Markdown in the built-in editor; saves as you go (§10.6) |
 | `a` | property editor: a form over the node's properties (§10.6); first property on a plain node makes it a block |
 | `x` | toggle task open / done (checkbox, or `todo:` plus `done:` on a block) |
 | `t` | toggle task-ness: adds or removes the checkbox, or the `todo` key on a block |
 | `s` | make the node a block |
 | `y` / `d` | yank / delete subtree into the register (delete goes to trash too) |
-| `p` / `P` | paste register after / before cursor as sibling |
+| `p` / `P` | paste register after / before cursor as sibling, clamped by the ordering rule (§3.1) |
 | `r` | refile: fuzzy-pick a destination; `Ctrl-Enter` = as first child |
 | `c` / `C` | capture to the inbox as bullet / as task |
 | `/` | filter box (§10.5) |
@@ -951,7 +1037,8 @@ aside (§17, open decision 16); the ```` ```query ```` fence is reserved for it 
 ### 10.5 Filter box
 
 `/` opens a single input over the outline. Typing filters the outline live by fuzzy title
-match (nucleo) and, after a 150 ms pause, by full-text match, showing ancestors of hits.
+match (nucleo) and, after a 150 ms pause, by full-text match over every text child, showing
+ancestors of hits.
 `Enter` on a highlighted hit zooms to it; `Enter` with no hit does nothing. `Esc` clears.
 Creating nodes is `n` / `N` (§10.3).
 
@@ -1127,21 +1214,23 @@ Both versions are parsed into trees (embeds unresolved; each file merges on its 
 A retitled node therefore appears twice after a merge — once per title. Two-way merging
 never deletes, so this is the safe failure; delete the copy you don't want.
 
-**Per matched node**, for each of title, checkbox state, body (as text), and — for the
-file's block — each frontmatter key independently (`todo` included): `O == T → take O`,
-otherwise **conflict**. A conflict pair is raised for every field that differs, even when
+**Per matched node**, for each of title, checkbox state, text (all its text children, with
+their positions among its child nodes, as one field), and — for the file's block — each
+frontmatter key independently (`todo` included): `O == T → take O`, otherwise **conflict**. A conflict pair is raised for every field that differs, even when
 only one side touched it; the cost of having no per-device state is paid here, in
 resolution clicks, never in lost text.
 
 **Children** are merged as sequences of matched nodes: nodes present on one side only are
-insertions, placed relative to their matched neighbours. Nothing is ever treated as
+insertions, placed relative to their matched neighbours and clamped by the ordering rule
+(§3.1). `O`'s text children are emitted where `O` has them. Nothing is ever treated as
 deleted.
 
 **Conflict output**: the `O` version stays in place. The `T` version is written as a new
 block `<prefix>~<name>.md` (a fresh id; the name is `O`'s name) with frontmatter
 `conflict: "<device> <timestamp>"` (plus, for a block conflict, `T`'s own properties),
-and an embed to it is inserted as the next sibling of `O`. The conflict block is
-therefore always the node immediately after the one it conflicts with; no other link
+and an embed to it is inserted as the next sibling of `O`, in the form matching `O`'s
+spelling (§4.7) — for a section, a heading embed after its whole subtree. The conflict block
+is therefore always the node immediately after the one it conflicts with; no other link
 between them is stored. No text is ever lost: every node from `O` and `T` appears in the
 result exactly once.
 
@@ -1154,7 +1243,7 @@ The conflict view (§10.8) lists every `conflict:` block, each shown against the
 before it, and the status line counts them. Resolving a pair:
 
 - **keep ours** — delete the conflict block and its embed (to trash);
-- **keep theirs** — replace ours' title, body and children with the conflict block's,
+- **keep theirs** — replace ours' title and children (text and nodes) with the conflict block's,
   and its frontmatter with the conflict block's minus `id` and `conflict`; then delete
   the conflict block and its embed (to trash);
 - **keep both** — drop the `conflict` key; the block stays where it is as an ordinary
@@ -1236,8 +1325,7 @@ pub struct Node {
     kind: Kind,
     title: String,
     task: Option<TaskState>,                    // any node; from the checkbox, or `todo` for a block
-    body: Vec<String>,                          // raw lines, opaque
-    children: Vec<NodeId>,
+    content: Vec<Content>,                      // ordered children: text runs and nodes (§3.1)
     parent: Option<NodeId>,
     file: FileId,
     span: Span,                                 // bytes in `file`: title line through subtree
@@ -1252,6 +1340,8 @@ pub struct Block {
     frontmatter_raw: String,                    // verbatim, for lossless rewrite
     edge_span: Span,                            // the embed line in the parent file
 }
+
+pub enum Content { Text(Span), Node(NodeId) } // `(Text | Item)* Section*` (§3.1)
 
 pub struct Span { start: usize, end: usize }
 
@@ -1302,6 +1392,9 @@ Property-based, since the whole design rests on a few laws:
 - `parse(render(t, 1, false))` equals `t` re-levelled, for all generated trees `t`.
 - `render(parse(s), 1, false) == s` for all canonical blocks `s`, frontmatter included.
 - `canonicalize` is idempotent.
+- Every verb (`J`/`K`, `>`/`<`, `~`, `p`/`P`, refile, capture, `n`/`N`, make block, merge)
+  leaves every node's children satisfying `(text | item)* section*`, keeps every other node's
+  parent, and moves no text child it was not asked to move.
 - `splice(node, render(node, 1, true))` is a no-op on disk, for any node.
 - Every splice writes exactly one file; a save writes one splice per dirty block.
 - `render(make_block(n), 1, false)` equals `render(n, 1, false)` plus the generated frontmatter,
@@ -1316,7 +1409,7 @@ of real-world Markdown (Obsidian, Logseq, FSNotes exports) that must parse witho
 
 `notes check` reports, with `ariadne`-rendered source spans: non-canonical syntax, empty
 titles, titles containing `/`, broken, duplicate or cyclic embeds, embeds with children in the
-parent file, malformed block files, invalid or duplicate `id` keys, ignored `.md` files,
+parent file, embeds whose form (bare or heading) does not match their block's spelling, malformed block files, invalid or duplicate `id` keys, ignored `.md` files,
 filenames whose prefix or name no longer match their id or title, frontmatter outside
 byte 0, `due` or `done` values that are not ISO dates, and unresolved conflict blocks.
 The TUI
@@ -1333,7 +1426,7 @@ gets wrong. What other tools see:
 |---|---|---|
 | `rg`, `fd`, Helix | plain text | `rg '\[ \]'` and `rg '^todo: open'` together are the open task list; `rg '^done: 2026-09'` the blocks finished this month; `rg '^due:'` the dated ones |
 | Any phone editor | plain text | capture by appending a `- ` line to the inbox block's file; the app adds nothing to it |
-| Obsidian, Logseq, FSNotes | mostly readable, structurally wrong | frontmatter as properties and `- [ ]` bullets render; `![[id]]` shows as a broken embed, `## [ ]` as a literal heading, `#######` as a paragraph, indented headings as code. Fine for reading a file; do not edit structure there |
+| Obsidian, Logseq, FSNotes | mostly readable, structurally wrong | frontmatter as properties and `- [ ]` bullets render; `![[id]]` shows as a broken embed (a heading embed as a heading holding one), `## [ ]` as a literal heading, `#######` as a paragraph, indented headings as code. Fine for reading a file; do not edit structure there |
 
 ---
 
