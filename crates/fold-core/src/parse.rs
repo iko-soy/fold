@@ -892,14 +892,16 @@ fn make_setext_section(
             cur = nodes[c].parent;
         }
     }
-    // Pop frames that can't contain a section at this position.
+    // Pop frames that can't contain a section at this position: those that
+    // could not contain the ATX heading of its level there (§4.2), so
+    // writing it as one keeps it where it is.
     loop {
         let top = stack.last().unwrap();
         let tnode = &nodes[top.node];
         let can = match tnode.kind {
             Kind::Root => true,
             Kind::Item => title_indent > top.indent,
-            Kind::Section => title_indent > top.indent || level > top.level.unwrap_or(0),
+            Kind::Section => title_indent >= top.indent && level > top.level.unwrap_or(0),
         };
         if can {
             break;

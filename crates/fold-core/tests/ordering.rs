@@ -812,3 +812,28 @@ fn a_section_placed_after_a_shallower_sibling_written_deeper_keeps_the_next_sibl
     ops::paste(&mut v, notes, "# X\n", true).unwrap();
     assert!(root_text(&v).ends_with("\t# Notes\n\n  ### X\n"), "{}", root_text(&v));
 }
+
+#[test]
+fn refile_into_a_section_followed_by_an_indented_setext_heading() {
+    // a setext heading is read (§4.2) as the ATX heading of its level:
+    // `  Sub\n  ===` after `## P` is where `  # Sub` would be, a level-1
+    // heading that no indent puts under a section. Read as P's child, it
+    // made the verbs that write it, or write beside it, at its level 1
+    // (refile into P, `t` on it) move nodes out of P and Top
+    const SETEXT: &str = "# Top\n\n## P\n\n  Sub\n  ===\n\n# X\n";
+    let (_d, mut v) = vault_with(SETEXT);
+    let before = parents(&v);
+    assert_eq!(before, parents(&vault_with("# Top\n\n## P\n\n  # Sub\n\n# X\n").1));
+    let (x, p) = (at(&v, "X"), at(&v, "Top/P"));
+    ops::refile(&mut v, x, p).unwrap();
+    assert!(v.find_by_path(&["Top".into(), "P".into(), "X".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "X"), others(&before, "X"), "{}", root_text(&v));
+    let (_d, mut v) = vault_with(SETEXT);
+    let sub = at(&v, "Sub");
+    ops::toggle_taskness(&mut v, sub).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    // under an item, indentation nests it, as it does an ATX heading
+    let (_d, v) = vault_with("# Top\n\n- i\n\n  Sub\n  ===\n");
+    assert_eq!(parents(&v), parents(&vault_with("# Top\n\n- i\n\n  # Sub\n").1));
+    assert!(parents(&v).contains(&("Sub".into(), "i".into())));
+}
