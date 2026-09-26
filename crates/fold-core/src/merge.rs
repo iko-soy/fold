@@ -668,7 +668,8 @@ fn fresh_block_name(vault: &Vault, fname: &str, text: &str) -> String {
 /// Insert embeds right after the embed of block `owner` in its parent file,
 /// at its indent, so each conflict block is the next sibling of the block it
 /// conflicts with (§12.4). Without an embed to follow (an orphan block),
-/// they go at the end of `root.md` so they are still reachable.
+/// the owner is embedded at the end of `root.md` with them right after it:
+/// placed alone, they would pair with whatever node happened to be last.
 fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> std::io::Result<()> {
     let found = owner.and_then(|oid| {
         vault.tree.files.iter().enumerate().find_map(|(fi, f)| {
@@ -700,14 +701,22 @@ fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> st
             vault.write_span(fi, crate::parse::Span { start: end, end }, &insert)
         }
         None => {
-            let text = vault.tree.files[0].text.clone();
-            let mut new_text = text.clone();
+            // in the form of the owner's spelling (§4.7); a heading embed at
+            // the end of root.md is top-level
+            let heading = owner
+                .and_then(|oid| vault.tree.block_by_id(oid))
+                .is_some_and(|r| vault.tree.node(r).kind == Kind::Section);
+            let lines: Vec<String> = owner
+                .into_iter()
+                .chain(ids)
+                .map(|id| format!("{}![[{}]]\n", if heading { "# " } else { "" }, id))
+                .collect();
+            let mut new_text = vault.tree.files[0].text.clone();
             if !new_text.is_empty() && !new_text.ends_with("\n\n") {
                 new_text.push_str(if new_text.ends_with('\n') { "\n" } else { "\n\n" });
             }
-            for id in ids {
-                new_text.push_str(&format!("![[{}]]\n", id));
-            }
+            // sibling sections a blank line apart, items tight (§4.2)
+            new_text.push_str(&lines.join(if heading { "\n" } else { "" }));
             vault.write_file_text(0, &new_text)
         }
     }

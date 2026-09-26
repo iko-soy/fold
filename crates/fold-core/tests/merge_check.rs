@@ -546,3 +546,61 @@ fn check_reports_embed_cycles() {
     let diags = fold_core::check::check(&v);
     assert!(diags.is_empty(), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
 }
+
+#[test]
+fn orphan_block_conflict_is_not_paired_with_an_unrelated_node() {
+    // the block racfer~t.md is embedded nowhere: its conflict block has no
+    // embed to follow, so it must not end up as the next sibling of some
+    // unrelated node that 'keep theirs' would then overwrite (§12.4, §12.5)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- keep me\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.md"),
+        format!("---\nid: {}\n---\n\n- [ ] t\n", BID),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
+        format!("---\nid: {}\n---\n\n- [x] t\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let root = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    let pairs = merge::conflict_pairs(&v);
+    for &(ours, _) in &pairs {
+        assert_ne!(v.tree.node(ours).title, "keep me", "root.md:\n{}", root);
+    }
+    // it pairs with the block it conflicts with, and keep theirs lands there
+    assert_eq!(pairs.len(), 1, "root.md:\n{}", root);
+    let bid = fold_core::Id::parse(BID).unwrap();
+    assert_eq!(Some(pairs[0].0), v.tree.block_by_id(&bid), "root.md:\n{}", root);
+    merge::resolve_keep_theirs(&mut v, pairs[0].0, pairs[0].1).unwrap();
+    assert!(std::fs::read_to_string(dir.path().join("root.md")).unwrap().contains("- keep me"));
+    let block = std::fs::read_to_string(dir.path().join("racfer~t.md")).unwrap();
+    assert!(block.contains("- [x] t"), "{}", block);
+    assert!(fold_core::check::check(&v).is_empty());
+    // a section-spelled orphan: heading embeds, still a pair (§4.7)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- keep me\n").unwrap();
+    std::fs::write(dir.path().join("racfer~t.md"), format!("---\nid: {}\n---\n\n# T\n\nbody o\n", BID))
+        .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
+        format!("---\nid: {}\n---\n\n# T\n\nbody t\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let root = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert!(root.starts_with(&format!("# A\n\n- keep me\n\n# ![[{}]]\n\n# ![[", BID)), "{}", root);
+    let pairs = merge::conflict_pairs(&v);
+    assert_eq!(pairs.len(), 1, "root.md:\n{}", root);
+    assert_eq!(Some(pairs[0].0), v.tree.block_by_id(&bid), "root.md:\n{}", root);
+    let diags = fold_core::check::check(&v);
+    assert!(
+        diags.iter().all(|d| d.message == "unresolved conflict block"),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
