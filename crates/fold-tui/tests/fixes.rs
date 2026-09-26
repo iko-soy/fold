@@ -313,3 +313,18 @@ fn moving_the_zoomed_node_keeps_the_zoom_on_it() {
     let titles: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
     assert_eq!(titles, ["B", "B1"]);
 }
+
+#[test]
+fn a_dismissed_reading_pane_menu_does_not_retarget_outline_verbs() {
+    // B is inside the folded A, so it has no outline row
+    let (d, mut app) = app_with("# A\n\n## B\n\n# C\n");
+    press(&mut app, "h");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jjm"); // the node menu of B, from its line in the pane
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "C");
+    press(&mut app, "d");
+    assert_eq!(root(&d), "# A\n\n## B\n");
+}

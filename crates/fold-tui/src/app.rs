@@ -1590,8 +1590,11 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             // what isn't the pane's own works as it does in the outline
             KeyCode::Char('m') => {
+                // the menu keeps its own target; a later outline verb must
+                // not inherit this one
                 self.action_target = self.read_node();
                 self.run_action(Action::NodeMenu);
+                self.action_target = None;
             }
             KeyCode::Char(':' | '?' | 'c' | 'C' | 'u' | 'U') => {
                 let rows = self.rows();
