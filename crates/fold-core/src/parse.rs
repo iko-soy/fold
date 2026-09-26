@@ -723,12 +723,21 @@ pub fn unseparated_text(n: &Node, text: &str) -> Vec<usize> {
     let mut out = Vec::new();
     for w in n.content.windows(2) {
         if let [Content::Node(_), Content::Text(sp)] = w {
-            if sp.start > 0 && !text[..sp.start].ends_with("\n\n") {
+            if sp.start > 0 && !ends_with_blank_line(&text[..sp.start]) {
                 out.push(sp.start);
             }
         }
     }
     out
+}
+
+/// Whether `s`, which ends at a line start, ends with a blank line: one that
+/// is empty or whitespace, whatever its line ending (`\r\n` is read too).
+fn ends_with_blank_line(s: &str) -> bool {
+    let Some(s) = s.strip_suffix('\n') else {
+        return false;
+    };
+    s[s.rfind('\n').map_or(0, |i| i + 1)..].trim().is_empty()
 }
 
 fn push_body(

@@ -330,3 +330,22 @@ fn deep_headings_are_canonical() {
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn crlf_separated_text_is_not_flagged_or_padded() {
+    // "text" already follows `a` after a blank line; only the line endings
+    // are CRLF, which is read cleanly (§4.2) and must not count as missing
+    // the separator, nor make --fix invent a second blank line (§3.3).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\r\n\r\n- a\r\n\r\ntext\r\n").unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    let diags = fold_core::check::check(&v);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("text right after a child node")),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    fold_core::check::fix(&mut v).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert_eq!(text, "# A\n\n- a\n\ntext\n");
+}
