@@ -240,3 +240,36 @@ fn editing_a_conflict_pair_before_the_zoom_keeps_the_zoom() {
     assert!(root.starts_with("- [ ] task\n- new\n"), "{}", root);
     assert_eq!(titles(&app), ["Z", "z1"]);
 }
+
+#[test]
+fn a_conflict_copy_the_merge_leaves_alone_does_not_reopen_the_conflict_view() {
+    // notes.md has no id: an ignored file, whose copy merge leaves alone
+    let (d, mut app) = app_with("# A\n\nbody\n");
+    std::fs::write(d.path().join("notes.md"), "mine\n").unwrap();
+    std::fs::write(d.path().join("notes.sync-conflict-20260912-100000-phone.md"), "theirs\n").unwrap();
+    app.handle_key(key(KeyCode::Char('e')));
+    assert_eq!(app.mode_pub(), "edit");
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(key(KeyCode::Esc));
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "normal");
+    // nor do pairs left unresolved (§12.5): only pairs the merge raises
+    let (d, mut app) = conflict_app();
+    assert_eq!(fold_core::merge::conflict_pairs(app.vault_mut()).len(), 1);
+    std::fs::write(d.path().join("notes.md"), "mine\n").unwrap();
+    std::fs::write(d.path().join("notes.sync-conflict-20260912-100000-phone.md"), "theirs\n").unwrap();
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "normal");
+    // a copy that raises a pair opens it
+    let text = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    std::fs::write(d.path().join("root.md"), format!("{}\n# B\n\nmine\n", text)).unwrap();
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260913-100000-phone.md"),
+        format!("{}\n# B\n\ntheirs\n", text),
+    )
+    .unwrap();
+    app.reload_external();
+    assert_eq!(fold_core::merge::conflict_pairs(app.vault_mut()).len(), 2);
+    assert_eq!(app.mode_pub(), "conflict");
+}

@@ -323,18 +323,7 @@ impl App {
         let zoom_key = self.zoom_root.map(|z| self.vault.key_of(z));
         // sync-conflict files start the merge flow (§11.2)
         match self.vault.conflict_files() {
-            Ok(files) if !files.is_empty() => {
-                match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
-                    Ok(outcomes) => {
-                        self.say(format!("merged: {}", outcomes.join("; ")));
-                        if self.editor.is_none() || self.close_editor() {
-                            self.mode = Mode::Conflict;
-                            self.conflict_idx = 0;
-                        }
-                    }
-                    Err(e) => self.say(format!("merge error: {}", e)),
-                }
-            }
+            Ok(files) if !files.is_empty() => self.merge_conflict_files("merged"),
             _ => {
                 if let Err(e) = self.vault.reload() {
                     self.say(format!("reload error: {}", e));
@@ -359,6 +348,34 @@ impl App {
         }
         self.refresh_picks();
         self.editor_after_write(edit);
+    }
+
+    /// The merge flow (§12.2): merge the sync-conflict copies, then open
+    /// the conflict view on the pairs the merge raised. A copy the merge
+    /// leaves alone (an ignored file's, one with nothing to merge against)
+    /// raises none and stays, so it must not reopen the view, closing the
+    /// editor, on every reload; nor must pairs lived with (§12.5).
+    fn merge_conflict_files(&mut self, what: &str) {
+        let before = self.conflict_blocks();
+        match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+            Ok(outcomes) => {
+                self.say(format!("{}: {}", what, outcomes.join("; ")));
+                let raised = self.conflict_blocks().iter().any(|b| !before.contains(b));
+                if raised && (self.editor.is_none() || self.close_editor()) {
+                    self.mode = Mode::Conflict;
+                    self.conflict_idx = 0;
+                }
+            }
+            Err(e) => self.say(format!("merge error: {}", e)),
+        }
+    }
+
+    /// The conflict blocks of the unresolved pairs, by id (§12.5).
+    fn conflict_blocks(&self) -> Vec<NodeKey> {
+        fold_core::merge::conflict_pairs(&self.vault)
+            .into_iter()
+            .map(|(_, theirs)| self.vault.key_of(theirs))
+            .collect()
     }
 
     /// Visible outline rows: the zoom subtree, flattened, honouring folds
@@ -2442,16 +2459,8 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
     }
     app.start_watcher();
     // a sync-conflict file present at startup starts the merge flow (§12.2)
-    if let Ok(files) = app.vault.conflict_files() {
-        if !files.is_empty() {
-            match fold_core::merge::merge_sync_conflicts(&mut app.vault, false) {
-                Ok(o) => {
-                    app.say(format!("merged on startup: {}", o.join("; ")));
-                    app.enter_conflict_view();
-                }
-                Err(e) => app.say(format!("merge error: {}", e)),
-            }
-        }
+    if app.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
+        app.merge_conflict_files("merged on startup");
     }
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
