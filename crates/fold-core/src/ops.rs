@@ -1380,6 +1380,11 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
         return Ok(false);
     }
     let to_section = n.kind == Kind::Item;
+    // an embed still here after resolving is broken: there is no block to
+    // respell, so only the embed's form changes and its id stays (§4.7)
+    if n.is_embed() {
+        return respell_embed(vault, r, to_section);
+    }
     let stand = stand_in(&vault.tree, r);
     let file = r.0;
     let text = vault.tree.files[file].text.clone();

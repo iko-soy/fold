@@ -830,3 +830,21 @@ fn path_target_resolves_through_duplicate_ancestor_titles() {
     assert!(r.is_ok(), "{:?}", r);
     assert_eq!(v.tree.node(r.unwrap()).title, "Y");
 }
+
+#[test]
+fn respelling_a_broken_embed_keeps_its_id() {
+    // no block file has the id: `~` changes only the embed's form (§4.7)
+    let (d, mut v) = vault_with(&format!("# A\n\n![[{}]]\n", ID_A));
+    let e = v.tree.resolved_children(at(&v, &["A"]))[0];
+    assert!(v.tree.node(e).is_embed());
+    ops::toggle_spelling(&mut v, e).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n## ![[{}]]\n", ID_A));
+    let e = v.tree.resolved_children(at(&v, &["A"]))[0];
+    ops::toggle_spelling(&mut v, e).unwrap();
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n", ID_A));
+    // and moves to its parent's boundary like any node respelled (§3.1)
+    let (d, mut v) = vault_with(&format!("# A\n\n![[{}]]\n- b\n", ID_A));
+    let e = v.tree.resolved_children(at(&v, &["A"]))[0];
+    assert!(ops::toggle_spelling(&mut v, e).unwrap());
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n- b\n\n## ![[{}]]\n", ID_A));
+}
