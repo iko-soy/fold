@@ -246,3 +246,25 @@ fn editor_undo_stops_at_cursor_moves() {
     app.handle_key(ctrl('s'));
     assert_eq!(root(&d), "# A\n\nAone\ntwo\n");
 }
+
+#[test]
+fn an_embed_cycle_does_not_overflow_the_stack() {
+    // §6.2: a cycle is a diagnostic, so a vault may contain one. The outline
+    // shows the block once and skips the repeat visit, as walk/render do.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~loop.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- Loop\n  ![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    draw(&mut app, 100, 24);
+    let rows = app.rows();
+    assert_eq!(current_title(&app), "Loop");
+    let loops = rows.iter().filter(|r| app.title_of(r.nref) == "Loop").count();
+    assert_eq!(loops, 1);
+    app.show_reading = true;
+    press(&mut app, "lj");
+    draw(&mut app, 100, 24);
+}

@@ -337,15 +337,24 @@ impl App {
     pub fn rows(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
         let root = self.zoom_root.unwrap_or(self.vault.tree.root);
-        self.flatten(root, 0, false, &mut out);
+        self.flatten(root, 0, false, &mut out, &mut Vec::new());
         out
     }
 
-    fn flatten(&self, r: NRef, depth: usize, via_embed: bool, out: &mut Vec<FlatRow>) {
+    /// `seen` holds the blocks already shown: an embed cycle or a second
+    /// embed of a block (§6.2 diagnostics) shows it once, as walk and render
+    /// do. Only a block can be reached twice, so only blocks are recorded.
+    fn flatten(&self, r: NRef, depth: usize, via_embed: bool, out: &mut Vec<FlatRow>, seen: &mut Vec<NRef>) {
         let n = self.vault.tree.node(r);
+        if n.is_block() {
+            if seen.contains(&r) {
+                return;
+            }
+            seen.push(r);
+        }
         if n.kind == Kind::Root {
             for c in self.vault.tree.resolved_children(r) {
-                self.flatten(c, depth, false, out);
+                self.flatten(c, depth, false, out, seen);
             }
             return;
         }
@@ -364,7 +373,7 @@ impl App {
         for c in self.vault.tree.resolved_children(r) {
             let through_embed = self.vault.tree.node(c).is_embed()
                 && self.vault.tree.resolved_child(c) != c;
-            self.flatten(c, depth + 1, through_embed || via_embed, out);
+            self.flatten(c, depth + 1, through_embed || via_embed, out, seen);
         }
     }
 
