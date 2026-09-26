@@ -981,12 +981,13 @@ impl App {
                     let from = if *l == s.line { s.col } else { 0 }.max(row.start);
                     // a selected line end shows as one cell, on the last row
                     let to = if *l == e.line { e.col } else { chars.len() + 1 };
-                    let to = if *last { to } else { to.min(row.end) };
-                    for col in from..to {
-                        let x = x0 + (col - row.start) as u16;
-                        if x < inner.x + inner.width {
-                            buf[(x, y)].set_style(Style::default().bg(theme::SEL));
-                        }
+                    let to = if *last { to } else { to.min(row.end) }.max(from);
+                    // every cell those characters are drawn over: a wide
+                    // character or a tab takes more than one
+                    let (xs, n) = (super::wrap::columns(text), chars.len());
+                    let x = |c: usize| x0 as usize + xs[c.min(n)] - xs[row.start] + c.saturating_sub(n);
+                    for cx in x(from)..x(to).min((inner.x + inner.width) as usize) {
+                        buf[(cx as u16, y)].set_style(Style::default().bg(theme::SEL));
                     }
                 }
             }

@@ -238,3 +238,49 @@ fn a_link_wrapped_onto_the_next_row_is_clickable_on_both() {
     assert_eq!(app.hit_at(col(&s[y1], "gamma"), y1 as u16), Some(Hit::Link(2)), "{:#?}", s);
     assert_eq!(app.hit_at(col(&s[y1], "end"), y1 as u16), Some(Hit::DocLine(2)), "{:#?}", s);
 }
+
+#[test]
+fn a_selection_over_wide_text_covers_it() {
+    let (_d, mut app) = app_with("# 漢字漢字\n");
+    keys(&mut app, "e");
+    // normal keymap: Ctrl-A selects all
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let mut t = Terminal::new(TestBackend::new(W, H)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    // the editor's row: the last one on screen showing the heading's text
+    let y = (0..H).rev().find(|&y| (0..W).any(|x| b[(x, y)].symbol() == "漢")).unwrap();
+    let x0 = (0..W).find(|&x| b[(x, y)].symbol() == "#").unwrap();
+    // "# 漢字漢字" spans 2 + 4 * 2 = 10 cells; each character's cell (a wide
+    // one's second cell is its continuation) carries the selection
+    let cells: Vec<_> = (x0..x0 + 10).map(|x| (x - x0, b[(x, y)].symbol().to_string(), b[(x, y)].bg)).collect();
+    for (dx, want) in [(0, "#"), (1, " "), (2, "漢"), (4, "字"), (6, "漢"), (8, "字")] {
+        let (_, sym, bg) = &cells[dx];
+        assert_eq!(sym, want, "{:?}", cells);
+        assert_eq!(*bg, ratatui::style::Color::Indexed(24), "{:?} at x0+{} is not selected: {:?}", want, dx, cells);
+    }
+}
+
+#[test]
+fn a_selection_over_a_tab_covers_its_spaces_and_no_more() {
+    let (_d, mut app) = app_with("# A\n\n```\n\tλ\n```\n");
+    app.show_reading = false;
+    keys(&mut app, "e");
+    // select the tab alone: Shift-Right from the start of its line
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Down);
+    }
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Home);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    let mut t = Terminal::new(TestBackend::new(W, H)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    let y = (0..H).find(|&y| (0..W).any(|x| b[(x, y)].symbol() == "λ")).unwrap();
+    let xx = (0..W).find(|&x| b[(x, y)].symbol() == "λ").unwrap();
+    let bgs: Vec<_> = (xx - 4..=xx).map(|x| b[(x, y)].bg).collect();
+    let sel = ratatui::style::Color::Indexed(24);
+    assert_eq!(bgs[..4], [sel; 4], "the tab's four cells are selected: {:?}", bgs);
+    assert_ne!(bgs[4], sel, "the λ is not: {:?}", bgs);
+}
