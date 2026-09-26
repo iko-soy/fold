@@ -204,3 +204,39 @@ fn conflict_keys_act_on_the_shown_pair_after_resolving_the_last() {
         assert_eq!(pairs(&mut app), 0, "o after {} did nothing", resolve);
     }
 }
+
+#[test]
+fn editing_a_conflict_pair_before_the_zoom_keeps_the_zoom() {
+    let titles = |app: &App| -> Vec<String> { app.rows().iter().map(|r| app.title_of(r.nref)).collect() };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- [ ] task\n- Z\n  - z1\n").unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        "- [x] task\n- Z\n  - z1\n",
+    )
+    .unwrap();
+    let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    drop(v);
+    let mut app = App::new(dir.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    let z = titles(&app).iter().position(|t| t == "Z").unwrap();
+    for _ in 0..z {
+        app.handle_key(key(KeyCode::Char('j')));
+    }
+    app.handle_key(key(KeyCode::Enter)); // zoom into Z
+    assert_eq!(titles(&app), ["Z", "z1"]);
+    // §10.7 `e` edits ours, above Z in the same file: a new item after it
+    app.enter_conflict_view();
+    app.handle_key(key(KeyCode::Char('e')));
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(key(KeyCode::Enter));
+    for c in "- new".chars() {
+        app.handle_key(key(KeyCode::Char(c)));
+    }
+    app.handle_key(key(KeyCode::Esc));
+    let root = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert!(root.starts_with("- [ ] task\n- new\n"), "{}", root);
+    assert_eq!(titles(&app), ["Z", "z1"]);
+}

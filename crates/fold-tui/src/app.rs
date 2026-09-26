@@ -859,11 +859,14 @@ impl App {
         if !self.editor_dirty() {
             return true;
         }
-        let Some(mut ed) = self.editor.take() else { return true };
         self.settle_undo();
         let snap = ops::Snapshot::take(&self.vault, "edit");
         let cursor = self.current().map(|r| self.vault.key_of(r));
+        let on_editor = self.anchor_zoom_for_save();
+        let Some(mut ed) = self.editor.take() else { return true };
         let res = ed.buf.save_all(&mut self.vault);
+        self.editor = Some(ed);
+        self.settle_zoom_after_save(on_editor);
         // blocks written before a refusal are an op too
         self.record_undo(snap);
         // the save re-parsed what it wrote: the outline cursor stays on its
@@ -883,9 +886,27 @@ impl App {
                 false
             }
         };
-        self.editor = Some(ed);
         self.edit_last_key = Instant::now();
         saved
+    }
+
+    /// Hold the zoom by key across an editor save (§10.3): the save
+    /// re-parses the files it writes, renumbering their nodes, and may
+    /// trash a block's file, renumbering the files after it. True when the
+    /// zoom is the node the editor is open on.
+    fn anchor_zoom_for_save(&mut self) -> bool {
+        self.anchor_zoom();
+        self.zoom_root.is_some() && self.editor_node() == self.zoom_root
+    }
+
+    /// After it, the zoom holds: the editor's own node found as the editor
+    /// finds it, since its title, and so its key, may be what was edited;
+    /// any other node by its key, or its deepest surviving step.
+    fn settle_zoom_after_save(&mut self, on_editor: bool) {
+        if let Some(k) = self.editor_key().filter(|_| on_editor) {
+            self.zoom_anchor = Some(k);
+        }
+        self.settle_zoom();
     }
 
     /// Leave the editor, saving it (§10.6); true when it closed. When the
@@ -912,6 +933,12 @@ impl App {
     /// changing under it (§3.4): its render root, found in the tree as the
     /// editor last read or wrote it.
     fn editor_key(&self) -> Option<NodeKey> {
+        self.editor_node().map(|r| self.vault.key_of(r))
+    }
+
+    /// The editor's render root in the tree as the editor last read or
+    /// wrote it.
+    fn editor_node(&self) -> Option<NRef> {
         let ed = self.editor.as_ref()?;
         let info = ed.buf.owners.values().find(|i| i.parent.is_none())?;
         let r = match &info.id {
@@ -927,7 +954,7 @@ impl App {
                 }
             }
         };
-        Some(self.vault.key_of(r))
+        Some(r)
     }
 
     /// Before something writes files under an open editor, an outline verb
@@ -1012,11 +1039,14 @@ impl App {
         if before != after && self.editor.as_ref().is_some_and(|e| e.buf.dirty.contains(&before)) {
             self.settle_undo();
             let snap = ops::Snapshot::take(&self.vault, "edit");
+            let on_editor = self.anchor_zoom_for_save();
             let mut ed = self.editor.take().unwrap();
-            if ed.buf.splice(&mut self.vault, before).is_ok() {
+            let res = ed.buf.splice(&mut self.vault, before);
+            self.editor = Some(ed);
+            self.settle_zoom_after_save(on_editor);
+            if res.is_ok() {
                 self.record_undo(snap);
             }
-            self.editor = Some(ed);
         }
     }
 
@@ -1481,7 +1511,10 @@ impl App {
         }
         self.mode = Mode::Normal;
         self.focus = self.edit_return;
+        // the reload may renumber nodes: files can have changed on disk
+        self.anchor_zoom();
         let _ = self.vault.reload();
+        self.settle_zoom();
         self.clamp_cursor();
         self.say("changes discarded");
     }

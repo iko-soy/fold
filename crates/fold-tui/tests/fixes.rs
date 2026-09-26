@@ -433,3 +433,92 @@ fn enter_on_a_task_heading_in_the_reading_pane_zooms() {
     app.handle_key(key(KeyCode::Enter));
     assert_eq!(root(&d), "# A\n\n## [ ] T\n\nbody\n\n- [x] i\n");
 }
+
+/// Z zoomed, in the file after block B's: trashing B's file renumbers Z's.
+fn zoomed_on_z_over_b() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- Top\n  ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~z.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- Z\n  - c\n    ![[dozzod-binwes-talsun-worbec]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~b.md"),
+        "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- B\n  - b1\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    (dir, app)
+}
+
+fn titles(app: &App) -> Vec<String> {
+    app.rows().iter().map(|r| app.title_of(r.nref)).collect()
+}
+
+#[test]
+fn an_editor_save_keeps_the_zoom_on_its_node() {
+    let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+    // deleting a nested block's title line trashes its file (§5.2); here
+    // the cursor lands on a line of the enclosing block, which splices B
+    let (d, mut app) = zoomed_on_z_over_b();
+    assert_eq!(titles(&app), ["Z", "c", "B", "b1"]);
+    press(&mut app, "je"); // edit c: "- c", "  - B", "    - b1"
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(ctrl('k'));
+    assert_eq!(md_files(&d), ["racfer~z.md", "root.md"]);
+    assert_eq!(titles(&app), ["Z", "c", "b1"]);
+    draw(&mut app, 100, 24);
+    // the same deleted from c's line, and saved by Esc
+    let (d, mut app) = zoomed_on_z_over_b();
+    press(&mut app, "je");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(shift(KeyCode::Up));
+    app.handle_key(shift(KeyCode::End));
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(md_files(&d).len(), 3);
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(md_files(&d), ["racfer~z.md", "root.md"]);
+    assert_eq!(titles(&app), ["Z", "c", "b1"]);
+    draw(&mut app, 100, 24);
+    // the zoomed node's own title edited: the zoom follows it
+    let (d, mut app) = app_with("# A\n\n# B\n\n- b1\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, "ee");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# A\n\n# Bee\n\n- b1\n");
+    assert_eq!(titles(&app), ["Bee", "b1"]);
+    // a child's title edited: the zoom stays on the zoomed node
+    let (d, mut app) = app_with("# A\n\n- a1\n\n# B\n\n- b1\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "jj");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B
+    assert_eq!(titles(&app), ["B", "b1"]);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, "x");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# A\n\n- a1\n\n# B\n\n- b1x\n");
+    assert_eq!(titles(&app), ["B", "b1x"]);
+    // Revert re-reads the files, and one changed on disk meanwhile
+    let (d, mut app) = app_with("- a\n- Z\n  - z1\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "ex");
+    std::fs::write(d.path().join("root.md"), "- a\n- a2\n- Z\n  - z1\n").unwrap();
+    app.run_action(fold_tui::app::Action::EditRevert);
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(titles(&app), ["Z", "z1"]);
+}
