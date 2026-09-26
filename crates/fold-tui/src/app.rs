@@ -636,12 +636,25 @@ impl App {
     }
 
     fn act_demote(&mut self) {
-        let Some(r) = self.subject() else { return };
+        let Some(s) = self.subject() else { return };
         self.push_undo("act_demote");
-        let key = self.vault.key_of(r);
-        match ops::demote(&mut self.vault, r) {
+        let r = self.vault.tree.resolved_child(s);
+        let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
+        // it goes under the node before it (§10.3)
+        let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
+        let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| self.vault.key_of(sibs[i]));
+        let zoomed = self.zoom() == Some(r);
+        match ops::demote(&mut self.vault, s) {
             Ok(moved) => {
-                if let Some(nr) = self.vault.find_by_key(&key) {
+                // the cursor (and a zoom) stays on the node where it landed
+                let landed = match &prev {
+                    Some(dest) => self.moved_node(&key, kind, dest, None),
+                    None => self.find_exact(&key),
+                };
+                if let Some(nr) = landed {
+                    if zoomed {
+                        self.set_zoom(Some(nr));
+                    }
                     self.move_cursor_to(nr);
                 }
                 if moved {
@@ -653,12 +666,26 @@ impl App {
     }
 
     fn act_promote(&mut self) {
-        let Some(r) = self.subject() else { return };
+        let Some(s) = self.subject() else { return };
         self.push_undo("act_promote");
-        let key = self.vault.key_of(r);
-        match ops::promote(&mut self.vault, r) {
+        let r = self.vault.tree.resolved_child(s);
+        let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
+        // it goes beside its parent, under the parent's parent (§10.3)
+        let parent = self.outline_parent(r);
+        let grand = parent.map(|p| self.outline_parent(p).unwrap_or(self.vault.tree.root));
+        let (parent, grand) = (parent.map(|p| self.vault.key_of(p)), grand.map(|g| self.vault.key_of(g)));
+        let zoomed = self.zoom() == Some(r);
+        match ops::promote(&mut self.vault, s) {
             Ok(moved) => {
-                if let Some(nr) = self.vault.find_by_key(&key) {
+                // the cursor (and a zoom) stays on the node where it landed
+                let landed = match &grand {
+                    Some(dest) => self.moved_node(&key, kind, dest, parent.as_ref()),
+                    None => self.find_exact(&key),
+                };
+                if let Some(nr) = landed {
+                    if zoomed {
+                        self.set_zoom(Some(nr));
+                    }
                     self.move_cursor_to(nr);
                 }
                 if moved {
@@ -691,11 +718,11 @@ impl App {
     fn refile_to(&mut self, r: NRef, dest: NRef) {
         self.push_undo("move to");
         let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
-        let key = self.vault.key_of(rr);
+        let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
         match ops::refile(&mut self.vault, r, dest) {
             Ok(moved) => {
                 self.refresh_after(&with_rule_note("moved", moved));
-                if let Some(nr) = self.moved_node(&key, &dest_key) {
+                if let Some(nr) = self.moved_node(&key, kind, &dest_key, None) {
                     self.reveal(nr);
                 }
             }
@@ -705,19 +732,27 @@ impl App {
 
     /// Where a node a verb moved under `dest` (a key taken before the move:
     /// the move renumbers the nodes of the files it writes) landed: a block
-    /// by its id, else `dest`'s last child with its title.
-    fn moved_node(&self, key: &NodeKey, dest: &NodeKey) -> Option<NRef> {
+    /// by its id; else, among `dest`'s children with the node's title and
+    /// kind, the one the ordering rule (§3.1) put it at. Moved in as the
+    /// last child, that is the last of them (an item goes after the items,
+    /// a section after the sections); promoted past its old parent, `near`,
+    /// the nearest to that parent, ties going after it.
+    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, near: Option<&NodeKey>) -> Option<NRef> {
         let title = match key {
             NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
             NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
             NodeKey::Root => None,
         }?;
-        self.vault
-            .tree
-            .resolved_children(self.find_exact(dest)?)
-            .into_iter()
-            .rev()
-            .find(|&c| self.vault.tree.node(c).title == title)
+        let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
+        let near = near.and_then(|k| self.find_exact(k)).and_then(|p| kids.iter().position(|&c| c == p));
+        let mut hits = kids.iter().enumerate().filter(|&(_, &c)| {
+            let n = self.vault.tree.node(c);
+            n.title == title && n.kind == kind
+        });
+        match near {
+            Some(p) => hits.min_by_key(|&(i, _)| (i.abs_diff(p), i < p)).map(|(_, &c)| c),
+            None => hits.next_back().map(|(_, &c)| c),
+        }
     }
 
     /// The node an action applies to: a menu's target, else the cursor's.

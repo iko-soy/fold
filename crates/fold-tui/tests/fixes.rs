@@ -536,3 +536,47 @@ fn move_to_a_later_node_keeps_the_cursor_on_the_moved_node() {
     assert_eq!(root(&d), "# A\n\n# B\n\n# C\n\n- x\n");
     assert_eq!(current_title(&app), "x");
 }
+
+#[test]
+fn indenting_the_zoomed_node_keeps_the_zoom_on_it() {
+    // zoomed into z, `>` makes it a child of s: z is still there, and the
+    // zoom stays on it, as it does for `s` (make block)
+    let (d, mut app) = app_with("# P\n\n- s\n- z\n  - z1\n");
+    press(&mut app, "jj");
+    assert_eq!(current_title(&app), "z");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(titles(&app), ["z", "z1"]);
+    press(&mut app, ">");
+    assert_eq!(root(&d), "# P\n\n- s\n  - z\n    - z1\n");
+    assert_eq!(titles(&app), ["z", "z1"], "the zoom left z");
+    // and `<` takes it back out of s, the zoom still on it
+    press(&mut app, "<");
+    assert_eq!(root(&d), "# P\n\n- s\n- z\n  - z1\n");
+    assert_eq!(titles(&app), ["z", "z1"], "the zoom left z");
+    // an item out of a section lands before the first section (§3.1)
+    let (d, mut app) = app_with("# P\n\n## S\n\n- z\n  - z1\n\n## T\n");
+    press(&mut app, "jj");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(titles(&app), ["z", "z1"]);
+    press(&mut app, "<");
+    assert_eq!(root(&d), "# P\n\n- z\n  - z1\n\n## S\n\n## T\n");
+    assert_eq!(titles(&app), ["z", "z1"], "the zoom left z");
+}
+
+#[test]
+fn indenting_or_outdenting_a_node_keeps_the_cursor_on_it() {
+    // among namesakes too: the node lands where the ordering rule puts it
+    // (§3.1), not wherever its old path now leads
+    let (d, mut app) = app_with("# P\n\n- s\n  - z\n    - mine\n- z\n  - theirs\n");
+    press(&mut app, "jj");
+    assert_eq!(current_title(&app), "z");
+    press(&mut app, "<");
+    assert_eq!(root(&d), "# P\n\n- s\n- z\n  - mine\n- z\n  - theirs\n");
+    assert_eq!(current_title(&app), "z");
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "mine");
+    press(&mut app, "k>");
+    assert_eq!(root(&d), "# P\n\n- s\n  - z\n    - mine\n- z\n  - theirs\n");
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "mine");
+}
