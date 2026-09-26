@@ -1,7 +1,7 @@
 //! The normal keymap: a conventional editor in the manner of micro. Always
 //! typing; Shift extends a selection; Ctrl does the rest.
 
-use super::{ctrl, order, Editor, Outcome, Pos};
+use super::{ctrl, order, Editor, Group, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
@@ -9,6 +9,11 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let mut out = Outcome::default();
+    // any other key ends a run of typing: what is typed next is its own undo step
+    let typing = !ctl && !alt && matches!(key.code, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab);
+    if !typing {
+        e.group = Group::None;
+    }
 
     // movement, extending the selection with Shift
     let moved = match key.code {
@@ -277,6 +282,15 @@ mod tests {
         assert!(out[0].close);
         let out = keys(&mut e, "<C-s>");
         assert!(out[0].save);
+    }
+
+    #[test]
+    fn a_click_ends_a_run_of_typing() {
+        let (_d, mut e) = editor("one\ntwo\n", Keys::Normal);
+        keys(&mut e, "A");
+        e.click(Pos::new(3, 0));
+        keys(&mut e, "B<C-z>");
+        assert_eq!(body(&e), "Aone\ntwo");
     }
 
     #[test]

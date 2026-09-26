@@ -233,9 +233,11 @@ impl Editor {
 
     // -------------------------------------------------------------- pointer
 
-    /// A click: the cursor goes there and any selection is dropped.
+    /// A click: the cursor goes there and any selection is dropped. Typing
+    /// after it is a new undo step.
     pub fn click(&mut self, p: Pos) {
         self.anchor = None;
+        self.group = Group::None;
         if matches!(self.mode, Mode::Visual { .. } | Mode::Select) {
             self.mode = Mode::Normal;
         }
@@ -270,6 +272,7 @@ impl Editor {
         if s == e {
             return;
         }
+        self.group = Group::None;
         self.anchor = Some(s);
         self.cursor = if self.keys == Keys::Normal { e } else { self.prev(e).unwrap_or(e) };
         if self.keys == Keys::Vim && self.mode == Mode::Normal {

@@ -226,3 +226,23 @@ fn alt_down_keeps_a_multi_line_selection() {
     // the first move must leave "a" and "b" selected, so the second moves both
     assert_eq!(root(&d), "# A\n\nc\nd\na\nb\n");
 }
+
+#[test]
+fn editor_undo_stops_at_cursor_moves() {
+    // normal keymap: typing somewhere else after a cursor move is a new undo
+    // step, so one Ctrl-Z takes back only the last run of typing
+    let (d, mut app) = app_with("# A\n\none\ntwo\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    press(&mut app, "A");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Home));
+    press(&mut app, "B");
+    app.handle_key(ctrl('s'));
+    assert_eq!(root(&d), "# A\n\nAone\nBtwo\n");
+    app.handle_key(ctrl('z'));
+    app.handle_key(ctrl('s'));
+    assert_eq!(root(&d), "# A\n\nAone\ntwo\n");
+}
