@@ -548,3 +548,20 @@ fn drop_section_before_an_item_is_clamped() {
     assert_ordered(&v);
     assert!(v.find_by_path(&["P".into(), "S".into()]).is_some(), "{}", root_text(&v));
 }
+
+#[test]
+fn drop_before_a_later_sibling_lands_before_it() {
+    let src = "# A\n\n- a\n- b\n- c\n";
+    let (_d, mut v) = vault_with(src);
+    let (r, t) = (at(&v, "A/a"), at(&v, "A/c"));
+    assert!(!ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap());
+    assert_eq!(root_text(&v), "# A\n\n- b\n- a\n- c\n");
+    // dropping a node before its immediate next sibling leaves it in place,
+    // in a tight list or a loose one (§4.2: preserved as found)
+    for src in [src, "# A\n\n- a\n\n- b\n\n- c\n"] {
+        let (_d, mut v) = vault_with(src);
+        let (r, t) = (at(&v, "A/a"), at(&v, "A/b"));
+        ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap();
+        assert_eq!(root_text(&v), src);
+    }
+}

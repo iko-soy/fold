@@ -873,7 +873,15 @@ pub fn move_node(vault: &mut Vault, r: NRef, target: NRef, drop: Drop) -> std::i
                 return Err(io_err("cannot move a node into itself"));
             }
             let moving = stand_in(&vault.tree, r);
-            let idx = vault.tree.raw_children(parent).iter().position(|&k| k == t).unwrap_or(0);
+            // the target's index among the children `place` sees: without
+            // the moving node, which may come before it
+            let idx = vault
+                .tree
+                .raw_children(parent)
+                .into_iter()
+                .filter(|&k| k != moving)
+                .position(|k| k == t)
+                .unwrap_or(0);
             let rendered = render(&vault.tree, moving, 1, false);
             let shifted =
                 shift_document(&rendered, vault.tree.level(parent), child_indent(&vault.tree, parent));
@@ -1011,6 +1019,21 @@ fn place(
         Some(crate::parse::Content::Text(_)) => false,
         None => pnode.kind == Kind::Item,
     };
+    // inserting before an item: after another item, the list is as tight as
+    // the text there says (read below); starting the list, it is read
+    // between `next` and the item after it, if any
+    let is_item = |c: Option<&crate::parse::Content>| {
+        matches!(c, Some(crate::parse::Content::Node(k)) if tree.files[file].nodes[*k].kind == Kind::Item)
+    };
+    let next_at = next.and_then(|k| content.iter().position(|c| *c == crate::parse::Content::Node(k.1)));
+    let starts_run = next_at.is_some_and(|i| i == 0 || !is_item(content.get(i - 1)));
+    let run_tight = match (next, next_at) {
+        (Some(k), Some(i)) if is_item(content.get(i + 1)) => {
+            let sp = tree.node(k).span;
+            !text[sp.start..sp.end.min(text.len())].ends_with("\n\n")
+        }
+        _ => true,
+    };
     let next_kind = next.map(|k| tree.node(k).kind);
     let removal = match moving {
         Some(m) if m.0 == file => Some(removal_range(&text, tree.node(m).span)),
@@ -1030,7 +1053,9 @@ fn place(
             } else {
                 ""
             };
-            let tight = last == Kind::Item && nk == Kind::Item && !text[..pos].ends_with("\n\n");
+            let tight = last == Kind::Item
+                && nk == Kind::Item
+                && if starts_run { run_tight } else { !text[..pos].ends_with("\n\n") };
             format!("{}{}\n{}", lead, body, if tight { "" } else { "\n" })
         }
         None => {

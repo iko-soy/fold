@@ -134,10 +134,11 @@ fn drag_onto_a_title_nests_and_left_of_it_places_before() {
     app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), onto));
     assert_eq!(root(&d), "# A\n\n- a1\n- b1\n\n# B\n");
     assert_eq!(title(&app), "b1", "the moved node stays selected");
-    // drag a1 to the far left of b1's row: before b1
+    // drag b1 to the far left of a1's row: before a1 (a1 dropped before b1,
+    // its next sibling, would stay where it is)
     draw(&mut app);
-    let from = app.hit_pos(Hit::Row(1)).unwrap();
-    let to_row = app.hit_pos(Hit::Row(2)).unwrap();
+    let from = app.hit_pos(Hit::Row(2)).unwrap();
+    let to_row = app.hit_pos(Hit::Row(1)).unwrap();
     app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
     app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), (2, to_row.1)));
     draw(&mut app);
