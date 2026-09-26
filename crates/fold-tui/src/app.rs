@@ -106,6 +106,10 @@ pub struct App {
     /// The editor's keymap (normal, Vim, Helix), and its clipboard, kept
     /// across editing sessions.
     edit_keys: editor::Keys,
+    /// Set when `--keys` or `$FOLD_KEYS` chose this run's keymap: the
+    /// keymap the view goes on remembering instead (§10.6), the one it was
+    /// loaded with, or none.
+    kept_keys: Option<Option<editor::Keys>>,
     edit_clip: editor::Clip,
     edit_last_key: Instant,
     /// The pane that had focus when the editor opened, focused again after.
@@ -201,6 +205,7 @@ impl App {
                 .ok()
                 .and_then(|k| editor::Keys::parse(&k))
                 .unwrap_or_default(),
+            kept_keys: None,
             edit_clip: editor::Clip::default(),
             edit_last_key: Instant::now(),
             edit_return: Focus::Outline,
@@ -755,7 +760,7 @@ impl App {
             show_reading: self.show_reading,
             wrap: self.wrap,
             hide_done: self.hide_done,
-            keys: Some(self.edit_keys),
+            keys: self.kept_keys.unwrap_or(Some(self.edit_keys)),
             outline_width: self.ui.outline_width,
             zoom: self.zoom().map(|z| self.vault.key_of(z)),
             folded: self.folded.clone(),
@@ -763,12 +768,15 @@ impl App {
     }
 
     /// Restore remembered view settings; `keep_keys` when `--keys` or
-    /// `$FOLD_KEYS` chose the keymap for this run.
+    /// `$FOLD_KEYS` chose the keymap for this run: the remembered keymap is
+    /// then neither applied nor replaced (§10.6).
     pub fn apply_view(&mut self, v: View, keep_keys: bool) {
         self.show_reading = v.show_reading;
         self.wrap = v.wrap;
         self.hide_done = v.hide_done;
-        if let (false, Some(k)) = (keep_keys, v.keys) {
+        if keep_keys {
+            self.kept_keys = Some(v.keys);
+        } else if let Some(k) = v.keys {
             self.edit_keys = k;
         }
         self.ui.outline_width = v.outline_width;
@@ -2192,6 +2200,10 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
         app.edit_keys = parsed;
     }
     let keys_chosen = keys.is_some() || std::env::var_os("FOLD_KEYS").is_some();
+    if keys_chosen {
+        // no view yet: it remembers no keymap from this run either
+        app.kept_keys = Some(None);
+    }
     if let Some(v) = view::load(dir) {
         app.apply_view(v, keys_chosen);
     }

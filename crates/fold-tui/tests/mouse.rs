@@ -386,3 +386,22 @@ fn move_to_from_a_menu_moves_the_menus_node() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(root(&d), "# A\n\n# C\n\n## B\n");
 }
+
+#[test]
+fn a_keymap_chosen_by_flag_is_not_remembered() {
+    // §10.6: the keymap is remembered with the view unless `--keys` or
+    // `$FOLD_KEYS` chose it for this run
+    use fold_tui::app::{EditKeys, View};
+    let (_d, mut app) = app_with("# A\n");
+    app.set_edit_keys(EditKeys::Vim); // `--keys vim`, as run() does
+    app.apply_view(View::parse("keys normal\n").unwrap(), true);
+    assert_eq!(app.view().keys, Some(EditKeys::Normal));
+    // nor is a switch made during such a run
+    app.set_edit_keys(EditKeys::Helix);
+    assert_eq!(app.view().keys, Some(EditKeys::Normal));
+    // without --keys, the keymap in use is what the view remembers
+    let (_d, mut app) = app_with("# A\n");
+    app.apply_view(View::parse("keys normal\n").unwrap(), false);
+    app.set_edit_keys(EditKeys::Helix);
+    assert_eq!(app.view().keys, Some(EditKeys::Helix));
+}
