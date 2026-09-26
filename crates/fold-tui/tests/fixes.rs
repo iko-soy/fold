@@ -468,7 +468,10 @@ fn an_editor_save_keeps_the_zoom_on_its_node() {
     assert_eq!(titles(&app), ["Z", "c", "B", "b1"]);
     press(&mut app, "je"); // edit c: "- c", "  - B", "    - b1"
     app.handle_key(key(KeyCode::Down));
-    app.handle_key(ctrl('k'));
+    app.handle_key(key(KeyCode::Home));
+    app.handle_key(shift(KeyCode::Down));
+    app.handle_key(key(KeyCode::Delete));
+    app.handle_key(key(KeyCode::Up));
     assert_eq!(md_files(&d), ["racfer~z.md", "root.md"]);
     assert_eq!(titles(&app), ["Z", "c", "b1"]);
     draw(&mut app, 100, 24);
