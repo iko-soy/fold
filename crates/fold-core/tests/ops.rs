@@ -1033,3 +1033,27 @@ fn respelling_an_item_keeps_its_setext_child_under_it() {
     assert!(v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(), "{}", read(&d, "root.md"));
     assert!(v.find_by_path(&["P".into(), "b".into()]).is_some(), "{}", read(&d, "root.md"));
 }
+
+#[test]
+fn respelling_a_block_whose_parent_changed_on_disk_writes_nothing() {
+    // `~` on a block writes its file, then its embed in the parent file. A
+    // sync not reloaded yet in the parent file makes the vault refuse the
+    // embed (§11.2); the block file must not be left respelled under an
+    // embed of the other form (§4.7), as make_block checks first
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    let t = at(&v, &["A", "task"]);
+    ops::make_block(&mut v, t).unwrap();
+    let bf = d.path().join(&v.tree.files[1].path);
+    let block_before = std::fs::read_to_string(&bf).unwrap();
+    let synced = format!("{}- from phone\n", read(&d, "root.md"));
+    std::fs::write(d.path().join("root.md"), &synced).unwrap();
+    let t = at(&v, &["A", "task"]);
+    let res = ops::toggle_spelling(&mut v, t);
+    assert!(res.is_err());
+    assert_eq!(read(&d, "root.md"), synced);
+    assert_eq!(
+        std::fs::read_to_string(&bf).unwrap(),
+        block_before,
+        "the block was respelled, its embed was not"
+    );
+}

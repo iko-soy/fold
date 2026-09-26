@@ -1467,7 +1467,11 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
         .collect();
     let src = shift_lines(&rendered, 0, n.indent as isize) + &"\n".repeat(blanks);
     if stand != r {
-        // a block: respell its file's root at level 1, then its embed
+        // a block: respell its file's root at level 1, then its embed. The
+        // embed cannot be written into a file changed on disk (§11.2), and
+        // the block would be left under an embed of the other form (§4.7):
+        // check first
+        vault.check_unchanged(stand.0)?;
         let respelled = respell(&src, to_section, 1);
         let id = n.block.as_ref().and_then(|b| b.id.clone());
         vault.write_span(file, span, &respelled)?;
