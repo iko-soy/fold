@@ -104,8 +104,9 @@ fn edit_nested_block_writes_its_own_file() {
 #[test]
 fn deleting_nested_block_title_trashes_block() {
     // §5.2: deleting a nested block's title line deletes the block; its
-    // other lines would need re-tagging (the TUI does that; here we just
-    // check the file write path).
+    // other lines are re-tagged to the enclosing block on save (see
+    // deleting_nested_block_title_keeps_its_text_reachable). Here: the
+    // block's lines carry its own owner.
     let (_d, mut v) = vault_with("# A\n\n- task\n");
     let a = v.tree.resolved_children(v.tree.root)[0];
     let task = v.tree.resolved_children(a)[0];
@@ -464,4 +465,121 @@ fn splice_never_writes_a_block_file_without_its_root() {
     buf.insert_line(0, "- task".into());
     assert!(buf.save_all(&mut v).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn deleting_nested_block_title_keeps_its_text_reachable() {
+    // §5.2: deleting a nested block's title line deletes the block; the
+    // lines it still owned become plain text of the enclosing block. The
+    // block file must not be rewritten without a root (which drops the
+    // block from the tree, breaks the parent's embed and hides "note").
+    let (d, mut v) = vault_with("# A\n\n- task\n  note\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    ops::make_block(&mut v, t).unwrap();
+    let block_path = v.tree.files[1].path.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let texts: Vec<&str> = buf.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["# A", "", "- task", "  note"]);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.delete_line(i);
+    buf.save_all(&mut v).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let shown = fold_core::render(&v.tree, a, 1, true);
+    let files: Vec<(&str, &str)> = v
+        .tree
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.text.as_str()))
+        .collect();
+    assert!(
+        shown.contains("note") && !shown.contains("![["),
+        "shown:\n{}\nfiles: {:?}",
+        shown,
+        files
+    );
+    assert_eq!(v.tree.files[0].text, "# A\n\n  note\n");
+    // the block's file went to the trash (§11.5)
+    assert!(!d.path().join(&block_path).exists());
+    assert_eq!(v.tree.files.len(), 1);
+    assert!(buf.dirty.is_empty(), "{:?}", buf.dirty);
+}
+
+#[test]
+fn deleted_block_title_hands_nested_blocks_to_the_enclosing_block() {
+    // the block nested in the deleted one survives, embedded where its
+    // title line sits, now in the enclosing block's text
+    let (_d, mut v) = vault_with("# A\n\n## B\n\nb text\n\n### C\n\nc\n");
+    let c = v.find_by_path(&["A".into(), "B".into(), "C".into()]).unwrap();
+    let c_id = ops::make_block(&mut v, c).unwrap();
+    let b = v.find_by_path(&["A".into(), "B".into()]).unwrap();
+    ops::make_block(&mut v, b).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let texts: Vec<&str> = buf.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["# A", "", "## B", "", "b text", "", "### C", "", "c"]);
+    buf.delete_line(2);
+    buf.delete_line(2);
+    buf.save_all(&mut v).unwrap();
+    // B's other lines are A's; the deeper heading C was never B's title
+    assert_eq!(
+        v.tree.files[0].text,
+        format!("# A\n\nb text\n\n### ![[{}]]\n", c_id.as_str())
+    );
+    assert_eq!(v.tree.files.len(), 2);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let shown = fold_core::render(&v.tree, a, 1, true);
+    assert!(
+        shown.starts_with("# A\n\nb text\n\n#") && shown.ends_with(" C\n\nc\n") && !shown.contains("![["),
+        "{}",
+        shown
+    );
+}
+
+#[test]
+fn line_typed_above_nested_block_title_is_the_enclosing_blocks() {
+    // Enter at column 0 of a nested block's title line opens a line above
+    // it with the block's tag; what is typed there sits above the block, in
+    // its parent (§5.2: lines no longer with the title line are re-tagged
+    // to the block they sit in), not before the block file's root (§4.9).
+    let (_d, mut v) = vault_with("# A\n\n- task\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block_before = v.tree.files[1].text.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    buf.set_line(2, String::new());
+    buf.insert_line(2, "- task".into());
+    buf.set_line(2, "Intro".into());
+    assert_eq!(buf.lines[2].owner.file, 1);
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\nIntro\n![[{}]]\n", id.as_str()));
+    assert_eq!(v.tree.files[1].text, block_before);
+    assert_eq!(buf.lines[2].owner.file, 0);
+    assert!(buf.dirty.is_empty(), "{:?}", buf.dirty);
+}
+
+#[test]
+fn emptied_nested_block_title_is_not_a_deleted_one() {
+    // vim `cc` on a nested block's title line, then a pause (autosave): the
+    // title is being retyped, so the block is not deleted; it is not written
+    // without its root either, and saves once it has a title again.
+    let (_d, mut v) = vault_with("# A\n\n- task\n  note\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let root_before = v.tree.files[0].text.clone();
+    let block_before = v.tree.files[1].text.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    buf.set_line(2, String::new());
+    assert!(buf.save_all(&mut v).is_err());
+    assert_eq!(v.tree.files[0].text, root_before);
+    assert_eq!(v.tree.files[1].text, block_before);
+    buf.set_line(2, "- renamed".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, root_before);
+    assert_eq!(
+        v.tree.files[1].text,
+        format!("---\nid: {}\n---\n\n- renamed\n  note\n", id.as_str())
+    );
 }

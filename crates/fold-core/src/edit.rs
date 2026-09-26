@@ -42,6 +42,10 @@ pub struct EditBuffer {
     /// blake3 of each file (by path) as last read or written through this
     /// buffer (§5.2.5).
     base_hashes: HashMap<String, String>,
+    /// Nested blocks deleted by deleting their title line (§5.2): their
+    /// lines are the enclosing block's now, and each file goes to trash
+    /// once no file embeds it.
+    dropped: Vec<Owner>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +57,9 @@ pub struct OwnerInfo {
     /// Display level/indent of the block's top node in the buffer.
     pub level: usize,
     pub indent: usize,
+    /// Whether that node is a section (its title line a heading), not an
+    /// item.
+    pub section: bool,
     /// Level/indent of that node in its own file; splice shifts by
     /// `target − display` (§5.2.3).
     pub target_level: usize,
@@ -118,6 +125,7 @@ impl EditBuffer {
                     nref,
                     level,
                     indent,
+                    section: n.kind == Kind::Section,
                     target_level,
                     target_indent,
                     parent,
@@ -155,6 +163,7 @@ impl EditBuffer {
             owners,
             dirty: Vec::new(),
             base_hashes,
+            dropped: Vec::new(),
         }
     }
 
@@ -223,9 +232,138 @@ impl EditBuffer {
         None
     }
 
-    /// Splice one dirty block (§5.2): collect its lines, put nested blocks
-    /// back as embeds, shift back, write the one file atomically.
+    /// The line where nested block `o`'s text starts (§5.2): its first line
+    /// if that is a title line of its kind at its display indent — a heading
+    /// for a section, a bullet for an item — else the first such line below
+    /// it, a heading no deeper than the block's level (deeper ones are its
+    /// children). None: its title line was deleted.
+    fn title_line(&self, o: Owner) -> Option<usize> {
+        let info = self.owners.get(&o)?;
+        let mut fence = None;
+        let mut first = true;
+        for (i, l) in self.lines.iter().enumerate().filter(|(_, l)| l.owner == o) {
+            let in_code = fence_transition(&l.text, &mut fence) || fence.is_some();
+            let trimmed = l.text.trim_start_matches(' ');
+            if !in_code && l.text.len() - trimmed.len() == info.indent {
+                let title = if info.section {
+                    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+                    let after = &trimmed[hashes..];
+                    hashes > 0
+                        && (after.is_empty() || after.starts_with(' '))
+                        && (first || hashes <= info.level.max(1))
+                } else {
+                    ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m))
+                        || ["-", "*", "+"].contains(&trimmed)
+                };
+                if title {
+                    return Some(i);
+                }
+            }
+            first = false;
+        }
+        None
+    }
+
+    /// §5.2's edge cases, applied from the tags before a splice. A nested
+    /// block's text starts at its title line: lines it owns above that line
+    /// sit in the enclosing block and become its text. Deleting the title
+    /// line deletes the block: every line it still owned is re-tagged to
+    /// the enclosing block, the blocks nested in it are nested in that
+    /// block, and its file goes to trash once that block is written without
+    /// its embed.
+    fn settle(&mut self) {
+        // lines of a deleted block put back (by the editor's own undo) are
+        // the enclosing block's text like the rest of them
+        let dropped = self.dropped.clone();
+        self.dirty.retain(|o| !dropped.contains(o));
+        for i in 0..self.lines.len() {
+            let s = self.surviving(self.lines[i].owner);
+            if s != self.lines[i].owner {
+                self.lines[i].owner = s;
+                self.mark_dirty(s);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for o in self.dirty.clone() {
+                let Some(parent) = self.owners.get(&o).and_then(|i| i.parent) else {
+                    continue;
+                };
+                let title = self.title_line(o);
+                // a title line emptied to be typed again (vim `cc`) is not
+                // a deleted one; splice refuses to write the block meanwhile
+                let first = self.lines.iter().find(|l| l.owner == o);
+                if title.is_none() && first.is_some_and(|l| l.text.trim().is_empty()) {
+                    continue;
+                }
+                let mut moved = title.is_none();
+                let above = title.unwrap_or(self.lines.len());
+                for l in self.lines[..above].iter_mut().filter(|l| l.owner == o) {
+                    l.owner = parent;
+                    moved = true;
+                }
+                if title.is_none() {
+                    for i in self.owners.values_mut() {
+                        if i.parent == Some(o) {
+                            i.parent = Some(parent);
+                        }
+                    }
+                    self.dirty.retain(|d| *d != o);
+                    self.dropped.push(o);
+                }
+                if moved {
+                    self.mark_dirty(parent);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// The block that holds a deleted block's lines now.
+    fn surviving(&self, mut o: Owner) -> Owner {
+        while self.dropped.contains(&o) {
+            match self.owners.get(&o).and_then(|i| i.parent) {
+                Some(p) => o = p,
+                None => break,
+            }
+        }
+        o
+    }
+
+    /// Move deleted blocks' files to the trash (§11.5) once no file embeds
+    /// them any more: once the block that held the embed has been written.
+    fn trash_dropped(&self, vault: &mut Vault) -> std::io::Result<()> {
+        loop {
+            let file = self.dropped.iter().find_map(|o| {
+                let id = self.owners.get(o)?.id.as_ref()?;
+                match vault.tree.embed_of(id) {
+                    Some(_) => None,
+                    None => vault.tree.block_by_id(id).map(|r| r.0),
+                }
+            });
+            match file {
+                Some(f) => vault.trash_file(f)?,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Splice one dirty block (§5.2) — or, if deleting its title line
+    /// deleted it, the block its lines went to — then trash the files of
+    /// deleted blocks no longer embedded.
     pub fn splice(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<()> {
+        self.settle();
+        let owner = self.surviving(owner);
+        self.write(vault, owner)?;
+        self.trash_dropped(vault)
+    }
+
+    /// Write one block (§5.2): collect its lines, put nested blocks back as
+    /// embeds, shift back, write the one file atomically.
+    fn write(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<()> {
         let info = match self.owners.get(&owner) {
             Some(i) => i.clone(),
             None => return Ok(()),
@@ -384,12 +522,14 @@ impl EditBuffer {
     /// Splice every dirty block (§10.6: a commit may write several files,
     /// one splice per dirty block).
     pub fn save_all(&mut self, vault: &mut Vault) -> std::io::Result<usize> {
+        self.settle();
         let dirty = self.dirty.clone();
         let mut n = 0;
         for owner in dirty {
-            self.splice(vault, owner)?;
+            self.write(vault, owner)?;
             n += 1;
         }
+        self.trash_dropped(vault)?;
         Ok(n)
     }
 }
