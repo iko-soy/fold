@@ -386,3 +386,76 @@ fn vim_case_toggle_keeps_sharp_s() {
     keys(&mut app, "ejjv$~:w⏎");
     assert_eq!(root(&d), "# A\n\nSTRAßE ﬁX\n");
 }
+
+/// root.md "# A\n\n- one\n![[b]]\n- two\n", block b "- b" holding block c
+/// "- c" as its child; the editor open on A with the cursor on "  - c".
+/// Returns the embeds of b and c and b's file.
+fn editing_nested_blocks() -> (tempfile::TempDir, App, String, String, std::path::PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- b\n  - c\n- two\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let c = v.find_by_path(&["A".into(), "b".into(), "c".into()]).unwrap();
+    let c = fold_core::ops::make_block(&mut v, c).unwrap();
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    let b = fold_core::ops::make_block(&mut v, b).unwrap();
+    let b_file = v.dir.join(&v.tree.files[v.tree.block_by_id(&b).unwrap().0].path);
+    drop(v);
+    let (b, c) = (format!("![[{}]]", b.as_str()), format!("![[{}]]", c.as_str()));
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", b));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with(&format!("\n- b\n  {}\n", c)));
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    // the editor shows "# A", "", "- one", "- b", "  - c", "- two"
+    for _ in 0..4 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    (d, app, b, c, b_file)
+}
+
+#[test]
+fn moving_a_block_above_the_block_it_is_in_moves_its_embed_out() {
+    // §5.2: the embed goes where the title line now sits, in A under "- one";
+    // b's file must not be left with c's embed ahead of its own title
+    let (d, mut app, b, c, b_file) = editing_nested_blocks();
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), format!("# A\n\n- one\n  {}\n{}\n- two\n", c, b));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with("\n- b\n"));
+}
+
+#[test]
+fn moving_a_block_below_the_block_it_is_in_moves_its_embed_out() {
+    // under "- two" it is A's, not b's: saved as it is shown
+    let (d, mut app, b, c, b_file) = editing_nested_blocks();
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n  {}\n", b, c));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with("\n- b\n"));
+}
+
+#[test]
+fn cutting_a_block_out_of_the_block_it_is_in_and_pasting_it_moves_its_embed() {
+    let (d, mut app, b, c, b_file) = editing_nested_blocks();
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    // the cursor is on "- two"; paste above "- one"
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), format!("# A\n\n  {}\n- one\n{}\n- two\n", c, b));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with("\n- b\n"));
+}
+
+#[test]
+fn undoing_a_move_out_of_a_block_puts_the_embed_back_in_it() {
+    let (d, mut app, b, c, b_file) = editing_nested_blocks();
+    let before = std::fs::read_to_string(&b_file).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert_eq!(root(&d), format!("# A\n\n- one\n  {}\n{}\n- two\n", c, b));
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", b));
+    assert_eq!(std::fs::read_to_string(&b_file).unwrap(), before);
+}

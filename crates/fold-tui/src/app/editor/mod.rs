@@ -110,6 +110,8 @@ enum Group {
 struct Snap {
     lines: Vec<EditLine>,
     cursor: Pos,
+    /// The block each block's embed sits in (moving lines can change it).
+    parents: BTreeMap<Owner, Option<Owner>>,
 }
 
 pub struct Editor {
@@ -540,7 +542,7 @@ impl Editor {
             }
             moved.insert(o, Some(to(t)));
         }
-        self.retag_strays(&moved);
+        self.settle(&moved);
     }
 
     /// Cut whole lines `l1..=l2` to the clipboard. A nested block whose title
@@ -562,7 +564,7 @@ impl Editor {
             .into_iter()
             .map(|(o, t)| (o, if t < l1 { Some(t) } else if t > l2 { Some(t - n) } else { None }))
             .collect();
-        self.retag_strays(&left);
+        self.settle(&left);
         self.copy(text, true);
         self.clip.tags = tags;
     }
@@ -593,7 +595,7 @@ impl Editor {
             for (o, t) in titles {
                 back.insert(o, Some(if t >= first { t + n } else { t }));
             }
-            self.retag_strays(&back);
+            self.settle(&back);
         }
         first
     }
@@ -627,9 +629,16 @@ impl Editor {
         }
     }
 
-    /// After lines moved with their tags: a line of a nested block that is no
-    /// longer contiguous with the block's title line (at `titles`, or gone)
-    /// is re-tagged to the block it now sits in, that of the line above (§5.2).
+    /// After lines moved with their tags, each goes with the block it now
+    /// sits in (§5.2): `retag_strays`, then `reparent`.
+    fn settle(&mut self, titles: &BTreeMap<Owner, Option<usize>>) {
+        self.retag_strays(titles);
+        self.reparent();
+    }
+
+    /// A line of a nested block that is no longer contiguous with the
+    /// block's title line (at `titles`, or gone) is re-tagged to the block it
+    /// now sits in, that of the line above (§5.2).
     fn retag_strays(&mut self, titles: &BTreeMap<Owner, Option<usize>>) {
         let n = self.buf.lines.len();
         for (&o, &title) in titles {
@@ -655,15 +664,52 @@ impl Editor {
         }
     }
 
+    /// A nested block whose title line no longer sits among the lines of
+    /// the block its embed is in moves its embed to the block it now sits in
+    /// (§5.2): the innermost one holding both the line above the title line
+    /// and the block it was in. Blocks go in buffer order, so where a block
+    /// sits is settled before the blocks after it.
+    fn reparent(&mut self) {
+        let titles = self.titles();
+        let mut order: Vec<(usize, Owner)> = titles.iter().map(|(&o, &t)| (t, o)).collect();
+        order.sort();
+        for (t, o) in order {
+            let Some(p) = self.buf.owners.get(&o).and_then(|i| i.parent) else { continue };
+            let inside = titles.get(&p).is_some_and(|&tp| tp < t && (tp + 1..t).all(|i| self.within(self.buf.lines[i].owner, p)));
+            if inside || t == 0 {
+                continue;
+            }
+            let mut q = self.buf.lines[t - 1].owner;
+            while !self.within(p, q) {
+                match self.buf.owners.get(&q).and_then(|i| i.parent) {
+                    Some(up) => q = up,
+                    None => break,
+                }
+            }
+            if q != p && q != o && self.within(p, q) {
+                if let Some(i) = self.buf.owners.get_mut(&o) {
+                    i.parent = Some(q);
+                }
+                self.buf.mark_dirty(p);
+                self.buf.mark_dirty(q);
+            }
+        }
+    }
+
+    /// The block each block's embed sits in.
+    fn parents(&self) -> BTreeMap<Owner, Option<Owner>> {
+        self.buf.owners.iter().map(|(&o, i)| (o, i.parent)).collect()
+    }
+
     /// What splice writes for each block (§5.2): its own lines, and the
     /// first line of each block nested in it, where that block's embed goes.
-    fn splice_views(&self, lines: &[EditLine]) -> BTreeMap<Owner, Vec<(Owner, String)>> {
+    fn splice_views(lines: &[EditLine], parents: &BTreeMap<Owner, Option<Owner>>) -> BTreeMap<Owner, Vec<(Owner, String)>> {
         let mut views: BTreeMap<Owner, Vec<(Owner, String)>> = BTreeMap::new();
         let mut seen = BTreeSet::new();
         for l in lines {
             views.entry(l.owner).or_default().push((l.owner, l.text.clone()));
             let mut o = l.owner;
-            while let Some(p) = self.buf.owners.get(&o).and_then(|i| i.parent) {
+            while let Some(p) = parents.get(&o).copied().flatten() {
                 if seen.insert(o) {
                     views.entry(p).or_default().push((o, l.text.clone()));
                 }
@@ -689,7 +735,7 @@ impl Editor {
     /// Remember the text before a change. Consecutive typing is one step.
     pub fn checkpoint(&mut self) {
         self.redo.clear();
-        self.undo.push(Snap { lines: self.buf.lines.clone(), cursor: self.cursor });
+        self.undo.push(Snap { lines: self.buf.lines.clone(), cursor: self.cursor, parents: self.parents() });
         self.group = Group::None;
     }
 
@@ -723,14 +769,20 @@ impl Editor {
     /// Put a snapshot back; every block whose text differs is dirty again,
     /// and so is every block a nested block moved in.
     fn restore(&mut self, s: Snap) -> Snap {
-        let cur = Snap { lines: std::mem::take(&mut self.buf.lines), cursor: self.cursor };
-        let (was, now) = (self.splice_views(&cur.lines), self.splice_views(&s.lines));
+        let cur = Snap { lines: std::mem::take(&mut self.buf.lines), cursor: self.cursor, parents: self.parents() };
+        let was = Self::splice_views(&cur.lines, &cur.parents);
+        let now = Self::splice_views(&s.lines, &s.parents);
         for o in was.keys().chain(now.keys()) {
             if was.get(o) != now.get(o) {
                 self.buf.mark_dirty(*o);
             }
         }
         self.buf.lines = s.lines;
+        for (o, p) in s.parents {
+            if let Some(i) = self.buf.owners.get_mut(&o) {
+                i.parent = p;
+            }
+        }
         self.cursor = s.cursor;
         self.forget_goal();
         self.anchor = None;
