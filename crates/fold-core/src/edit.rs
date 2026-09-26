@@ -619,6 +619,30 @@ impl EditBuffer {
         }
     }
 
+    /// Leaving the editor without saving (*Revert*, §10.6): the unsaved
+    /// text is dropped, not written, but a block a save took out of the
+    /// block it was in — its title line cut and the parent written in
+    /// transit, or its title line deleted and its file not trashed yet —
+    /// can no longer be pasted back as itself. It is deleted as on leaving
+    /// the editor any other way (§5.2): its file goes to trash once no file
+    /// embeds it, never left in the vault embedded nowhere. `vault` must
+    /// hold the files as they are on disk.
+    pub fn discard(&self, vault: &mut Vault) -> std::io::Result<()> {
+        loop {
+            let file = self.held.iter().chain(&self.dropped).find_map(|o| {
+                let id = self.owners.get(o)?.id.as_ref()?;
+                match vault.tree.embed_of(id) {
+                    Some(_) => None,
+                    None => vault.tree.block_by_id(id).map(|r| r.0),
+                }
+            });
+            match file {
+                Some(f) => vault.trash_file(f)?,
+                None => return Ok(()),
+            }
+        }
+    }
+
     /// Splice every dirty block (§10.6: a commit may write several files,
     /// one splice per dirty block). Each block is written by its own splice
     /// (§5.2): one that is refused stays dirty, the others are still

@@ -1093,3 +1093,20 @@ fn a_refused_save_keeps_a_cut_block_in_transit(reload: bool) {
     assert_eq!(app.mode_pub(), "edit", "still editing");
     assert!(cut.exists(), "a block cut in an editor still open was trashed (reload: {})", reload);
 }
+
+#[test]
+fn review_reverting_after_a_saved_cut_leaves_no_block_file_embedded_nowhere() {
+    // the cut title line is in transit across the save (§5.2): A is written
+    // without the embed and the block's file kept. Revert (`:q!`) leaves the
+    // editor; the block must then be deleted, as on any other way out, or
+    // still be embedded, never a file that nothing embeds
+    let (d, mut app, embed, block) = editing_task_block_with_body();
+    ctrl(&mut app, 'k');
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    ctrl(&mut app, 'e');
+    keys(&mut app, "q!⏎");
+    assert_eq!(app.mode_pub(), "normal");
+    let r = root(&d);
+    assert!(!block.exists() || r.contains(&embed), "{} exists, root.md is {:?}", block.display(), r);
+}

@@ -1551,17 +1551,27 @@ impl App {
 
     /// Drop the editor's unsaved changes (§10.6: *Revert*, `:q!`).
     fn discard_editor(&mut self) {
-        if let Some(ed) = self.editor.take() {
-            self.edit_clip = ed.clip;
-        }
+        let ed = self.editor.take();
         self.mode = Mode::Normal;
         self.focus = self.edit_return;
         // the reload may renumber nodes: files can have changed on disk
         self.anchor_zoom();
         let _ = self.vault.reload();
+        let mut said = String::from("changes discarded");
+        if let Some(ed) = ed {
+            // a block a save took out of its parent (cut and not pasted
+            // back, or deleted) cannot be pasted back as itself any more:
+            // it is deleted now, as on leaving any other way (§5.2)
+            let snap = ops::Snapshot::take(&self.vault, "revert");
+            if let Err(e) = ed.buf.discard(&mut self.vault) {
+                said = format!("{}; error: {}", said, e);
+            }
+            self.record_undo(snap);
+            self.edit_clip = ed.clip;
+        }
         self.settle_zoom();
         self.clamp_cursor();
-        self.say("changes discarded");
+        self.say(said);
     }
 
     pub fn key_normal(&mut self, key: KeyEvent) {

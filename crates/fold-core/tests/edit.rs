@@ -877,3 +877,36 @@ fn review_a_block_is_not_trashed_while_the_file_on_disk_embeds_it() {
         id.as_str()
     );
 }
+
+#[test]
+fn discarding_the_buffer_deletes_a_block_a_save_left_embedded_nowhere() {
+    // Revert (§10.6) drops the unsaved text, but a block cut and saved in
+    // transit cannot be pasted back any more: it is deleted (§5.2). One cut
+    // and not saved is still embedded, and stays
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n- two\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    ops::make_block(&mut v, t).unwrap();
+    let block = d.path().join(&v.tree.files[1].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let cut = |v: &Vault| {
+        let mut buf = open_editor(v, a);
+        let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+        let o = buf.lines[i].owner;
+        buf.delete_line(i);
+        buf.hold(vec![o]);
+        buf
+    };
+    let buf = cut(&v);
+    v.reload().unwrap();
+    buf.discard(&mut v).unwrap();
+    assert!(block.exists());
+    assert_eq!(v.tree.files.len(), 2);
+    let mut buf = cut(&v);
+    buf.save_all(&mut v).unwrap();
+    assert!(block.exists(), "in transit");
+    v.reload().unwrap();
+    buf.discard(&mut v).unwrap();
+    assert!(!block.exists());
+    assert_eq!(v.tree.files.len(), 1);
+    assert_eq!(std::fs::read_to_string(d.path().join("root.md")).unwrap(), "# A\n\n- one\n- two\n");
+}
