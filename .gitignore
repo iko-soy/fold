@@ -1,2 +1,4 @@
 target/
 .vix/
+result
+result-*
