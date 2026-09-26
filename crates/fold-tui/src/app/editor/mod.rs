@@ -4,7 +4,8 @@
 //!
 //! Every change goes through `insert` and `delete`, which use the buffer's
 //! own line operations, so each line keeps (or inherits) its owning block and
-//! the blocks it touches become dirty (§5.2).
+//! the blocks it touches become dirty (§5.2); whole lines moved, or cut and
+//! put back, carry their tags (`move_lines`, `cut_lines`, `put_clip_lines`).
 
 mod helix;
 mod normal;
