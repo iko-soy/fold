@@ -238,3 +238,38 @@ fn cutting_a_block_title_and_pasting_it_moves_the_block() {
     assert_eq!(root(&d), format!("# A\n\n- one\n  body\n{}\n- two\n", embed));
     assert!(std::fs::read_to_string(&block).unwrap().ends_with("\n- task\n"));
 }
+
+#[test]
+fn paste_goes_into_the_open_find_line() {
+    // §10.6: pasted text is "inserted as typed"; with Ctrl-F's find line open,
+    // typing goes into the find line, so a paste must too
+    let (d, mut app) = app_with("# A\n\nhello world\n");
+    keys(&mut app, "e");
+    draw(&mut app);
+    for k in [
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+    ] {
+        app.handle_key(k);
+    }
+    app.handle_paste("world");
+    let s = draw(&mut app);
+    keys(&mut app, "⎋⎋⎋");
+    assert_eq!(root(&d), "# A\n\nhello world\n");
+    assert!(s.contains("/world"), "{}", s);
+}
+
+#[test]
+fn paste_goes_into_the_open_vim_command_line() {
+    let (d, mut app) = app_with("# A\n\nhello world\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejj:");
+    app.handle_paste("w\n");
+    keys(&mut app, "⏎");
+    // `:w` ran and the text is as it was
+    assert_eq!(app.mode_pub(), "edit");
+    keys(&mut app, ":q⏎");
+    assert_eq!(root(&d), "# A\n\nhello world\n");
+}

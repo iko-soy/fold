@@ -212,6 +212,11 @@ impl Editor {
 
     /// Text from the terminal's paste (bracketed paste): typed in as is.
     pub fn paste_text(&mut self, text: &str) {
+        if let Some(cl) = self.cmdline.as_mut() {
+            // an open `:` or `/` line is where typing goes: its first line
+            cl.text.push_str(text.lines().next().unwrap_or(""));
+            return;
+        }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.mode != Mode::Insert && self.keys != Keys::Normal {
             // pasting in a normal mode puts the text after the cursor
