@@ -646,10 +646,13 @@ impl Editor {
     }
 
     /// After lines moved with their tags, each goes with the block it now
-    /// sits in (§5.2): `retag_strays`, then `reparent`.
+    /// sits in (§5.2): `retag_strays`, then each nested block's embed goes
+    /// to the block its title line sits in, by the rule the buffer's save
+    /// follows too (`EditBuffer::reparent`).
     fn settle(&mut self, titles: &BTreeMap<Owner, Option<usize>>) {
         self.retag_strays(titles);
-        self.reparent();
+        let now = self.titles();
+        self.buf.reparent(&now);
     }
 
     /// A line of a nested block that is no longer contiguous with the
@@ -678,49 +681,6 @@ impl Editor {
                 }
             }
         }
-    }
-
-    /// Each nested block's embed goes to the block its title line now sits
-    /// in (§5.2), out of the block it was in or back into one nested there:
-    /// of the block holding the line above the title line and the blocks
-    /// that one is nested in, the innermost whose title line holds it
-    /// (`holds`). Blocks go in buffer order, so where a block sits is
-    /// settled before the blocks after it.
-    fn reparent(&mut self) {
-        let mut order: Vec<(usize, Owner)> = self.titles().into_iter().map(|(o, t)| (t, o)).collect();
-        order.sort();
-        for (t, o) in order {
-            let Some(p) = self.buf.owners.get(&o).and_then(|i| i.parent) else { continue };
-            if t == 0 {
-                continue;
-            }
-            let mut q = Some(self.buf.lines[t - 1].owner);
-            while let Some(c) = q {
-                if !self.within(c, o) && self.holds(c, o) {
-                    break;
-                }
-                q = self.buf.owners.get(&c).and_then(|i| i.parent);
-            }
-            let Some(q) = q.filter(|&q| q != p) else { continue };
-            if let Some(i) = self.buf.owners.get_mut(&o) {
-                i.parent = Some(q);
-            }
-            self.buf.mark_dirty(p);
-            self.buf.mark_dirty(q);
-        }
-    }
-
-    /// Whether block `q`'s title line holds block `o`'s, written below its
-    /// lines, as the parser nests title lines (§3.1): the edited node's
-    /// block holds every line, an item what is indented past it, a section
-    /// what is indented past it (under an item of its own) and, at its
-    /// indent, items and deeper sections.
-    fn holds(&self, q: Owner, o: Owner) -> bool {
-        let (Some(qi), Some(oi)) = (self.buf.owners.get(&q), self.buf.owners.get(&o)) else { return false };
-        if qi.parent.is_none() || oi.indent > qi.indent {
-            return true;
-        }
-        qi.section && oi.indent == qi.indent && (!oi.section || oi.level > qi.level)
     }
 
     /// The block each block's embed sits in.

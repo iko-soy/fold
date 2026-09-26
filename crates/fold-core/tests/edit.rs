@@ -995,3 +995,62 @@ fn a_re_indented_or_re_spelled_block_title_line_moves_the_block() {
     assert_eq!(v.tree.files[0].text, "# A\n\n  - x\n");
     assert!(!b_path.exists());
 }
+
+#[test]
+fn review_indenting_a_block_title_line_under_a_sibling_block_keeps_it_in_the_tree() {
+    // §5.2: "  - c" re-indented under "- b", itself a nested block, sits in
+    // b: c's embed goes into b's file, never indented under b's bare embed
+    // in A (§4.7: an embed line has no children), where the outline does
+    // not see it and deleting A leaves c's file embedded nowhere
+    let (d, mut v) = vault_with("# A\n\n- b\n- c\n");
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    ops::make_block(&mut v, b).unwrap();
+    let c = v.find_by_path(&["A".into(), "c".into()]).unwrap();
+    let cid = ops::make_block(&mut v, c).unwrap();
+    let c_path = d.path().join(&v.tree.files[v.tree.block_by_id(&cid).unwrap().0].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- c").unwrap();
+    buf.set_line(i, "  - c".into());
+    buf.save_all(&mut v).unwrap();
+    let root = v.tree.files[0].text.clone();
+    let mut titles = Vec::new();
+    v.tree.walk(v.tree.root, &mut |t, r| titles.push(t.node(r).title.clone()));
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    ops::delete_subtree(&mut v, a).unwrap();
+    assert!(
+        titles.contains(&"c".to_string()) && !c_path.exists(),
+        "root.md after the save:\n{}walk: {:?}; after deleting A, c's file still in the vault: {}",
+        root,
+        titles,
+        c_path.exists()
+    );
+}
+
+#[test]
+fn a_line_the_parser_would_nest_under_a_blocks_embed_is_not_saved() {
+    // §4.7: an embed line has no lines nested under it in the parent file,
+    // where the outline does not see them. The enclosing block's "- two"
+    // indented under b's title line, or left after it re-spelled as a
+    // heading, would be: the save is refused, the file left as it was
+    for (b_line, two) in [("- b", "  - two"), ("## b", "- two")] {
+        let (_d, mut v) = vault_with("# A\n\n- one\n- b\n- two\n");
+        let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+        ops::make_block(&mut v, b).unwrap();
+        let before = v.tree.files[0].text.clone();
+        let a = v.tree.resolved_children(v.tree.root)[0];
+        let mut buf = open_editor(&v, a);
+        let i = buf.lines.iter().position(|l| l.text == "- b").unwrap();
+        buf.set_line(i, b_line.into());
+        buf.set_line(i + 1, two.into());
+        let e = buf.save_all(&mut v).unwrap_err();
+        assert!(e.to_string().contains("nested under a block's embed"), "{}", e);
+        assert_eq!(v.tree.files[0].text, before);
+        // put back, it saves
+        buf.set_line(i, "- b".into());
+        buf.set_line(i + 1, "- two".into());
+        buf.save_all(&mut v).unwrap();
+        assert_eq!(v.tree.files[0].text, before);
+        assert!(v.tree.files[1].text.ends_with("---\n\n- b\n"), "{}", v.tree.files[1].text);
+    }
+}

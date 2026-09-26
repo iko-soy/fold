@@ -1315,3 +1315,72 @@ fn a_line_opened_at_the_start_of_a_line_below_a_block_stays_with_that_line() {
     assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- new\n- two\n", embed));
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
 }
+
+#[test]
+fn review_tab_on_a_block_title_under_a_sibling_block_keeps_the_block_in_the_outline() {
+    // §5.2: Tab on "- c" puts it under "- b", itself a nested block: c then
+    // belongs in b, as moving the line there does, not an embed indented
+    // under b's bare embed (§4.7) that the tree does not walk into
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- b\n- c\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    let b = fold_core::ops::make_block(&mut v, b).unwrap();
+    let b_file = v.dir.join(&v.tree.files[v.tree.block_by_id(&b).unwrap().0].path);
+    let c = v.find_by_path(&["A".into(), "c".into()]).unwrap();
+    let c = fold_core::ops::make_block(&mut v, c).unwrap();
+    drop(v);
+    let (b, c) = (format!("![[{}]]", b.as_str()), format!("![[{}]]", c.as_str()));
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    // "# A", "", "- b", "- c"
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    ctrl(&mut app, 's');
+    let v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let mut titles = Vec::new();
+    v.tree.walk(v.tree.root, &mut |t, r| titles.push(t.node(r).title.clone()));
+    assert!(titles.contains(&"c".to_string()), "walk {:?}; root.md:\n{}", titles, root(&d));
+    assert_eq!(root(&d), format!("# A\n\n{}\n", b));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with(&format!("\n- b\n  {}\n", c)));
+    // Shift-Tab takes it back out of b
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n{}\n{}\n", b, c));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with("\n- b\n"));
+}
+
+#[test]
+fn review_indenting_a_block_title_line_under_a_sibling_blocks_title_keeps_it_in_the_outline() {
+    // §5.2: re-indenting a nested block's title line moves the block to where
+    // the line sits. Tab on "- c" puts it under "- b", itself a nested block:
+    // c then belongs in b (as moving the line there does), not an embed
+    // indented under b's bare embed (§4.7: a diagnostic) that the outline
+    // does not show
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- b\n- c\n- two\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let c = v.find_by_path(&["A".into(), "c".into()]).unwrap();
+    fold_core::ops::make_block(&mut v, c).unwrap();
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    fold_core::ops::make_block(&mut v, b).unwrap();
+    drop(v);
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    // "# A", "", "- one", "- b", "- c", "- two"
+    for _ in 0..4 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    let rows: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
+    assert!(rows.contains(&"c".to_string()), "c is gone from the outline: {:?}; root.md {:?}", rows, root(&d));
+}

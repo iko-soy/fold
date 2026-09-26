@@ -259,6 +259,59 @@ impl EditBuffer {
         None
     }
 
+    /// Each nested block's embed goes to the block its title line (at
+    /// `titles`) now sits in (§5.2), out of the block it was in or into one
+    /// nested there, however the line got there: moved, re-indented or
+    /// re-spelled. Of the block holding the line above the title line and
+    /// the blocks that one is nested in, the innermost whose title line
+    /// holds it (`holds`). Blocks go in buffer order, so where a block sits
+    /// is settled before the blocks after it.
+    pub fn reparent(&mut self, titles: &BTreeMap<Owner, usize>) {
+        let mut order: Vec<(usize, Owner)> = titles.iter().map(|(&o, &t)| (t, o)).collect();
+        order.sort();
+        for (t, o) in order {
+            let Some(p) = self.owners.get(&o).and_then(|i| i.parent) else { continue };
+            if t == 0 || t > self.lines.len() {
+                continue;
+            }
+            let mut q = Some(self.lines[t - 1].owner);
+            while let Some(c) = q {
+                if c != o && self.nested_in(c, o).is_none() && self.holds(titles, c, o) {
+                    break;
+                }
+                q = self.owners.get(&c).and_then(|i| i.parent);
+            }
+            let Some(q) = q.filter(|&q| q != p) else { continue };
+            if let Some(i) = self.owners.get_mut(&o) {
+                i.parent = Some(q);
+            }
+            self.mark_dirty(p);
+            self.mark_dirty(q);
+        }
+    }
+
+    /// Whether block `q`'s title line holds block `o`'s, written below its
+    /// lines, as the parser nests title lines (§3.1): the edited node's
+    /// block holds every line, an item what is indented past it, a section
+    /// what is indented past it (under an item of its own) and, at its
+    /// indent, items and deeper sections. Each title line as it is written
+    /// now (`title_form`), not as the buffer was built: one re-indented or
+    /// re-spelled nests where it sits (else where it was last written).
+    fn holds(&self, titles: &BTreeMap<Owner, usize>, q: Owner, o: Owner) -> bool {
+        if self.owners.get(&q).is_some_and(|i| i.parent.is_none()) {
+            return true;
+        }
+        let form = |o: Owner| {
+            titles
+                .get(&o)
+                .and_then(|&t| self.lines.get(t))
+                .and_then(|l| title_form(&l.text))
+                .or_else(|| self.placed(o))
+        };
+        let (Some((qi, qh)), Some((oi, oh))) = (form(q), form(o)) else { return false };
+        oi > qi || (oi == qi && qh.is_some_and(|q| oh.is_none_or(|o| o > q)))
+    }
+
     /// The line where nested block `o`'s text starts (§5.2): its first line
     /// if that is a title line of its kind at its display indent — a heading
     /// for a section, a bullet for an item — or, re-indented or re-spelled,
@@ -322,7 +375,8 @@ impl EditBuffer {
     /// block, and its file goes to trash once that block is written without
     /// its embed — unless it is in transit, its title line cut (`hold`).
     /// Re-indenting or re-spelling the title line moves the block: the
-    /// enclosing block is dirty, its embed written where the line now sits.
+    /// enclosing block is dirty, its embed written where the line now sits,
+    /// in the block that line sits in (`reparent`).
     fn settle(&mut self, vault: &Vault) {
         // lines of a deleted block put back (by the editor's own undo) are
         // the enclosing block's text like the rest of them
@@ -399,6 +453,15 @@ impl EditBuffer {
                 break;
             }
         }
+        // and each goes to the block its title line now sits in, so no
+        // embed is written nested under another's line (§4.7)
+        let titles: BTreeMap<Owner, usize> = self
+            .owners
+            .iter()
+            .filter(|(_, i)| i.parent.is_some())
+            .filter_map(|(&o, _)| Some((o, self.title_line(vault, o)?)))
+            .collect();
+        self.reparent(&titles);
     }
 
     /// The block that holds a deleted block's lines now.
@@ -573,6 +636,18 @@ impl EditBuffer {
         if malformed_block_file(f) {
             return Err(std::io::Error::other(format!(
                 "{}: text or an embed before the block's root; read-only until fixed",
+                path
+            )));
+        }
+        // §4.7: an embed line has no lines nested under it, where the tree
+        // does not see them. A line the parser would nest there (the block's
+        // own line indented under a nested block's title line, or after one
+        // re-spelled as a heading) is refused, not hidden, unless the file
+        // had it so already
+        let crowded = crowded_embeds(f);
+        if crowded_embeds(&parse_file(&path, &out, file, None)).iter().any(|id| !crowded.contains(id)) {
+            return Err(std::io::Error::other(format!(
+                "{}: a line would be nested under a block's embed, out of the outline; not saved",
                 path
             )));
         }
@@ -830,6 +905,21 @@ fn malformed_block_file(f: &ParsedFile) -> bool {
         Content::Node(_) => false,
     });
     text_before || root.children.len() != 1 || f.nodes[root.children[0]].is_embed()
+}
+
+/// The blocks whose embed in `f` has lines nested under it: nodes, or text
+/// other than blank lines (§4.7: a diagnostic).
+fn crowded_embeds(f: &ParsedFile) -> Vec<&Id> {
+    f.nodes
+        .iter()
+        .filter(|n| {
+            n.content.iter().any(|c| match c {
+                Content::Text(sp) => !sp.text(&f.text).trim().is_empty(),
+                Content::Node(_) => true,
+            })
+        })
+        .filter_map(|n| n.embed.as_ref())
+        .collect()
 }
 
 /// Where a node's own text ends: its span without the blank lines that
