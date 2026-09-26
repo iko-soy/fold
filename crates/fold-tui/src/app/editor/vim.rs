@@ -690,10 +690,16 @@ fn visual_cmd(e: &mut Editor, c: char, n: usize) -> Outcome {
             let clip = e.clip.clone();
             let (a, b) = e.selection().unwrap_or((s, en));
             e.checkpoint();
-            let gone = e.delete(a, b);
+            // in V-LINE the lines' text goes and one line is left for the new
+            // text, so whole lines go in without their last newline, and the
+            // lines replaced are kept whole
+            let mut gone = e.delete(a, b);
+            if line {
+                gone.push('\n');
+            }
             e.cursor = a;
-            let end = e.insert(a, clip.text.strip_suffix('\n').filter(|_| clip.linewise && !line).unwrap_or(&clip.text));
-            e.cursor = e.prev(end).unwrap_or(end);
+            let end = e.insert(a, clip.text.strip_suffix('\n').filter(|_| clip.linewise).unwrap_or(&clip.text));
+            e.cursor = if line { Pos::new(a.line, e.first_non_blank(a.line)) } else { e.prev(end).unwrap_or(end) };
             e.copy(gone, line);
             exit(e);
         }

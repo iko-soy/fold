@@ -513,3 +513,23 @@ fn vim_cw_at_the_end_of_a_word_changes_only_that_word() {
     keys(&mut app, "ejjll2cwX⎋:w⏎");
     assert_eq!(root(&d), "# A\n\nonX three\n");
 }
+
+#[test]
+fn vim_visual_line_put_replaces_the_line() {
+    // `yy` on "a", then `V` on "b" and `p`: "b" becomes "a", no blank line is left behind.
+    let (d, mut app) = app_with("# A\n\na\nb\nc\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjyyjVp:w⏎");
+    assert_eq!(root(&d), "# A\n\na\na\nc\n");
+}
+
+#[test]
+fn vim_visual_line_put_saves_the_replaced_line_whole() {
+    // `V` + `p` puts the replaced line in the register as a whole line (with its newline),
+    // so a later `2p` puts two lines "b", not one line "bb".
+    let (d, mut app) = app_with("# A\n\na\nb\nc\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjyljVp");
+    keys(&mut app, "2p:w⏎");
+    assert_eq!(root(&d), "# A\n\na\na\nb\nb\nc\n");
+}
