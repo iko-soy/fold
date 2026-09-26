@@ -10,6 +10,7 @@ mod helix;
 mod normal;
 mod vim;
 
+use super::wrap::{self, Row};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fold_core::edit::{EditBuffer, EditLine, Owner};
 use std::collections::BTreeSet;
@@ -126,6 +127,12 @@ pub struct Editor {
     pub copied: Option<String>,
     /// Where a mouse drag started.
     drag_origin: Option<Pos>,
+    /// Columns to wrap at (set by the renderer); `None` means no wrapping.
+    pub wrap_cols: Option<usize>,
+    /// Screen rows of every line, for the text and width they were made for.
+    layout: Option<(u64, Option<usize>, Vec<Vec<Row>>, Vec<bool>)>,
+    /// The screen column vertical moves by screen row aim for.
+    want_x: Option<usize>,
     want_col: Option<usize>,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
@@ -156,6 +163,9 @@ impl Editor {
             page: 20,
             copied: None,
             drag_origin: None,
+            wrap_cols: None,
+            layout: None,
+            want_x: None,
             want_col: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -542,6 +552,88 @@ impl Editor {
     pub fn set_cursor(&mut self, p: Pos) {
         self.cursor = p;
         self.want_col = None;
+        self.want_x = None;
+    }
+
+    // -------------------------------------------------------------- layout
+
+    /// Every line's screen rows (§10.1): prose wraps at spaces, lines inside
+    /// fenced code break hard. Cached until the text or width changes.
+    pub fn layout(&mut self) -> &Vec<Vec<Row>> {
+        let fresh = matches!(&self.layout, Some((c, w, _, _)) if *c == self.changes && *w == self.wrap_cols);
+        if !fresh {
+            let mut rows = Vec::with_capacity(self.lines());
+            let mut codes = Vec::with_capacity(self.lines());
+            let mut fence: Option<(char, usize)> = None;
+            for l in 0..self.lines() {
+                let text = self.line(l);
+                let t = text.trim_start();
+                let fc = t.chars().next().filter(|c| *c == '`' || *c == '~');
+                let n = fc.map(|c| t.chars().take_while(|x| *x == c).count()).unwrap_or(0);
+                let is_fence = n >= 3;
+                let code = fence.is_some() && !is_fence;
+                if is_fence {
+                    fence = match fence {
+                        Some((c, m)) if Some(c) == fc && n >= m => None,
+                        None => Some((fc.unwrap(), n)),
+                        keep => keep,
+                    };
+                }
+                codes.push(code);
+                rows.push(match self.wrap_cols {
+                    Some(cols) => wrap::wrap(text, cols, code),
+                    None => vec![Row { start: 0, end: text.chars().count(), indent: 0 }],
+                });
+            }
+            self.layout = Some((self.changes, self.wrap_cols, rows, codes));
+        }
+        &self.layout.as_ref().unwrap().2
+    }
+
+    /// Which lines sit inside fenced code (they break hard, with `↪`).
+    pub fn code_lines(&mut self) -> Vec<bool> {
+        self.layout();
+        self.layout.as_ref().unwrap().3.clone()
+    }
+
+    /// Screen row (counted over the whole buffer) and column of a position.
+    pub fn pos_to_screen(&mut self, p: Pos) -> (usize, usize) {
+        let before: usize = self.layout().iter().take(p.line).map(|r| r.len()).sum();
+        let l = p.line.min(self.lines() - 1);
+        let rows = self.layout()[l].clone();
+        let (r, x) = wrap::locate(&rows, self.line(p.line), p.col);
+        (before + r, x)
+    }
+
+    /// The position under screen row `row` (over the whole buffer), column `x`.
+    pub fn screen_to_pos(&mut self, row: usize, x: usize) -> Pos {
+        let mut left = row;
+        let n = self.lines();
+        for l in 0..n {
+            let rows = self.layout()[l].clone();
+            if left < rows.len() || l + 1 == n {
+                let r = left.min(rows.len() - 1);
+                return Pos::new(l, wrap::column_at(&rows, self.line(l), r, x));
+            }
+            left -= rows.len();
+        }
+        Pos::new(0, 0)
+    }
+
+    /// Up or down by screen rows: a wrapped line is several rows (the
+    /// normal keymap's arrows, Helix's `j`/`k`, Vim's `gj`/`gk`).
+    pub fn move_visual(&mut self, delta: isize) {
+        if self.wrap_cols.is_none() {
+            return self.move_vert(delta);
+        }
+        let (row, x) = self.pos_to_screen(self.cursor);
+        let want = self.want_x.unwrap_or(x);
+        let total: usize = self.layout().iter().map(|r| r.len()).sum();
+        let target = (row as isize + delta).clamp(0, total as isize - 1) as usize;
+        let p = self.screen_to_pos(target, want);
+        self.cursor = p;
+        self.want_col = None;
+        self.want_x = Some(want);
     }
 
     pub fn first_non_blank(&self, l: usize) -> usize {

@@ -159,7 +159,8 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             } else {
                 e.anchor = None;
             }
-            e.move_vert(if c == 'j' { n as isize } else { -(n as isize) });
+            // Helix moves by screen row when lines wrap
+            e.move_visual(if c == 'j' { n as isize } else { -(n as isize) });
         }
         ('w' | 'W', false) => {
             let big = c == 'W';

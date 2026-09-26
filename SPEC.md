@@ -855,6 +855,15 @@ Four regions, each of them live under the pointer:
 Split layout, outline on the left at a third of the width (minimum 30 columns); the border
 between the panes is a handle — drag it to resize. Below 80 columns the panes stack.
 
+**Long lines wrap** in the reading pane and the editor. Prose breaks after a space, and a
+wrapped list item's continuation rows hang under its text, not under its bullet or
+checkbox; a word longer than the pane breaks where it must. Lines inside fenced code break
+at the pane's edge instead, one column early, with `↪` marking each break, so code is
+never reflowed. Every screen row of a line is that line to the pointer: a click on any
+row selects it or places the cursor where it lands. `zw` (*Wrap lines*) turns wrapping
+off for the session, and long lines are cut at the edge. The outline never wraps: a long
+title ends in `…`.
+
 **The pointer.** Everything a key does, the pointer does too, and the screen shows where:
 
 | Gesture | Where | Does |
@@ -912,6 +921,7 @@ the popup — closes the topmost thing.
 | `H` / `L` | collapse / expand all under cursor |
 | `zd` | toggle hiding done nodes (both panes) |
 | `zr` | toggle raw mode: exact source in the reading pane, frontmatter included |
+| `zw` | toggle wrapping of long lines in the reading pane and the editor (§10.1) |
 | `za` | archive: refile subtree under `Archive` (§6.5) |
 | `-` | go to parent |
 | `{` / `}` | previous / next sibling |
@@ -997,6 +1007,10 @@ clipboard and undo:
 - **helix**: selection first — `w b e W B E` select, `x` selects (and extends by) lines,
   `% ; Alt-;`, `f t F T`, `gg ge gh gl gs`, `mi` / `ma` + object, `v` to extend; `d c y p P
   R r ~ > < J` act on the selection; `i a I A o O`; `u U`; `/ ? n N *`.
+
+With wrapping on (§10.1), the normal keymap's `↑`/`↓`/`PgUp`/`PgDn` and Helix's `j`/`k`
+move by screen row through a wrapped line, as micro and Helix do; Vim's `j`/`k` move by line,
+and `gj`/`gk` by screen row.
 
 All three take `:` commands — `:w` save, `:q` / `:wq` / `:x` done, `:q!` / `:e!` revert,
 `:N` go to line — and in all three a click puts the cursor where it lands, a drag

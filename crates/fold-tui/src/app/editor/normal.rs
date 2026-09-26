@@ -53,7 +53,8 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
         _ => None,
     };
     if let Some(d) = vert {
-        select_to(e, shift, |e| e.move_vert(d));
+        // by screen row: a wrapped line is several rows
+        select_to(e, shift, |e| e.move_visual(d));
         return out;
     }
 

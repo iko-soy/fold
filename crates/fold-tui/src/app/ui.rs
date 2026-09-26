@@ -188,6 +188,53 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// One screen row of the reading pane.
+struct Drawn {
+    doc: Option<usize>,
+    line: Line<'static>,
+    code: bool,
+    check: Option<u16>,
+    link: Option<(u16, u16)>,
+}
+
+/// Break a styled line into screen rows at `cols` columns (§10.1): each row
+/// its own `Line`, continuation rows indented, and code rows that go on
+/// ending in `↪`.
+fn wrap_styled(line: &Line<'static>, cols: usize, hard: bool) -> Vec<(Line<'static>, super::wrap::Row)> {
+    let cells: Vec<(char, Style)> = line.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, s.style))).collect();
+    let text: String = cells.iter().map(|c| c.0).collect();
+    let rows = super::wrap::wrap(&text, cols, hard);
+    let n = rows.len();
+    if n == 1 {
+        return vec![(line.clone(), rows[0])];
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if r.indent > 0 {
+                spans.push(Span::raw(" ".repeat(r.indent)));
+            }
+            let mut run = String::new();
+            let mut style = None;
+            for &(c, st) in &cells[r.start..r.end] {
+                if style != Some(st) && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), style.unwrap_or_default()));
+                }
+                style = Some(st);
+                run.push(c);
+            }
+            if !run.is_empty() {
+                spans.push(Span::styled(run, style.unwrap_or_default()));
+            }
+            if hard && i + 1 < n {
+                spans.push(Span::styled("↪", Style::default().fg(theme::DIM)));
+            }
+            (Line::from(spans), *r)
+        })
+        .collect()
+}
+
 fn rounded(title: Line<'static>, focused: bool) -> WBlock<'static> {
     WBlock::default()
         .borders(Borders::ALL)
@@ -619,6 +666,7 @@ impl App {
         };
         // display lines: (doc line or None for the property header, text)
         let mut shown: Vec<(Option<usize>, String)> = Vec::new();
+        let mut header_at: Option<usize> = None;
         self.read_header = false;
         if self.raw_mode {
             for l in render(&self.vault.tree, r, 1, false).lines() {
@@ -632,6 +680,7 @@ impl App {
             if let Some(b) = &self.vault.tree.node(r).block {
                 let props: Vec<String> = b.props.iter().filter(|(k, _)| k.as_str() != "id").map(|(k, v)| format!("{} {}", k, v)).collect();
                 if !props.is_empty() {
+                    header_at = Some(1.min(shown.len()));
                     shown.insert(1.min(shown.len()), (None, format!("⚑ {}", props.join(" · "))));
                     self.read_header = true;
                 }
@@ -639,55 +688,75 @@ impl App {
         }
         let view = inner.height as usize;
         self.ui.reading_view = view;
-        self.ui.reading_len = shown.len();
-        let cursor_shown = self.read_cursor + (self.read_header && self.read_cursor >= 1) as usize;
-        let moved = self.ui.last_read_cursor != Some(self.read_cursor);
-        self.ui.last_read_cursor = Some(self.read_cursor);
-        follow(&mut self.scroll_reading, cursor_shown, moved, view, shown.len());
+        // every line styled, then laid out in screen rows (§10.1)
         let texts: Vec<&str> = shown.iter().map(|(_, t)| t.as_str()).collect();
         let code = self.code_lines(&texts);
+        let cols = if self.wrap { inner.width as usize } else { usize::MAX / 2 };
+        let mut rows: Vec<Drawn> = Vec::new();
         for (si, (doc_line, text)) in shown.iter().enumerate() {
-            if si < self.scroll_reading || si >= self.scroll_reading + view {
-                continue;
+            let styled = if header_at == Some(si) {
+                super::markdown::Styled {
+                    line: Line::from(Span::styled(text.clone(), Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC))),
+                    check: None,
+                    link: None,
+                }
+            } else {
+                match &code[si] {
+                    Some(spans) => super::markdown::Styled { line: Line::from(spans.clone()), check: None, link: None },
+                    None => style_line(text, false),
+                }
+            };
+            let parts = wrap_styled(&styled.line, cols, code[si].is_some());
+            for (line, row) in parts {
+                let within = |c: u16| (c as usize) >= row.start && (c as usize) < row.end.max(row.start + 1);
+                let at = |c: u16| (row.indent + c as usize - row.start) as u16;
+                rows.push(Drawn {
+                    doc: *doc_line,
+                    line,
+                    code: code[si].is_some(),
+                    check: styled.check.filter(|c| within(*c)).map(at),
+                    link: styled.link.filter(|(a, _)| within(*a)).map(|(a, b)| (at(a), at((b as usize).min(row.end) as u16))),
+                });
             }
-            let y = inner.y + (si - self.scroll_reading) as u16;
+        }
+        self.ui.reading_len = rows.len();
+        let cursor_row = rows.iter().position(|d| d.doc == Some(self.read_cursor)).unwrap_or(0);
+        let moved = self.ui.last_read_cursor != Some(self.read_cursor);
+        self.ui.last_read_cursor = Some(self.read_cursor);
+        follow(&mut self.scroll_reading, cursor_row, moved, view, rows.len());
+        for (ri, d) in rows.iter().enumerate().skip(self.scroll_reading).take(view) {
+            let y = inner.y + (ri - self.scroll_reading) as u16;
             let line_rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
-            let buf = f.buffer_mut();
-            let Some(di) = doc_line else {
-                put(buf, inner.x, y, &fit(text, inner.width as usize), inner.width, Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC));
-                continue;
-            };
-            let styled = match &code[si] {
-                Some(spans) => super::markdown::Styled { line: Line::from(spans.clone()), check: None, link: None },
-                None => style_line(text, false),
-            };
-            let cur = focused && *di == self.read_cursor;
-            let matched = self.read_matches.contains(di);
+            let cur = focused && d.doc.is_some() && d.doc == Some(self.read_cursor);
+            let matched = d.doc.is_some_and(|di| self.read_matches.contains(&di));
+            let hovered = self.ui.hovered(line_rect) && self.ui.menu.is_none() && d.doc.is_some();
             let bg = if cur {
                 Some(theme::SEL_BLUR)
             } else if matched {
                 Some(ratatui::style::Color::Indexed(58))
-            } else if self.ui.hovered(line_rect) && self.ui.menu.is_none() {
+            } else if hovered {
                 Some(theme::HOVER)
-            } else if code[si].is_some() {
+            } else if d.code {
                 Some(theme::CODE_BG)
             } else {
                 None
             };
+            let buf = f.buffer_mut();
             if let Some(b) = bg {
                 buf.set_style(line_rect, Style::default().bg(b));
             }
-            buf.set_line(inner.x, y, &styled.line, inner.width);
-            self.ui.push(line_rect, Hit::DocLine(*di));
-            if let Some(c) = styled.check {
-                self.ui.push(Rect { x: inner.x + c, y, width: 1, height: 1 }, Hit::DocCheck(*di));
+            buf.set_line(inner.x, y, &d.line, inner.width);
+            let Some(di) = d.doc else { continue };
+            self.ui.push(line_rect, Hit::DocLine(di));
+            if let Some(c) = d.check {
+                self.ui.push(Rect { x: inner.x + c, y, width: 1, height: 1 }, Hit::DocCheck(di));
             }
-            if let Some((a, b)) = styled.link {
-                self.ui.push(Rect { x: inner.x + a, y, width: b - a, height: 1 }, Hit::Link(*di));
+            if let Some((a, b)) = d.link {
+                self.ui.push(Rect { x: inner.x + a, y, width: b.saturating_sub(a).max(1), height: 1 }, Hit::Link(di));
             }
         }
-        if shown.len() > view {
-            let mut st = ScrollbarState::new(shown.len().saturating_sub(view)).position(self.scroll_reading);
+        if rows.len() > view {
+            let mut st = ScrollbarState::new(rows.len().saturating_sub(view)).position(self.scroll_reading);
             f.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None),
                 Rect { y: area.y + 1, height: area.height.saturating_sub(2), ..area },
@@ -810,32 +879,50 @@ impl App {
             _ => None,
         };
         let view = inner.height as usize - bottom.is_some() as usize;
-        let (cursor, sel, block_cur) = (ed.cursor, ed.selection(), ed.block_cursor());
+        let (sel, block_cur) = (ed.selection(), ed.block_cursor());
+        let wrap = self.wrap;
+        let ed = self.editor.as_mut().unwrap();
+        ed.page = view.max(1);
+        ed.wrap_cols = wrap.then_some(inner.width as usize);
+        // every screen row: (line, row, is the line's last row)
+        let layout = ed.layout().clone();
+        let codes = ed.code_lines();
+        let (cur_row, cur_x) = ed.pos_to_screen(ed.cursor);
+        let cursor = ed.cursor;
         let lines: Vec<(String, bool)> = ed.buf.lines.iter().map(|l| (l.text.clone(), l.owner == owner)).collect();
-        let moved = self.ui.last_edit_line != Some(cursor.line);
-        self.ui.last_edit_line = Some(cursor.line);
-        follow(&mut self.ui.edit_scroll, cursor.line, moved, view, lines.len());
-        if let Some(ed) = self.editor.as_mut() {
-            ed.page = view.max(1);
-        }
+        let screen: Vec<(usize, super::wrap::Row, bool)> = layout
+            .iter()
+            .enumerate()
+            .flat_map(|(l, rows)| rows.iter().enumerate().map(move |(i, r)| (l, *r, i + 1 == rows.len())))
+            .collect();
+        let moved = self.ui.last_edit_line != Some(cur_row);
+        self.ui.last_edit_line = Some(cur_row);
+        follow(&mut self.ui.edit_scroll, cur_row, moved, view, screen.len());
         let buf = f.buffer_mut();
-        for (i, (text, own)) in lines.iter().enumerate().skip(self.ui.edit_scroll).take(view) {
-            let y = inner.y + (i - self.ui.edit_scroll) as u16;
-            if i == cursor.line {
+        for (si, (l, row, last)) in screen.iter().enumerate().skip(self.ui.edit_scroll).take(view) {
+            let y = inner.y + (si - self.ui.edit_scroll) as u16;
+            let (text, own) = &lines[*l];
+            if *l == cursor.line {
                 buf.set_style(Rect { x: inner.x, y, width: inner.width, height: 1 }, Style::default().bg(theme::HOVER));
             }
             // the block being edited is bright, the rest of the subtree is
             // context
             let style = if *own { Style::default() } else { Style::default().fg(ratatui::style::Color::Gray) };
-            put(buf, inner.x, y, text, inner.width, style);
+            let chars: Vec<char> = text.chars().collect();
+            let part: String = chars[row.start..row.end].iter().collect();
+            let x0 = inner.x + row.indent as u16;
+            put(buf, x0, y, &part, inner.width.saturating_sub(row.indent as u16), style);
+            if codes[*l] && !last {
+                put(buf, inner.x + inner.width - 1, y, "↪", 1, Style::default().fg(theme::DIM));
+            }
             if let Some((s, e)) = sel {
-                if i >= s.line && i <= e.line {
-                    let len = text.chars().count();
-                    let from = if i == s.line { s.col } else { 0 };
-                    // a selected line end shows as one cell
-                    let to = if i == e.line { e.col } else { len + 1 };
+                if *l >= s.line && *l <= e.line {
+                    let from = if *l == s.line { s.col } else { 0 }.max(row.start);
+                    // a selected line end shows as one cell, on the last row
+                    let to = if *l == e.line { e.col } else { chars.len() + 1 };
+                    let to = if *last { to } else { to.min(row.end) };
                     for col in from..to {
-                        let x = inner.x + col as u16;
+                        let x = x0 + (col - row.start) as u16;
                         if x < inner.x + inner.width {
                             buf[(x, y)].set_style(Style::default().bg(theme::SEL));
                         }
@@ -854,9 +941,9 @@ impl App {
                 return;
             }
         }
-        if cursor.line >= self.ui.edit_scroll && cursor.line < self.ui.edit_scroll + view {
-            let cx = inner.x + (cursor.col as u16).min(inner.width.saturating_sub(1));
-            let cy = inner.y + (cursor.line - self.ui.edit_scroll) as u16;
+        if cur_row >= self.ui.edit_scroll && cur_row < self.ui.edit_scroll + view {
+            let cx = inner.x + (cur_x as u16).min(inner.width.saturating_sub(1));
+            let cy = inner.y + (cur_row - self.ui.edit_scroll) as u16;
             if block_cur {
                 f.buffer_mut()[(cx, cy)].set_style(Style::default().add_modifier(Modifier::REVERSED));
             }

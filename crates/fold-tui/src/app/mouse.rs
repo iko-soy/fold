@@ -371,10 +371,15 @@ impl App {
         }
     }
 
-    /// The text position under a screen cell in the editor.
-    fn edit_pos(&self, x: u16, y: u16) -> super::editor::Pos {
+    /// The text position under a screen cell in the editor, through the
+    /// wrapped layout.
+    fn edit_pos(&mut self, x: u16, y: u16) -> super::editor::Pos {
         let area = self.ui.edit_area;
-        let line = self.ui.edit_scroll + y.saturating_sub(area.y) as usize;
-        super::editor::Pos::new(line, x.saturating_sub(area.x) as usize)
+        let row = self.ui.edit_scroll + y.saturating_sub(area.y) as usize;
+        let col = x.saturating_sub(area.x) as usize;
+        match self.editor.as_mut() {
+            Some(ed) => ed.screen_to_pos(row, col),
+            None => super::editor::Pos::new(row, col),
+        }
     }
 }

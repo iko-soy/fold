@@ -28,6 +28,7 @@ mod highlight;
 mod markdown;
 mod mouse;
 mod ui;
+mod wrap;
 
 pub use action::Action;
 pub use editor::Keys as EditKeys;
@@ -72,6 +73,8 @@ pub struct App {
     folded: Vec<NodeKey>,
     hide_done: bool,
     raw_mode: bool,
+    /// Long lines wrap in the reading pane and the editor (§10.1); `zw`.
+    wrap: bool,
     register: String,
     status: String,
     status_time: Instant,
@@ -160,6 +163,7 @@ impl App {
             folded: Vec::new(),
             hide_done: false,
             raw_mode: false,
+            wrap: true,
             register: String::new(),
             status: "click to select · double-click to zoom · right-click for actions · drag to move · ? help".into(),
             status_time: Instant::now(),
@@ -1094,6 +1098,7 @@ impl App {
                     self.say(if self.raw_mode { "raw" } else { "styled" });
                 }
                 ('z', KeyCode::Char('a')) => self.act_archive(),
+                ('z', KeyCode::Char('w')) => self.run_action(Action::Wrap),
                 ('g', KeyCode::Char('g')) => match self.focus {
                     Focus::Outline => self.cursor = 0,
                     Focus::Reading => self.read_cursor = 0,
@@ -1783,6 +1788,10 @@ impl App {
                 self.clamp_cursor();
                 self.say(if self.hide_done { "done hidden" } else { "done shown" });
             }
+            Action::Wrap => {
+                self.wrap = !self.wrap;
+                self.say(if self.wrap { "long lines wrap" } else { "long lines are cut at the edge" });
+            }
             Action::RawMode => {
                 self.raw_mode = !self.raw_mode;
                 self.say(if self.raw_mode { "raw" } else { "styled" });
@@ -1915,7 +1924,7 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("n/N x t", "new sibling / child · done · task on/off"),
         ("J/K > < ~", "move · indent · outdent · heading ↔ bullet"),
         ("r y d p/P", "move to… · copy · delete · paste after / before"),
-        ("s za zd zr", "make block · archive · hide done · raw source"),
+        ("s za zd zr zw", "make block · archive · hide done · raw source · wrap lines"),
         ("/ : ?", "filter · command palette · this help"),
         ("u/U q", "undo / redo · quit (everything is always saved)"),
         ("Tab", "switch panes · in the text: [[ ]] headings, / search, o link"),

@@ -476,6 +476,11 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
                 let to = e.prev(to).unwrap_or(to);
                 e.set_cursor(to);
             }
+            // gj / gk: by screen row through wrapped lines
+            'j' | 'k' => {
+                let n = count.unwrap_or(1) as isize;
+                e.move_visual(if c == 'j' { n } else { -n });
+            }
             _ => e.vim.op = None,
         },
         'Z' => match c {
