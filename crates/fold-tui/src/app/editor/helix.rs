@@ -131,6 +131,11 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // a key that moves the cursor ends a run of typing: what is typed
+    // after it is its own undo step, as in the other keymaps
+    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
+        e.group = Group::None;
+    }
     match key.code {
         KeyCode::Esc => {
             e.mode = Mode::Normal;

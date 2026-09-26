@@ -958,3 +958,19 @@ fn replacing_characters_from_mid_line_into_a_block_title_keeps_line_owners() {
         assert_eq!(std::fs::read_to_string(&block).unwrap(), before, "{:?}", keymap);
     }
 }
+
+#[test]
+fn a_cursor_key_in_insert_mode_starts_a_new_undo_step() {
+    // Vim: what is typed before and after an arrow key, Home or End in
+    // insert mode is undone separately; Helix's insert mode does the same
+    for keymap in [fold_tui::app::EditKeys::Vim, fold_tui::app::EditKeys::Helix] {
+        for k in [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down, KeyCode::Home, KeyCode::End] {
+            let (d, mut app) = app_with("# A\n\nx\n");
+            app.set_edit_keys(keymap);
+            keys(&mut app, "ejjAone");
+            app.handle_key(KeyEvent::new(k, KeyModifiers::NONE));
+            keys(&mut app, "two⎋u:w⏎");
+            assert_eq!(root(&d), "# A\n\nxone\n", "{:?} {:?}", keymap, k);
+        }
+    }
+}

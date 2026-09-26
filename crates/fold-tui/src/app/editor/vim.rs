@@ -122,6 +122,11 @@ fn to_insert(e: &mut Editor) {
 
 fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // a key that moves the cursor ends a run of typing: what is typed
+    // after it is its own undo step, as in Vim
+    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
+        e.group = Group::None;
+    }
     match key.code {
         KeyCode::Esc => leave_insert(e),
         KeyCode::Char('c') | KeyCode::Char('[') if ctl => leave_insert(e),
