@@ -101,11 +101,7 @@ fn standalone_tree(text: &str) -> Tree {
         frontmatter_span: fm.as_ref().map(|f| f.span),
     };
     let pf = parse_file("m.md", text, 0, Some(block));
-    Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    }
+    Tree::new(vec![pf])
 }
 
 fn node_sig(t: &Tree, r: NRef) -> (String, Option<TaskState>, String) {
@@ -671,17 +667,14 @@ fn fresh_block_name(vault: &Vault, fname: &str, text: &str) -> String {
 /// the owner is embedded at the end of `root.md` with them right after it:
 /// placed alone, they would pair with whatever node happened to be last.
 fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> std::io::Result<()> {
-    let found = owner.and_then(|oid| {
-        vault.tree.files.iter().enumerate().find_map(|(fi, f)| {
-            f.nodes
-                .iter()
-                .find(|nd| nd.embed.as_ref() == Some(oid))
-                .map(|nd| {
-                    // the same form as the owner's embed (§4.7)
-                    let heading = (nd.kind == Kind::Section).then(|| nd.level.unwrap_or(1));
-                    (fi, nd.title_span.end.min(f.text.len()), nd.indent, heading)
-                })
-        })
+    // the embed the owner is stitched in at: a second one reads as broken
+    // (§6.2) and pairs with nothing
+    let found = owner.and_then(|oid| vault.tree.embed_of(oid)).map(|(fi, ni)| {
+        let f = &vault.tree.files[fi];
+        let nd = &f.nodes[ni];
+        // the same form as the owner's embed (§4.7)
+        let heading = (nd.kind == Kind::Section).then(|| nd.level.unwrap_or(1));
+        (fi, nd.title_span.end.min(f.text.len()), nd.indent, heading)
     });
     let mut insert = String::new();
     match found {

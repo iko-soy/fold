@@ -917,3 +917,93 @@ fn first_child_of_an_item_without_a_body_follows_its_title() {
     ops::capture_to(&mut v, "c", false, a).unwrap();
     assert_eq!(read(&d, "root.md"), "- a\n  - c\n  # S\n");
 }
+
+#[test]
+fn deleting_a_node_that_holds_a_second_embed_keeps_the_block_and_its_first_embed() {
+    // the second embed of S (under B/x) renders as broken (§6.2); deleting
+    // x, the node that holds it, must not trash S nor take its first
+    // embed, the one under A that S is stitched in at
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n- x\n  ![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let x = at(&v, &["B", "x"]);
+    ops::delete_subtree(&mut v, x).unwrap();
+    assert!(d.path().join("racfer~s.md").exists(), "the block was trashed");
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
+    // nor may clearing a done x, which removes it the same way
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n- [x] x\n  ![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let b = at(&v, &["B"]);
+    assert_eq!(ops::clear_done(&mut v, b).unwrap(), 1);
+    assert!(d.path().join("racfer~s.md").exists(), "the block was trashed");
+    assert_eq!(read(&d, "root.md"), format!("# A\n\n![[{}]]\n\n# B\n", ID_A));
+}
+
+#[test]
+fn deleting_the_node_that_holds_a_blocks_first_embed_leaves_its_second_embed() {
+    // deleting A trashes S, which A holds; the second embed of S, under
+    // B/x, is x's line, not S's own (§6.2), and stays where it is
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n\n# B\n\n- x\n  ![[{}]]\n", ID_A, ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n- S\n", ID_A))],
+    );
+    let a = at(&v, &["A"]);
+    ops::delete_subtree(&mut v, a).unwrap();
+    assert!(!d.path().join("racfer~s.md").exists(), "the block was not trashed");
+    assert_eq!(read(&d, "root.md"), format!("# B\n\n- x\n  ![[{}]]\n", ID_A));
+}
+
+#[test]
+fn a_block_embedded_twice_is_inlined_where_the_outline_shows_it() {
+    // X (embedded under A) embeds S, and root.md embeds S again under B.
+    // The outline (walk, and the TUI's rows) meets S under X first; the
+    // reading pane and editor (render) must inline S there too, not at the
+    // embed that happens to come first in file order
+    let (_d, v) = vault_files(
+        &format!("# A\n\n![[{ID_B}]]\n\n# B\n\n![[{ID_A}]]\n"),
+        &[
+            ("dozzod~x.md", &format!("---\nid: {ID_B}\n---\n\n- X\n  ![[{ID_A}]]\n")),
+            ("racfer~s.md", &format!("---\nid: {ID_A}\n---\n\n- S\n")),
+        ],
+    );
+    let mut walked = Vec::new();
+    v.tree.walk(v.tree.root, &mut |t, r| {
+        let n = t.node(r);
+        walked.push(if n.is_embed() { "(embed)".to_string() } else { n.title.clone() });
+    });
+    // B's embed of S is the second one met: it reads as broken (§6.2)
+    assert_eq!(walked, ["", "A", "X", "S", "B", "(embed)"]);
+    let x = at(&v, &["A", "X"]);
+    let r = fold_core::render::render(&v.tree, x, 1, true);
+    assert_eq!(r, "- X\n  - S\n");
+    let b = at(&v, &["B"]);
+    let r = fold_core::render::render(&v.tree, b, 1, true);
+    assert_eq!(r, format!("# B\n\n![[{ID_A}]]\n"));
+    // and the embed S is stitched in at, which promote and refile act
+    // beside (§4.7), is X's
+    let id = fold_core::Id::parse(ID_A).unwrap();
+    let e = v.tree.embed_of(&id).unwrap();
+    assert_eq!(v.tree.files[e.0].path, "dozzod~x.md");
+}
+
+#[test]
+fn a_block_an_orphan_embeds_too_is_inlined_where_the_root_reaches_it() {
+    // an orphan block file (embedded nowhere) that sorts before C also
+    // embeds S: S belongs where the root reaches it, under C, not at the
+    // orphan's embed, which nothing shows
+    const ID_O: &str = "lacnum-walbyn-dirlyn-havtyp";
+    let (_d, v) = vault_files(
+        &format!("# A\n\n![[{ID_B}]]\n"),
+        &[
+            ("bacwes~o.md", &format!("---\nid: {ID_O}\n---\n\n- O\n  ![[{ID_A}]]\n")),
+            ("dozzod~c.md", &format!("---\nid: {ID_B}\n---\n\n- C\n  ![[{ID_A}]]\n")),
+            ("racfer~s.md", &format!("---\nid: {ID_A}\n---\n\n- S\n")),
+        ],
+    );
+    let r = fold_core::render::render(&v.tree, v.tree.root, 1, true);
+    assert_eq!(r, "# A\n\n- C\n  - S\n");
+    assert!(v.find_by_path(&["A".into(), "C".into(), "S".into()]).is_some());
+}

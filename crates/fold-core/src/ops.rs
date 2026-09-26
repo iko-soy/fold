@@ -585,26 +585,26 @@ pub fn delete_subtree(vault: &mut Vault, r: NRef) -> std::io::Result<String> {
     }
     if n.is_block() || n.is_embed() {
         let target = if n.is_embed() { vault.tree.resolved_child(r) } else { r };
-        // a second embed of a block renders as broken (§6.2): the block,
-        // and the embed it is stitched in at, are not this line's
-        let duplicate = target != r && n.embed.as_ref().and_then(|id| vault.tree.embed_of(id)) != Some(r);
-        if n.is_embed() && (target == r || duplicate) {
-            // broken embed: just the line
+        if target == r && n.is_embed() {
+            // broken embed: just the line. So for a second embed of a
+            // block, which renders as broken (§6.2): the block, and the
+            // embed it is stitched in at, are not this line's
+            let duplicate = n.embed.as_ref().is_some_and(|id| vault.tree.block_by_id(id).is_some());
             let span = embed_line_span(&vault.tree, r);
             remove_span_with_separator(vault, r.0, span)?;
             return Ok(if duplicate { "duplicate embed removed" } else { "broken embed removed" }.into());
         }
+        // the block itself first: it leaves by its own embed
         let ids = nested_block_ids(vault, target);
         let path = vault.tree.node(target).block.as_ref().unwrap().path.clone();
-        for id in ids {
-            trash_block(vault, &id)?;
+        if let Some((own, nested)) = ids.split_first() {
+            trash_block(vault, own)?;
+            trash_nested(vault, nested)?;
         }
         return Ok(format!("block {:?} trashed", path));
     }
     let ids = plain_remove(vault, r)?;
-    for id in ids {
-        trash_block(vault, &id)?;
-    }
+    trash_nested(vault, &ids)?;
     Ok("subtree trashed".into())
 }
 
@@ -632,21 +632,27 @@ fn plain_remove(vault: &mut Vault, r: NRef) -> std::io::Result<Vec<Id>> {
     Ok(ids)
 }
 
-/// Remove a block's embed line (if it is still anywhere) and move its file to
-/// the trash.
+/// Remove the embed line a block is stitched in at (if it is still
+/// anywhere) and move its file to the trash.
 fn trash_block(vault: &mut Vault, id: &Id) -> std::io::Result<()> {
-    let embed = vault.tree.files.iter().enumerate().find_map(|(fi, f)| {
-        f.nodes
-            .iter()
-            .position(|nd| nd.embed.as_ref() == Some(id))
-            .map(|ni| (fi, ni))
-    });
-    if let Some(e) = embed {
+    if let Some(e) = vault.tree.embed_of(id) {
         let span = embed_line_span(&vault.tree, e);
         remove_span_with_separator(vault, e.0, span)?;
     }
     if let Some(b) = vault.tree.block_by_id(id) {
         vault.trash_file(b.0)?;
+    }
+    Ok(())
+}
+
+/// Move the files of blocks nested in a removed subtree to the trash. Their
+/// embeds went with the lines and files that held them: an embed of one
+/// still elsewhere is a second embed, a line of its own (§6.2), and stays.
+fn trash_nested(vault: &mut Vault, ids: &[Id]) -> std::io::Result<()> {
+    for id in ids {
+        if let Some(b) = vault.tree.block_by_id(id) {
+            vault.trash_file(b.0)?;
+        }
     }
     Ok(())
 }
@@ -748,11 +754,7 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
         frontmatter_span: None,
     };
     let pf = crate::parse::parse_file("clip.md", text, 0, Some(block));
-    let tree = crate::tree::Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    };
+    let tree = crate::tree::Tree::new(vec![pf]);
     let mut out = String::new();
     let kids = tree.resolved_children(tree.root);
     for (i, k) in kids.iter().enumerate() {
@@ -1208,15 +1210,17 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
     // plain spans: per file, from the end backwards, so earlier spans stay valid
     plain.sort_by_key(|&(f, n)| (f, std::cmp::Reverse(vault.tree.files[f].nodes[n].span.start)));
     let mut done = 0;
+    let mut nested: Vec<Id> = Vec::new();
     for r in plain {
         let ids = plain_remove(vault, r)?;
-        blocks.extend(ids);
+        nested.extend(ids);
         done += 1;
     }
     let n_block_tops = tops.len() - done;
     for id in blocks {
         trash_block(vault, &id)?;
     }
+    trash_nested(vault, &nested)?;
     Ok(done + n_block_tops)
 }
 
@@ -1226,13 +1230,7 @@ fn resolved_parent(tree: &crate::tree::Tree, r: NRef) -> Option<NRef> {
     let p = tree.node(r).parent?;
     let pr = (r.0, p);
     if tree.node(pr).kind == Kind::Root && r.0 != tree.root.0 {
-        let id = tree.node(r).block.as_ref()?.id.clone()?;
-        tree.files.iter().enumerate().find_map(|(fi, f)| {
-            f.nodes
-                .iter()
-                .position(|nd| nd.embed.as_ref() == Some(&id))
-                .map(|ni| (fi, ni))
-        })
+        tree.embed_of(tree.node(r).block.as_ref()?.id.as_ref()?)
     } else if tree.node(pr).kind == Kind::Root {
         None
     } else {

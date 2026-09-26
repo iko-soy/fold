@@ -36,11 +36,7 @@ impl Vault {
         }
         let mut v = Vault {
             dir: dir.to_path_buf(),
-            tree: Tree {
-                files: Vec::new(),
-                root: (0, 0),
-                blocks: Vec::new(),
-            },
+            tree: Tree::new(Vec::new()),
         };
         v.reload()?;
         Ok(v)
@@ -100,25 +96,7 @@ impl Vault {
         }
 
         // Stitch: collect blocks, resolve embed edges (§4.7).
-        let mut blocks: Vec<(NRef, Id)> = Vec::new();
-        for (fi, f) in files.iter().enumerate() {
-            if fi == 0 {
-                continue;
-            }
-            if let Some(&first) = f.nodes[f.root_node].children.first() {
-                if let Some(b) = &f.nodes[first].block {
-                    if let Some(id) = &b.id {
-                        blocks.push(((fi, first), id.clone()));
-                    }
-                }
-            }
-        }
-
-        self.tree = Tree {
-            files,
-            root: (0, 0),
-            blocks,
-        };
+        self.tree = Tree::new(files);
         Ok(())
     }
 
@@ -238,26 +216,8 @@ impl Vault {
             })
         };
         self.tree.files[file] = parse_file(&path, text, file, block);
-        self.restitch();
+        self.tree.restitch();
         Ok(())
-    }
-
-    /// Rebuild the block list and edge spans after a re-parse.
-    fn restitch(&mut self) {
-        let mut blocks: Vec<(NRef, Id)> = Vec::new();
-        for (fi, f) in self.tree.files.iter().enumerate() {
-            if fi == 0 {
-                continue;
-            }
-            if let Some(&first) = f.nodes[f.root_node].children.first() {
-                if let Some(b) = &f.nodes[first].block {
-                    if let Some(id) = &b.id {
-                        blocks.push(((fi, first), id.clone()));
-                    }
-                }
-            }
-        }
-        self.tree.blocks = blocks;
     }
 
     /// Shortest prefix of `id` not already used by another file (§6.4).

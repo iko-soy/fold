@@ -622,3 +622,37 @@ fn crlf_root_md_keeps_its_blank_lines_under_fix() {
         assert_eq!(text, after, "{:?}", before);
     }
 }
+
+#[test]
+fn sync_conflict_on_a_block_embedded_twice_pairs_where_it_is_shown() {
+    // t is shown under X, where the walk from the root meets it first; its
+    // second embed, in root.md under B, comes first in file order and reads
+    // as broken (§6.2). The conflict block goes after t's own embed, so it
+    // pairs with t (§12.4), not with the broken line
+    let x = "dozzod-binwes-talsun-worbec";
+    let dir = tempfile::tempdir().unwrap();
+    let root = format!("# A\n\n![[{}]]\n\n# B\n\n![[{}]]\n", x, BID);
+    std::fs::write(dir.path().join("root.md"), &root).unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~x.md"),
+        format!("---\nid: {}\n---\n\n- X\n  ![[{}]]\n", x, BID),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.md"),
+        format!("---\nid: {}\n---\n\n- [ ] t\n", BID),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("racfer~t.sync-conflict-20260912-100000-phone.md"),
+        format!("---\nid: {}\n---\n\n- [x] t\n", BID),
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let pairs = merge::conflict_pairs(&v);
+    assert_eq!(pairs.len(), 1);
+    let ours = v.tree.node(pairs[0].0).block.as_ref().and_then(|b| b.id.as_ref());
+    assert_eq!(ours.map(|i| i.to_string()), Some(BID.to_string()));
+    assert_eq!(std::fs::read_to_string(dir.path().join("root.md")).unwrap(), root);
+}

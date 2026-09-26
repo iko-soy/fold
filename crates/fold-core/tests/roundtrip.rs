@@ -13,11 +13,7 @@ fn tree_of(text: &str) -> Tree {
     };
     let pf = parse_file("root.md", text, 0, Some(block));
     assert!(pf.diagnostics.is_empty(), "diags: {:?}", pf.diagnostics);
-    Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    }
+    Tree::new(vec![pf])
 }
 
 #[test]
@@ -181,7 +177,7 @@ fn block_file_tree() -> Tree {
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
     let id = Id::parse("dozzod-binwes-talsun-worbec").unwrap();
     let block = Block {
-        id: Some(id.clone()),
+        id: Some(id),
         path: "dozzod~zfs-layout.md".into(),
         props: fm.props,
         frontmatter_raw: fm.raw,
@@ -189,11 +185,7 @@ fn block_file_tree() -> Tree {
     };
     let bf = parse_file("dozzod~zfs-layout.md", block_text, 1, Some(block));
     assert!(bf.diagnostics.is_empty(), "diags: {:?}", bf.diagnostics);
-    Tree {
-        root: (0, 0),
-        blocks: vec![((1, bf.nodes[0].children[0]), id)],
-        files: vec![root, bf],
-    }
+    Tree::new(vec![root, bf])
 }
 
 #[test]
@@ -251,11 +243,7 @@ fn bullet_root_block_file() {
     assert_eq!(n.kind, Kind::Item);
     assert_eq!(n.title, "Order new switch");
     assert_eq!(n.task, Some(TaskState::Open));
-    let t = Tree {
-        files: vec![pf],
-        root: (0, 0),
-        blocks: vec![],
-    };
+    let t = Tree::new(vec![pf]);
     let r = render(&t, (0, root_node), 1, false);
     assert_eq!(r, text);
 }
@@ -274,18 +262,14 @@ fn tree_with_block(root_text: &str, block_text: &str, block_path: &str) -> Tree 
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
     let id = Id::parse(fm.props.get("id").unwrap()).unwrap();
     let block = Block {
-        id: Some(id.clone()),
+        id: Some(id),
         path: block_path.into(),
         props: fm.props,
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
     };
     let bf = parse_file(block_path, block_text, 1, Some(block));
-    Tree {
-        root: (0, 0),
-        blocks: vec![((1, bf.nodes[0].children[0]), id)],
-        files: vec![root, bf],
-    }
+    Tree::new(vec![root, bf])
 }
 
 const SPEC_ROOT: &str = "# Homelab\n\nTwo boxes in the closet, one at Hetzner.\n\n## NAS\n\n![[dozzod-binwes-talsun-worbec]]\n\n## Networking\n\n- [ ] Replace the flaky switch\n![[racfer-hattes-mislup-nodrys]]\n\n# Inbox\n\n## 2026-09-10\n\n- Talked to Anya about the venue.\n  ### Options\n  Warehouse on Ligovsky, or the old bakery. Both need a licence.\n- [x] Send the deposit\n";
@@ -429,11 +413,7 @@ fn empty_title_nodes_parse_everywhere() {
     ];
     for (text, kids) in cases {
         let pf = parse_file("root.md", text, 0, None);
-        let t = Tree {
-            files: vec![pf],
-            root: (0, 0),
-            blocks: vec![],
-        };
+        let t = Tree::new(vec![pf]);
         let a = t.resolved_children(t.root)[0];
         let ch = t.resolved_children(a);
         assert_eq!(ch.len(), *kids, "{:?}", text);

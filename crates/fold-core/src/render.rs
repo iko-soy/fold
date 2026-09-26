@@ -4,10 +4,8 @@
 //! editing buffer (§5.2) all consume it, so what the user reads, what they
 //! edit and what splice writes back are the same text.
 
-use crate::ident::Id;
 use crate::parse::{Content, Kind, Span, TaskState};
 use crate::tree::{NRef, Tree};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -88,7 +86,6 @@ pub fn render_lines(tree: &Tree, node: NRef, base: usize, resolve_blocks: bool) 
         resolve: resolve_blocks,
         out: &mut out,
         seen: Vec::new(),
-        embeds: None,
     };
     w.node(node, dlevel, 0, node, node);
     while out.last().map(|l| l.kind == LineKind::Blank) == Some(true) {
@@ -102,8 +99,6 @@ struct Walk<'a> {
     resolve: bool,
     out: &'a mut Vec<RLine>,
     seen: Vec<NRef>,
-    /// `Tree::embeds`, built at the first embed resolved.
-    embeds: Option<HashMap<&'a Id, NRef>>,
 }
 
 impl Walk<'_> {
@@ -159,13 +154,11 @@ impl Walk<'_> {
         // parent's file (an embed's target sits at the embed's position).
         let cindent = dindent + tree.indent(c).saturating_sub(tree.indent(r));
         if self.resolve && cn.is_embed() {
-            let t = tree.resolved_child(c);
-            // only the block's own embed inlines it; a second embed of the
+            // only the block's own embed resolves; a second embed of the
             // id renders as broken (§6.2), so the block's lines appear, and
             // are owned, once whatever the zoom
-            let embeds = self.embeds.get_or_insert_with(|| tree.embeds());
-            let canonical = cn.embed.as_ref().and_then(|id| embeds.get(id)) == Some(&c);
-            if t != c && canonical {
+            let t = tree.resolved_child(c);
+            if t != c {
                 // A section at this position is one below the parent; an
                 // item shares its enclosing section's level.
                 let tlevel = if tree.node(t).kind == Kind::Section

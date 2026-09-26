@@ -3,6 +3,7 @@
 use crate::ident::Id;
 use crate::parse::{Kind, Node, ParsedFile, TaskState};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// The logical tree formed by all parsed files stitched together.
 pub struct Tree {
@@ -11,12 +12,47 @@ pub struct Tree {
     pub root: (usize, usize),
     /// (file, node) → id for every block.
     pub blocks: Vec<((usize, usize), Id)>,
+    /// `embeds`, built at first use; `restitch` drops it.
+    embed_index: OnceLock<HashMap<Id, NRef>>,
 }
 
 /// A global node reference.
 pub type NRef = (usize, usize);
 
 impl Tree {
+    /// Stitch parsed files, `root.md` first, into one tree (§4.7).
+    pub fn new(files: Vec<ParsedFile>) -> Tree {
+        let mut t = Tree {
+            files,
+            root: (0, 0),
+            blocks: Vec::new(),
+            embed_index: OnceLock::new(),
+        };
+        t.restitch();
+        t
+    }
+
+    /// Rebuild the block list, and what is derived from the embeds, after
+    /// a file was replaced: every block is the first node of its own file
+    /// (§4.9).
+    pub fn restitch(&mut self) {
+        let mut blocks: Vec<(NRef, Id)> = Vec::new();
+        for (fi, f) in self.files.iter().enumerate() {
+            if fi == 0 {
+                continue;
+            }
+            if let Some(&first) = f.nodes[f.root_node].children.first() {
+                if let Some(b) = &f.nodes[first].block {
+                    if let Some(id) = &b.id {
+                        blocks.push(((fi, first), id.clone()));
+                    }
+                }
+            }
+        }
+        self.blocks = blocks;
+        self.embed_index = OnceLock::new();
+    }
+
     pub fn node(&self, r: NRef) -> &Node {
         &self.files[r.0].nodes[r.1]
     }
@@ -118,40 +154,61 @@ impl Tree {
         segs
     }
 
-    /// Resolve an embed node to the block it references (one level).
+    /// Resolve an embed node to the block it references (one level). Only
+    /// the block's own embed (`embed_of`) resolves: any other embed of its
+    /// id is left as it is and reads as broken everywhere, as §6.2 says,
+    /// so walk, render, the outline and every verb meet a block once.
     pub fn resolved_child(&self, r: NRef) -> NRef {
         let n = self.node(r);
         if let Some(id) = &n.embed {
             if let Some(target) = self.block_by_id(id) {
-                return target;
+                if self.embed_of(id) == Some(r) {
+                    return target;
+                }
             }
         }
         r
     }
 
-    /// The embed node that references a block (§4.7), if any.
+    /// The embed a block is stitched in at (§4.7), if any: see `embeds`.
     pub fn embed_of(&self, id: &Id) -> Option<NRef> {
-        self.files.iter().enumerate().find_map(|(fi, f)| {
-            f.nodes
-                .iter()
-                .position(|nd| nd.embed.as_ref() == Some(id))
-                .map(|ni| (fi, ni))
-        })
+        self.embeds().get(id).copied()
     }
 
-    /// `embed_of` for every id at once: each id's first embed, the one its
-    /// block is stitched in at. Any later embed of the id is a duplicate
-    /// and renders as broken (§6.2).
-    pub fn embeds(&self) -> HashMap<&Id, NRef> {
-        let mut out = HashMap::new();
-        for (fi, f) in self.files.iter().enumerate() {
-            for (ni, nd) in f.nodes.iter().enumerate() {
-                if let Some(id) = &nd.embed {
-                    out.entry(id).or_insert((fi, ni));
+    /// `embed_of` for every id at once: the embed each block is stitched in
+    /// at, the first of its id met in tree order from the root, as walk
+    /// and the outline meet them. Any other embed of the id is a duplicate
+    /// and reads as broken (§6.2). An id embedded only in files the root
+    /// does not reach (an orphan block, a cycle) keeps its first embed in
+    /// file order.
+    pub fn embeds(&self) -> &HashMap<Id, NRef> {
+        self.embed_index.get_or_init(|| {
+            let mut out = HashMap::new();
+            if self.files.is_empty() {
+                return out;
+            }
+            // pre-order, entering each block at its first embed only, so
+            // the walk ends even through a cycle
+            let mut stack = vec![self.root];
+            while let Some(r) = stack.pop() {
+                let mut at = r;
+                if let Some(id) = &self.node(r).embed {
+                    if !out.contains_key(id) {
+                        out.insert(id.clone(), r);
+                        at = self.block_by_id(id).unwrap_or(r);
+                    }
+                }
+                stack.extend(self.node(at).children.iter().rev().map(|&c| (at.0, c)));
+            }
+            for (fi, f) in self.files.iter().enumerate() {
+                for (ni, nd) in f.nodes.iter().enumerate() {
+                    if let Some(id) = &nd.embed {
+                        out.entry(id.clone()).or_insert((fi, ni));
+                    }
                 }
             }
-        }
-        out
+            out
+        })
     }
 
     pub fn block_by_id(&self, id: &Id) -> Option<NRef> {
@@ -161,20 +218,13 @@ impl Tree {
             .map(|(t, _)| *t)
     }
 
-    /// Direct children of a node with embeds resolved (broken embeds kept as-is).
+    /// Direct children of a node with embeds resolved (broken embeds, and
+    /// second embeds of a block, kept as-is).
     pub fn resolved_children(&self, r: NRef) -> Vec<NRef> {
         self.node(r)
             .children
             .iter()
-            .map(|&c| {
-                let cr = (r.0, c);
-                let rc = self.resolved_child(cr);
-                if rc != cr {
-                    rc
-                } else {
-                    cr
-                }
-            })
+            .map(|&c| self.resolved_child((r.0, c)))
             .collect()
     }
 
