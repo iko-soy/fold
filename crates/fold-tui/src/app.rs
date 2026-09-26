@@ -1141,9 +1141,13 @@ impl App {
         }
     }
 
-    /// Put the cursor on a node, unfolding and zooming out as needed.
+    /// Put the cursor on a node, unfolding and zooming out as needed. The
+    /// ancestors unfolded are its outline ancestors, through the embeds
+    /// that stitch in the blocks it sits in, not only those in its file.
     fn reveal(&mut self, r: NRef) {
-        for a in self.vault.tree.ancestors(r) {
+        let mut chain = self.chain(r);
+        chain.pop();
+        for a in chain {
             let k = self.vault.key_of(a);
             self.folded.retain(|f| f != &k);
         }

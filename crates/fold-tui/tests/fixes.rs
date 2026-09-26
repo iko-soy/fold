@@ -362,3 +362,21 @@ fn new_sibling_of_the_zoomed_node_opens_the_new_node() {
     assert_eq!(root(&d), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n  - X\n");
     assert_eq!(current_title(&app), "X");
 }
+
+#[test]
+fn filter_pick_inside_a_block_unfolds_the_embedding_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~zfs.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- ZFS\n  - snapshots\n",
+    )
+    .unwrap();
+    let mut app = App::new(dir.path()).unwrap();
+    assert_eq!(current_title(&app), "Homelab");
+    press(&mut app, "h"); // fold Homelab
+    press(&mut app, "/snapshots");
+    app.handle_key(key(KeyCode::Enter));
+    // §10.5: the pick unfolds its ancestors (through the embed) and selects it
+    assert_eq!(current_title(&app), "snapshots");
+}
