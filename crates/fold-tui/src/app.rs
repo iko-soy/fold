@@ -1196,11 +1196,6 @@ impl App {
                         Ok(()) => self.say("kept ours"),
                         Err(e) => self.say(format!("error: {}", e)),
                     }
-                    self.conflict_idx = self.conflict_idx.saturating_sub(0).min(
-                        fold_core::merge::conflict_pairs(&self.vault)
-                            .len()
-                            .saturating_sub(1),
-                    );
                 }
             }
             KeyCode::Char('t') => {
@@ -1228,6 +1223,9 @@ impl App {
             }
             _ => {}
         }
+        // a resolved pair leaves the list: stay on the pair now shown
+        let n = fold_core::merge::conflict_pairs(&self.vault).len();
+        self.conflict_idx = self.conflict_idx.min(n.saturating_sub(1));
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {

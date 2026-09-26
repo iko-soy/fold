@@ -177,3 +177,30 @@ fn startup_merge_enters_conflict_view() {
     }
     assert_eq!(app.mode_pub(), "conflict");
 }
+
+#[test]
+fn conflict_keys_act_on_the_shown_pair_after_resolving_the_last() {
+    let pairs = |app: &mut App| fold_core::merge::conflict_pairs(app.vault_mut()).len();
+    for resolve in ['o', 't', 'b'] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.md"), "# A\n\n- [ ] t1\n- [ ] t2\n").unwrap();
+        std::fs::write(
+            dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+            "# A\n\n- [x] t1\n- [x] t2\n",
+        )
+        .unwrap();
+        let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
+        fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+        drop(v);
+        let mut app = App::new(dir.path()).unwrap();
+        assert_eq!(pairs(&mut app), 2);
+        app.enter_conflict_view();
+        // n: pair 2 of 2; resolving it leaves "Conflict 1 of 1" on screen
+        app.key_conflict_pub(key(KeyCode::Char('n')));
+        app.key_conflict_pub(key(KeyCode::Char(resolve)));
+        assert_eq!(pairs(&mut app), 1, "after {}", resolve);
+        // §10.7: o acts on the pair that is shown
+        app.key_conflict_pub(key(KeyCode::Char('o')));
+        assert_eq!(pairs(&mut app), 0, "o after {} did nothing", resolve);
+    }
+}
