@@ -1115,3 +1115,21 @@ fn a_title_of_dashes_is_not_respelled_or_unchecked_into_a_thematic_break() {
     ops::toggle_taskness(&mut v, s).unwrap();
     assert_eq!(read(&d, "root.md"), "# A\n\n## ---\n");
 }
+
+#[test]
+fn clearing_a_done_block_trashes_the_blocks_embedded_in_it() {
+    // T is embedded in S's file only: clearing a done S trashes T too, as
+    // deleting S does (§11.5), instead of leaving it embedded nowhere
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{}]]\n- open\n", ID_A),
+        &[
+            ("racfer~s.md", &format!("---\nid: {}\n---\n\n- [x] S\n  ![[{}]]\n", ID_A, ID_B)),
+            ("dozzod~t.md", &format!("---\nid: {}\n---\n\n- T\n", ID_B)),
+        ],
+    );
+    let a = at(&v, &["A"]);
+    assert_eq!(ops::clear_done(&mut v, a).unwrap(), 1);
+    assert!(!d.path().join("racfer~s.md").exists(), "S was not trashed");
+    assert!(!d.path().join("dozzod~t.md").exists(), "T was left embedded nowhere");
+    assert_eq!(read(&d, "root.md"), "# A\n\n- open\n");
+}

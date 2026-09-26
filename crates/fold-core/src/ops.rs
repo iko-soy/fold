@@ -1232,17 +1232,23 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
         .collect();
     let mut blocks: Vec<Id> = Vec::new();
     let mut plain: Vec<NRef> = Vec::new();
+    let mut nested: Vec<Id> = Vec::new();
     for &r in &tops {
         let n = vault.tree.node(r);
         match n.block.as_ref().and_then(|b| b.id.clone()) {
-            Some(id) => blocks.push(id),
+            Some(id) => {
+                // the block leaves by its own embed; blocks embedded in its
+                // file go to the trash with it, as delete_subtree sends them
+                let ids = nested_block_ids(vault, r);
+                nested.extend(ids.into_iter().filter(|i| *i != id));
+                blocks.push(id);
+            }
             None => plain.push(r),
         }
     }
     // plain spans: per file, from the end backwards, so earlier spans stay valid
     plain.sort_by_key(|&(f, n)| (f, std::cmp::Reverse(vault.tree.files[f].nodes[n].span.start)));
     let mut done = 0;
-    let mut nested: Vec<Id> = Vec::new();
     for r in plain {
         let ids = plain_remove(vault, r)?;
         nested.extend(ids);
