@@ -781,3 +781,34 @@ fn a_node_placed_before_a_sibling_written_deeper_keeps_it_a_sibling() {
     assert_eq!(others(&parents(&v), "c"), before, "{}", root_text(&v));
     assert!(parents(&v).contains(&("c".into(), "P".into())), "{}", root_text(&v));
 }
+
+#[test]
+fn making_a_block_after_a_shallower_sibling_written_deeper_keeps_the_next_sibling() {
+    // Notes is written with a tab (§4.2: accepted on read), Meeting and
+    // Followup at the app's two spaces: all three are children of Project.
+    // Notes' shallower level says nothing about Meeting's embed, which sits
+    // at a smaller indent; clamped to it, the embed takes Followup in.
+    let (_d, mut v) = vault_with("## S\n\n- Project\n\t# Notes\n  ### Meeting\n  ### Followup\n");
+    let before = parents(&v);
+    assert!(before.contains(&("Followup".into(), "Project".into())));
+    let m = at(&v, "S/Project/Meeting");
+    ops::make_block(&mut v, m).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+}
+
+#[test]
+fn a_section_placed_after_a_shallower_sibling_written_deeper_keeps_the_next_sibling() {
+    // the same for a section pasted between Notes and Meeting, or after
+    // Notes when it is Project's last child: Notes, closed by indentation,
+    // bounds neither
+    let (_d, mut v) = vault_with("## S\n\n- Project\n\t# Notes\n  ### Meeting\n  ### Followup\n");
+    let before = parents(&v);
+    let notes = at(&v, "S/Project/Notes");
+    ops::paste(&mut v, notes, "# X\n", true).unwrap();
+    assert_eq!(others(&parents(&v), "X"), before, "{}", root_text(&v));
+    assert!(parents(&v).contains(&("X".into(), "Project".into())), "{}", root_text(&v));
+    let (_d, mut v) = vault_with("## S\n\n- Project\n  ### Meeting\n\t# Notes\n");
+    let notes = at(&v, "S/Project/Notes");
+    ops::paste(&mut v, notes, "# X\n", true).unwrap();
+    assert!(root_text(&v).ends_with("\t# Notes\n\n  ### X\n"), "{}", root_text(&v));
+}

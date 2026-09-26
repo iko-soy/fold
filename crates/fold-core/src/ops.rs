@@ -1015,6 +1015,11 @@ fn level_among(tree: &crate::tree::Tree, prev: Option<NRef>, next: Option<NRef>,
     let Some(first) = tops.iter().map(|&c| &pf.nodes[c]).find(|n| n.kind == Kind::Section) else {
         return doc.to_string();
     };
+    // indentation closes a section before its level does (§4.2): a sibling
+    // written deeper than the sections, before them, or shallower, after
+    // them, is no parent or child of theirs, whatever its level
+    let most = most.filter(|_| prev.is_some_and(|p| tree.node(p).indent <= first.indent));
+    let least = least.filter(|_| next.is_some_and(|k| tree.node(k).indent >= first.indent));
     let have = tops.last().and_then(|&c| pf.nodes[c].level).unwrap_or(1);
     let want = most.map_or(have, |m| have.min(m)).max(least.unwrap_or(1));
     if want == have {
@@ -1110,15 +1115,15 @@ fn place(
         text = format!("{}{}", &text[..start], &text[end..]);
         pos = after_removal(pos, start, end);
     }
-    let prev = idx.checked_sub(1).map(|i| kids[i]);
-    let doc = level_among(tree, prev, next, doc);
     // before a sibling written deeper than the node (tab or 4-space
     // nesting is read, §4.2), the node goes at that sibling's indent: any
     // shallower, the sibling would parse as its child
-    let doc = match (next.map(|k| tree.node(k).indent), top_indent(&doc)) {
-        (Some(want), Some(have)) if want > have => shift_lines(&doc, 0, (want - have) as isize),
-        _ => doc,
+    let doc = match (next.map(|k| tree.node(k).indent), top_indent(doc)) {
+        (Some(want), Some(have)) if want > have => shift_lines(doc, 0, (want - have) as isize),
+        _ => doc.to_string(),
     };
+    let prev = idx.checked_sub(1).map(|i| kids[i]);
+    let doc = level_among(tree, prev, next, &doc);
     let body = doc.trim_end_matches('\n');
     let insertion = match next_kind {
         Some(nk) => {
@@ -1277,17 +1282,18 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     // §4.7), keeping the blank lines that separated it from what follows
     let span = n.span;
     let indent = " ".repeat(n.indent);
-    // at its level, but no deeper than the sibling section before it as
-    // written, which would take the embed as its child
-    let prev = n.parent.and_then(|p| {
-        let kids = &vault.tree.files[file].nodes[p].children;
-        let i = kids.iter().position(|&c| c == r.1)?;
-        i.checked_sub(1).map(|i| (file, kids[i]))
-    });
-    let level = vault.tree.level(r);
-    let level = written_level(&vault.tree, prev).map_or(level, |w| level.min(w));
+    // at its level, but kept a sibling of the sections around it as they
+    // are written: no deeper than the one before it, which would take the
+    // embed as its child, nor shallower than the one after it
+    let kids = n.parent.map(|p| vault.tree.raw_children((file, p))).unwrap_or_default();
+    let at = kids.iter().position(|&c| c == r);
+    let prev = at.and_then(|i| i.checked_sub(1)).map(|i| kids[i]);
+    let next = at.and_then(|i| kids.get(i + 1).copied());
     let mut embed = match n.kind {
-        Kind::Section => format!("{}{} ![[{}]]\n", indent, "#".repeat(level), id),
+        Kind::Section => {
+            let line = format!("{}{} ![[{}]]\n", indent, "#".repeat(vault.tree.level(r)), id);
+            level_among(&vault.tree, prev, next, &line)
+        }
         _ => format!("{}![[{}]]\n", indent, id),
     };
     let old = span.text(&vault.tree.files[file].text);
