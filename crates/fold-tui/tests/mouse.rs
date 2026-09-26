@@ -405,3 +405,74 @@ fn a_keymap_chosen_by_flag_is_not_remembered() {
     app.set_edit_keys(EditKeys::Helix);
     assert_eq!(app.view().keys, Some(EditKeys::Helix));
 }
+
+#[test]
+fn clicking_a_checkbox_while_editing_keeps_the_typed_text() {
+    // §10.6: any outline verb saves the editor first; the outline's ☐ stays
+    // drawn and clickable beside the editor
+    let (d, mut app) = app_with("# A\n\nbody\n\n- [ ] t\n");
+    typing(&mut app, "e");
+    assert_eq!(app.mode_pub(), "edit");
+    for k in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        app.handle_key(KeyEvent::new(k, KeyModifiers::NONE));
+    }
+    typing(&mut app, "!");
+    click(&mut app, Hit::Check(1));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\nbody!\n\n- [x] t\n");
+}
+
+#[test]
+fn a_menu_verb_while_editing_saves_the_editor_and_keeps_editing() {
+    // the node menu's Delete on another node, then more typing: both saved
+    let (d, mut app) = app_with("# A\n\nbody\n\n# B\n\n# C\n");
+    typing(&mut app, "e");
+    for k in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        app.handle_key(KeyEvent::new(k, KeyModifiers::NONE));
+    }
+    typing(&mut app, "!");
+    right_click(&mut app, Hit::Row(1));
+    click(&mut app, Hit::MenuItem(fold_tui::app::node_menu_index(Action::Delete)));
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(root(&d), "# A\n\nbody!\n\n# C\n");
+    typing(&mut app, "?");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\nbody!?\n\n# C\n");
+}
+
+#[test]
+fn a_drop_while_editing_saves_the_editor_first() {
+    // dragging a row is a verb too (§10.1, §10.6)
+    let (d, mut app) = app_with("# A\n\nbody\n\n# B\n\n- b1\n");
+    typing(&mut app, "e");
+    for k in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        app.handle_key(KeyEvent::new(k, KeyModifiers::NONE));
+    }
+    typing(&mut app, "!");
+    // rows: A, B, b1 — drag b1 onto A's title
+    draw(&mut app);
+    let from = app.hit_pos(Hit::Row(2)).unwrap();
+    let onto = app.hit_pos(Hit::Row(0)).unwrap();
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), onto));
+    draw(&mut app);
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), onto));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(root(&d), "# A\n\nbody!\n\n- b1\n\n# B\n");
+}
+
+#[test]
+fn a_checkbox_click_toggles_the_row_clicked_when_the_save_first_adds_rows() {
+    // unsaved text adds a task above `t`; saving it first shifts the rows,
+    // and the click still toggles `t`
+    let (d, mut app) = app_with("# A\n\n- [ ] t\n");
+    typing(&mut app, "e");
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    typing(&mut app, "- [ ] n");
+    click(&mut app, Hit::Check(1));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(root(&d), "# A\n- [ ] n\n\n- [x] t\n");
+}

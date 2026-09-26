@@ -101,7 +101,7 @@ impl App {
             Hit::Check(i) => {
                 self.focus_pane(Focus::Outline);
                 self.cursor = i;
-                self.act_toggle_task();
+                self.run_action(super::Action::ToggleDone);
             }
             Hit::RowMenu(i) => {
                 self.cursor = i;
@@ -148,7 +148,7 @@ impl App {
             Hit::PickRow(i) => {
                 if let Some(mut p) = self.prompt.take() {
                     p.sel = i;
-                    self.accept_prompt(p);
+                    self.accept_prompt_saving_editor(p);
                 }
             }
             Hit::FilterRow(i) => self.pick_filter(i),
@@ -238,7 +238,14 @@ impl App {
         }
         let rows = self.rows();
         let (Some(from), Some(to)) = (press.row.and_then(|i| rows.get(i)), rows.get(j)) else { return };
-        let (r, target) = (from.nref, to.nref);
+        // a drop is an outline verb: the editor saves first (§10.6), which
+        // re-parses what it wrote, so both nodes are found again by key
+        let keys = (self.vault.key_of(from.nref), self.vault.key_of(to.nref));
+        let edit = self.editor_before_write("outline verb");
+        let (Some(r), Some(target)) = (self.find_exact(&keys.0), self.find_exact(&keys.1)) else {
+            self.say("can't move: the outline changed");
+            return;
+        };
         let title = self.vault.tree.node(self.vault.tree.resolved_child(r)).title.clone();
         let target_key = self.vault.key_of(self.vault.tree.resolved_child(target));
         self.push_undo("move");
@@ -261,6 +268,7 @@ impl App {
             }
             Err(e) => self.say(format!("can't move: {}", e)),
         }
+        self.editor_after_write(edit);
     }
 
     /// A node's siblings (itself included) in the resolved tree.

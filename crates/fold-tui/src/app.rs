@@ -447,6 +447,12 @@ impl App {
         }
     }
 
+    /// The node a key names, only if it is that very node: no falling back
+    /// to the deepest step that still exists.
+    fn find_exact(&self, key: &NodeKey) -> Option<NRef> {
+        self.vault.find_by_key(key).filter(|&r| self.vault.key_of(r) == *key)
+    }
+
     fn is_folded(&self, r: NRef) -> bool {
         self.folded.contains(&self.vault.key_of(r))
     }
@@ -834,9 +840,15 @@ impl App {
         let Some(mut ed) = self.editor.take() else { return true };
         self.settle_undo();
         let snap = ops::Snapshot::take(&self.vault, "edit");
+        let cursor = self.current().map(|r| self.vault.key_of(r));
         let res = ed.buf.save_all(&mut self.vault);
         // blocks written before a refusal are an op too
         self.record_undo(snap);
+        // the save re-parsed what it wrote: the outline cursor stays on its
+        // node, so a verb that saves the editor first acts on the row clicked
+        if let Some(r) = cursor.and_then(|k| self.find_exact(&k)) {
+            self.move_cursor_to(r);
+        }
         let saved = match res {
             Ok(n) => {
                 if n > 0 {
@@ -1046,12 +1058,14 @@ impl App {
             self.say("read-only line (preserved verbatim)");
             return;
         }
+        let edit = self.editor_before_write("outline verb");
         self.push_undo("delete property");
         match ops::set_frontmatter_key(&mut self.vault, t.0, &k, None) {
             Ok(()) => self.say(format!("{} removed", k)),
             Err(e) => self.say(format!("error: {}", e)),
         }
         self.reopen_props();
+        self.editor_after_write(edit);
     }
 
     pub fn key_props(&mut self, key: KeyEvent) {
@@ -1099,7 +1113,7 @@ impl App {
                 }
                 self.prompt = Some(p);
             }
-            KeyCode::Enter => self.accept_prompt(p),
+            KeyCode::Enter => self.accept_prompt_saving_editor(p),
             KeyCode::Backspace => {
                 p.text.pop();
                 self.prompt = Some(p);
@@ -1184,6 +1198,14 @@ impl App {
                 self.update_read_matches(&doc);
             }
         }
+    }
+
+    /// Accept a prompt as an outline verb: the editor saves first and is
+    /// re-rendered after (§10.6).
+    fn accept_prompt_saving_editor(&mut self, p: Prompt) {
+        let edit = self.editor_before_write("outline verb");
+        self.accept_prompt(p);
+        self.editor_after_write(edit);
     }
 
     fn open_prompt(&mut self, label: &str, action: PromptAction, text: String) {
@@ -1989,7 +2011,15 @@ impl App {
     fn run_menu_item(&mut self, i: usize) {
         let Some(menu) = self.ui.menu.take() else { return };
         let Some(Some(a)) = action::NODE_MENU.get(i) else { return };
-        self.action_target = Some(menu.target);
+        // the verb saves the editor first (§10.6), which re-parses what it
+        // wrote: the menu's node is found again by its key
+        let key = self.vault.key_of(menu.target);
+        self.save_editor("outline verb");
+        let Some(target) = self.find_exact(&key) else {
+            self.say("that node is gone");
+            return;
+        };
+        self.action_target = Some(target);
         self.run_action(*a);
         self.action_target = None;
     }
@@ -1997,6 +2027,20 @@ impl App {
     /// Run any action by name (§10.8): what buttons, menus and the palette
     /// do. Node actions apply to `subject()`.
     pub fn run_action(&mut self, a: Action) {
+        // §10.6: an outline verb saves the editor first, and the editor is
+        // then re-rendered over what the verb wrote. Revert must not save,
+        // and an action that opens the editor builds it afresh.
+        let edit = match a {
+            Action::EditRevert => None,
+            _ => self.editor_before_write("outline verb"),
+        };
+        self.run_action_inner(a);
+        if !matches!(a, Action::Edit | Action::NewSibling | Action::NewChild | Action::ConflictEdit) {
+            self.editor_after_write(edit);
+        }
+    }
+
+    fn run_action_inner(&mut self, a: Action) {
         // a node action from a menu first selects its node
         if let Some(t) = self.action_target {
             if self.rows().iter().any(|row| row.nref == t) {
