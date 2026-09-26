@@ -1293,3 +1293,25 @@ fn vim_dot_after_titling_a_new_node_does_not_run_the_title_as_commands() {
     let r = root(&d);
     assert!(r.starts_with("- a\n- ") && r.contains("Dog") && r.lines().count() == 2, "{:?}", r);
 }
+
+#[test]
+fn a_line_opened_at_the_start_of_a_line_below_a_block_stays_with_that_line() {
+    // Enter at column 0 of "- two", just below the nested block "task": the
+    // new line is "- two"'s block's (§5.2, a line typed takes the tag of the
+    // line it is typed at), so what is typed there is not saved into task
+    let (d, mut app, embed) = editing_task_block();
+    let block = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "md") && !p.ends_with("root.md"))
+        .unwrap();
+    let before = std::fs::read_to_string(&block).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    keys(&mut app, "- new⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- new\n- two\n", embed));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}

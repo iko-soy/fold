@@ -408,9 +408,14 @@ impl Editor {
             self.buf.set_line(at.line, format!("{}{}{}", pre, s, post));
             return Pos::new(at.line, at.col + s.chars().count());
         }
-        if at.col == 0 && at.line > 0 && !(parts[0].is_empty() && post.is_empty()) {
-            // whole lines go in after the line above, taking its tag; the
-            // line at `at` keeps its own and only gains the last part
+        let owner = self.buf.lines[at.line].owner;
+        let block_title = self.buf.owners.get(&owner).is_some_and(|i| i.parent.is_some())
+            && !self.buf.lines[..at.line].iter().any(|l| l.owner == owner);
+        if at.col == 0 && at.line > 0 && block_title && !(parts[0].is_empty() && post.is_empty()) {
+            // in front of a nested block's title line, whole lines go in
+            // after the line above, taking its tag: they are not the block's
+            // text; the title line keeps its own tag and only gains the last
+            // part
             let mut l = at.line - 1;
             for p in &parts[..parts.len() - 1] {
                 self.buf.insert_line(l, p.to_string());
