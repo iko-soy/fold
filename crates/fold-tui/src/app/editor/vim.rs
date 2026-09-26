@@ -34,6 +34,7 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
     if !e.vim.replaying {
         if e.vim.record.is_empty() {
             e.vim.record_changes = e.changes;
+            e.vim.record = select_keys(e);
         }
         e.vim.record.push(key);
     }
@@ -57,6 +58,30 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
     }
     out
+}
+
+/// A visual selection no recorded key made (a drag or a double-click, or one
+/// left by a `:` command): keys that select as much from the cursor, for the
+/// record to start with, so `.` acts on as much text as Vim's does.
+fn select_keys(e: &Editor) -> Vec<KeyEvent> {
+    let (Mode::Visual { line }, Some(a)) = (e.mode, e.anchor) else { return Vec::new() };
+    let (s, en) = order(a, e.cursor);
+    let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    let counted = |n: usize, c: char| -> Vec<KeyEvent> {
+        if n == 0 { Vec::new() } else { n.to_string().chars().chain([c]).map(key).collect() }
+    };
+    let mut keys = vec![key(if line { 'V' } else { 'v' })];
+    if en.line > s.line {
+        // as many lines down, then (charwise) the same end column
+        keys.extend(counted(en.line - s.line, 'j'));
+        if !line {
+            keys.push(key('0'));
+            keys.extend(counted(en.col, 'l'));
+        }
+    } else if !line {
+        keys.extend(counted(en.col - s.col, 'l'));
+    }
+    keys
 }
 
 /// Where a count starting at `i` in recorded keys ends (`i` if there is none).
@@ -468,6 +493,11 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
                 handle(e, k);
             }
             e.vim.replaying = false;
+            // a replay cut short (say, its selection was not made by keys)
+            // leaves no operator waiting for the next key
+            if e.mode == Mode::Normal {
+                reset(e);
+            }
         }
         'v' | 'V' => {
             e.mode = Mode::Visual { line: c == 'V' };

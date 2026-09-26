@@ -605,3 +605,46 @@ fn vim_operator_with_g_motion_does_not_stay_pending() {
     assert_eq!(run("dgk"), "# A\n\ntwo\nthree\nfour\n");
     assert_eq!(run("dge"), "# A\n\nonwo\nthree\nfour\n");
 }
+
+#[test]
+fn vim_dot_after_deleting_a_dragged_selection_leaves_no_operator_pending() {
+    let (d, mut app) = app_with("# A\n\none two\nthree\nfour\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "e");
+    draw(&mut app);
+    let s = draw(&mut app);
+    let (y, line) = s.lines().enumerate().find(|(_, l)| l.contains("one two")).unwrap();
+    let x = line.find("one two").map(|b| line[..b].chars().count()).unwrap() as u16;
+    let y = y as u16;
+    // drag over "one": a Vim drag is a visual selection
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), (x, y)));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), (x + 2, y)));
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (x + 2, y)));
+    keys(&mut app, "d:w⏎");
+    assert_eq!(root(&d), "# A\n\n two\nthree\nfour\n");
+    // repeat, then move down: `j` must only move
+    keys(&mut app, ".j:w⏎");
+    let text = root(&d);
+    assert!(text.contains("three") && text.contains("four"), "{:?}", text);
+    // as in Vim, `.` repeats the delete over as much text as was selected
+    assert_eq!(text, "# A\n\no\nthree\nfour\n");
+}
+
+#[test]
+fn vim_dot_after_changing_a_double_clicked_word_changes_as_much_again() {
+    let (d, mut app) = app_with("# A\n\none two three\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "e");
+    draw(&mut app);
+    let s = draw(&mut app);
+    let (y, line) = s.lines().enumerate().find(|(_, l)| l.contains("one two")).unwrap();
+    let x = line.find("one two").map(|b| line[..b].chars().count()).unwrap() as u16;
+    let y = y as u16;
+    // double-click "one", change it to "1", then `w.` changes "two" the same way
+    for _ in 0..2 {
+        app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), (x, y)));
+        app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (x, y)));
+    }
+    keys(&mut app, "c1⎋w.:w⏎");
+    assert_eq!(root(&d), "# A\n\n1 1 three\n");
+}
