@@ -583,3 +583,35 @@ fn emptied_nested_block_title_is_not_a_deleted_one() {
         format!("---\nid: {}\n---\n\n- renamed\n  note\n", id.as_str())
     );
 }
+
+#[test]
+fn deleting_all_lines_of_nested_block_clears_dirty() {
+    // §5.2: deleting a nested block's title line deletes the block (its
+    // embed leaves the parent, its file goes to trash). The save must not
+    // leave its owner dirty forever with nothing written.
+    let (_d, mut v) = vault_with("# A\n\n- task\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let task = v.tree.resolved_children(a)[0];
+    ops::make_block(&mut v, task).unwrap();
+    assert!(v.tree.files[0].text.contains("![["), "{}", v.tree.files[0].text);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.delete_line(i);
+    assert_eq!(buf.save_all(&mut v).unwrap(), 1);
+    assert!(buf.dirty.is_empty(), "still dirty after save: {:?}", buf.dirty);
+    assert!(!v.tree.files[0].text.contains("![["), "{}", v.tree.files[0].text);
+    assert_eq!(v.tree.files.len(), 1);
+    // a block with nothing at all left to write (every line of the edited
+    // node gone) writes nothing, is not counted as saved, and is not left
+    // dirty to be saved again on every pause
+    let (_d, mut v) = vault_with("# A\n\nbody\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    while !buf.lines.is_empty() {
+        buf.delete_line(0);
+    }
+    assert_eq!(buf.save_all(&mut v).unwrap(), 0);
+    assert!(buf.dirty.is_empty(), "still dirty after save: {:?}", buf.dirty);
+    assert_eq!(v.tree.files[0].text, "# A\n\nbody\n");
+}

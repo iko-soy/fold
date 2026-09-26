@@ -362,11 +362,15 @@ impl EditBuffer {
     }
 
     /// Write one block (§5.2): collect its lines, put nested blocks back as
-    /// embeds, shift back, write the one file atomically.
-    fn write(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<()> {
+    /// embeds, shift back, write the one file atomically. False: there was
+    /// nothing to write, and the block is no longer dirty either.
+    fn write(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<bool> {
         let info = match self.owners.get(&owner) {
             Some(i) => i.clone(),
-            None => return Ok(()),
+            None => {
+                self.dirty.retain(|o| *o != owner);
+                return Ok(false);
+            }
         };
         // Collect the block's owned lines in buffer order; where a block
         // nested in it starts — whatever file it lives in — emit its embed
@@ -401,7 +405,10 @@ impl EditBuffer {
             }
         }
         if text_lines.is_empty() {
-            return Ok(());
+            // every line of the edited node gone: the editor does not delete
+            // it (a nested block with no lines left was deleted by settle)
+            self.dirty.retain(|o| *o != owner);
+            return Ok(false);
         }
         // Shift back from the display position to the block's position in
         // its file (§5.2.3).
@@ -516,7 +523,7 @@ impl EditBuffer {
         self.base_hashes
             .insert(path, hash(&vault.tree.files[file].text));
         self.dirty.retain(|o| *o != owner);
-        Ok(())
+        Ok(true)
     }
 
     /// Splice every dirty block (§10.6: a commit may write several files,
@@ -526,8 +533,9 @@ impl EditBuffer {
         let dirty = self.dirty.clone();
         let mut n = 0;
         for owner in dirty {
-            self.write(vault, owner)?;
-            n += 1;
+            if self.write(vault, owner)? {
+                n += 1;
+            }
         }
         self.trash_dropped(vault)?;
         Ok(n)
