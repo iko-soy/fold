@@ -291,6 +291,9 @@ fn append_child_line(
     let kids = vault.tree.raw_children(parent);
     let is_section = |r: NRef| vault.tree.node(r).kind == Kind::Section;
     let first_section = kids.iter().position(|&c| is_section(c));
+    // §4.2 puts one blank line between a node's body and its first child:
+    // an item with no body has its first child right under its title
+    let bare_item = node.kind == Kind::Item && node.body_lines(&text).is_empty();
     let index;
     match (first_section, section_ok) {
         (Some(_), true) => {
@@ -322,7 +325,7 @@ fn append_child_line(
                 pos -= 1;
             }
             let prev_is_item = fs > 0 && !is_section(kids[fs - 1]);
-            let sep = if prev_is_item { "" } else { "\n" };
+            let sep = if prev_is_item || (fs == 0 && bare_item) { "" } else { "\n" };
             vault.write_span(
                 file,
                 Span { start: pos, end: pos },
@@ -334,8 +337,8 @@ fn append_child_line(
             let line_indented = format!("{}{}", " ".repeat(indent), line);
             let pos = trimmed_end(&text, node.span);
             // blank line before unless the previous sibling is also an item
-            // (tight list)
-            let prev_is_item = kids.last().map(|&c| !is_section(c)).unwrap_or(false);
+            // (tight list), or there is none under a bare item
+            let prev_is_item = kids.last().map(|&c| !is_section(c)).unwrap_or(bare_item);
             let sep = if prev_is_item { "\n" } else { "\n\n" };
             insert_at(vault, file, pos, sep, &line_indented)?;
             index = kids.len();

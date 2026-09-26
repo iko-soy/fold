@@ -884,3 +884,36 @@ fn make_block_on_a_file_changed_on_disk_leaves_no_block_file() {
     assert_eq!(names, ["root.md"]);
     assert_eq!(read(&d, "root.md"), "# A\n\n- x\n- synced\n");
 }
+
+#[test]
+fn first_child_of_an_item_without_a_body_follows_its_title() {
+    // §4.2: one blank line between a node's body and its first child; an
+    // item with no body has none to keep its first child from its title
+    // (§4.10: `- Talked to Anya…` then its child `### Options`)
+    for (src, parent, want) in [
+        ("- a\n", &["a"][..], "- a\n  - c\n"),
+        ("- a\n- b\n", &["a"], "- a\n  - c\n- b\n"),
+        ("- a\n\n- b\n", &["a"], "- a\n  - c\n\n- b\n"),
+        ("# S\n\n- a\n", &["S", "a"], "# S\n\n- a\n  - c\n"),
+        // a body keeps its blank line, and so does a section's title
+        ("- a\n  body\n", &["a"], "- a\n  body\n\n  - c\n"),
+        ("# S\n", &["S"], "# S\n\n- c\n"),
+    ] {
+        let (d, mut v) = vault_with(src);
+        let p = at(&v, parent);
+        let c = ops::append_child_public(&mut v, p, "c").unwrap();
+        assert_eq!(v.tree.node(c).title, "c");
+        assert_eq!(read(&d, "root.md"), want, "N under {:?}", src);
+        // capture to it too (§7)
+        let (d, mut v) = vault_with(src);
+        let p = at(&v, parent);
+        ops::capture_to(&mut v, "c", false, p).unwrap();
+        assert_eq!(read(&d, "root.md"), want, "capture to {:?}", src);
+    }
+    // under an item with a section child, the item goes before it: right
+    // after the title too
+    let (d, mut v) = vault_with("- a\n  # S\n");
+    let a = at(&v, &["a"]);
+    ops::capture_to(&mut v, "c", false, a).unwrap();
+    assert_eq!(read(&d, "root.md"), "- a\n  - c\n  # S\n");
+}
