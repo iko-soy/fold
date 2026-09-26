@@ -690,11 +690,12 @@ impl App {
     /// *Move to…* (§6.5): the prompt's moving node goes under `dest`.
     fn refile_to(&mut self, r: NRef, dest: NRef) {
         self.push_undo("move to");
-        let key = self.vault.key_of(r);
+        let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
+        let key = self.vault.key_of(rr);
         match ops::refile(&mut self.vault, r, dest) {
             Ok(moved) => {
                 self.refresh_after(&with_rule_note("moved", moved));
-                if let Some(nr) = self.moved_node(&key, dest) {
+                if let Some(nr) = self.moved_node(&key, &dest_key) {
                     self.reveal(nr);
                 }
             }
@@ -702,18 +703,18 @@ impl App {
         }
     }
 
-    /// Where a moved node landed: by its key if it survived, else the
-    /// destination's child with its title.
-    fn moved_node(&self, key: &NodeKey, dest: NRef) -> Option<NRef> {
+    /// Where a node a verb moved under `dest` (a key taken before the move:
+    /// the move renumbers the nodes of the files it writes) landed: a block
+    /// by its id, else `dest`'s last child with its title.
+    fn moved_node(&self, key: &NodeKey, dest: &NodeKey) -> Option<NRef> {
         let title = match key {
             NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
             NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
             NodeKey::Root => None,
         }?;
-        let dest = self.vault.find_by_key(&self.vault.key_of(dest)).unwrap_or(dest);
         self.vault
             .tree
-            .resolved_children(dest)
+            .resolved_children(self.find_exact(dest)?)
             .into_iter()
             .rev()
             .find(|&c| self.vault.tree.node(c).title == title)

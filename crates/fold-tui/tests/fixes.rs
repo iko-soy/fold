@@ -525,3 +525,14 @@ fn an_editor_save_keeps_the_zoom_on_its_node() {
     assert_eq!(app.mode_pub(), "normal");
     assert_eq!(titles(&app), ["Z", "z1"]);
 }
+
+#[test]
+fn move_to_a_later_node_keeps_the_cursor_on_the_moved_node() {
+    // the destination is found again by the key it had before the move
+    let (d, mut app) = app_with("# A\n\n- x\n\n# B\n\n# C\n");
+    press(&mut app, "j");
+    press(&mut app, "rC");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(root(&d), "# A\n\n# B\n\n# C\n\n- x\n");
+    assert_eq!(current_title(&app), "x");
+}
