@@ -283,20 +283,89 @@ fn the_reading_pane_is_hidden_until_asked_for_or_editing() {
     app.show_reading = false;
     let s = draw(&mut app);
     assert!(app.hit_pos(Hit::ReadingPane).is_none() && app.hit_pos(Hit::Divider).is_none(), "{}", s);
-    assert!(!s.contains("text"), "{}", s);
+    assert!(!s.contains("# A"), "{}", s);
     // editing opens the pane for the editor, and closing it hides it again
     typing(&mut app, "e");
     assert_eq!(app.mode_pub(), "edit");
-    assert!(draw(&mut app).contains("text"));
+    assert!(draw(&mut app).contains("# A"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode_pub(), "normal");
-    assert!(!draw(&mut app).contains("text"));
+    assert!(!draw(&mut app).contains("# A"));
     assert!(app.hit_pos(Hit::ReadingPane).is_none());
     // the top bar's button shows it, and `zp` hides it
     button(&mut app, Action::ReadingPane);
-    assert!(draw(&mut app).contains("text"));
+    assert!(draw(&mut app).contains("# A"));
     assert!(app.hit_pos(Hit::ReadingPane).is_some());
     typing(&mut app, "zp");
     draw(&mut app);
     assert!(app.hit_pos(Hit::ReadingPane).is_none());
+}
+
+#[test]
+fn without_the_pane_rows_show_counts_and_their_text() {
+    let (_d, mut app) = app_with("# Homelab\n\nTwo boxes in the closet.\n\n- [ ] a\n- [x] b\n");
+    app.show_reading = false;
+    let s = draw(&mut app);
+    let line = s.lines().find(|l| l.contains("Homelab")).unwrap();
+    assert!(line.contains("Homelab  1/2  Two boxes in the closet."), "{}", line);
+    // with the pane, the text is there instead, and counts sit at the right
+    app.show_reading = true;
+    let s = draw(&mut app);
+    let line = s.lines().find(|l| l.contains("▾ Homelab")).unwrap();
+    assert!(!line.contains("Homelab  1/2") && line.contains("1/2"), "{}", line);
+}
+
+#[test]
+fn outline_keys_work_from_the_reading_pane_and_editing_returns_focus() {
+    let (_d, mut app) = app_with("# A\n\ntext\n");
+    draw(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    typing(&mut app, ":");
+    assert_eq!(app.mode_pub(), "picker");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    typing(&mut app, "?");
+    assert_eq!(app.mode_pub(), "help");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    // `z` sequences too
+    typing(&mut app, "zp");
+    assert!(!app.show_reading);
+    // the editor gives focus back to the pane it came from: the outline
+    typing(&mut app, "e");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    typing(&mut app, ":");
+    assert_eq!(app.mode_pub(), "picker");
+}
+
+#[test]
+fn toggles_say_whether_they_are_on() {
+    let (_d, mut app) = app_with("# A\n");
+    assert_eq!(app.action_on(Action::ReadingPane), Some(true));
+    button(&mut app, Action::Palette);
+    typing(&mut app, "reading pane");
+    let s = draw(&mut app);
+    assert!(s.contains("Reading pane · on"), "{}", s);
+}
+
+#[test]
+fn the_view_is_remembered() {
+    let (d, mut app) = app_with("# A\n\n## B\n\n- c\n\n# D\n");
+    app.show_reading = false;
+    typing(&mut app, "zdzw");
+    typing(&mut app, "h"); // fold A
+    typing(&mut app, "jj");
+    let v = app.view();
+    assert!(!v.show_reading && v.hide_done && !v.wrap && v.folded.len() == 1);
+    let mut again = App::new(d.path()).unwrap();
+    again.apply_view(fold_tui::app::View::parse(&v.to_text()).unwrap(), false);
+    assert_eq!(again.view(), v);
+}
+
+#[test]
+fn a_short_hint_where_the_long_one_does_not_fit() {
+    let (_d, mut app) = app_with("# A\n");
+    let mut t = Terminal::new(TestBackend::new(70, 10)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    let last: String = (0..70).map(|x| b[(x, 9)].symbol()).collect();
+    assert!(last.contains("right-click for actions · ? help"), "{}", last);
 }

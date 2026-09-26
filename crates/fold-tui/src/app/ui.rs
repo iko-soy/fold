@@ -364,7 +364,12 @@ impl App {
         let w = (text.width() as u16).min(max);
         let r = Rect { x, y, width: w, height: 1 };
         let bg = if self.ui.hovered(r) { theme::BUTTON_HOVER } else { theme::BUTTON };
-        put(buf, x, y, &text, w, Style::default().bg(bg).fg(ratatui::style::Color::White));
+        let style = match self.action_on(a) {
+            // a toggle that is on reads like a pressed key
+            Some(true) => Style::default().bg(theme::SEL).fg(ratatui::style::Color::White).add_modifier(Modifier::BOLD),
+            _ => Style::default().bg(bg).fg(ratatui::style::Color::White),
+        };
+        put(buf, x, y, &text, w, style);
         self.ui.push(r, Hit::Button(a, target));
         w
     }
@@ -492,7 +497,8 @@ impl App {
         let rw: u16 = right.iter().map(|(t, _, _)| t.width() as u16).sum();
         let mut rx = (area.x + area.width).saturating_sub(rw);
         let msg_room = rx.saturating_sub(x + 1);
-        put(buf, x, area.y, &fit(&self.status, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
+        let msg = if self.status == super::HINT && super::HINT.width() > msg_room as usize { super::HINT_SHORT } else { self.status.as_str() };
+        put(buf, x, area.y, &fit(msg, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
         for (t, style, a) in right {
             let w = t.width() as u16;
             let r = Rect { x: rx, y: area.y, width: w, height: 1 };
@@ -526,6 +532,9 @@ impl App {
             return;
         }
         let dragging_from = self.ui.press.filter(|p| p.dragging).and_then(|p| p.row);
+        // with no reading pane, rows carry their counts beside the title and
+        // the first line of their text after it (§10.1)
+        let inline = !self.reading_visible();
         for (vi, row) in rows.iter().enumerate().skip(self.outline_scroll).take(view) {
             let y = inner.y + (vi - self.outline_scroll) as u16;
             let line = Rect { x: inner.x, y, width: inner.width, height: 1 };
@@ -583,8 +592,13 @@ impl App {
             let handle = (hovered || selected) && inner.width > 12;
             let right = inner.x + inner.width - if handle { 2 } else { 0 };
             let meta_w = meta.width() as u16;
-            let meta_x = right.saturating_sub(meta_w + 1);
-            let title_room = meta_x.saturating_sub(title_x + 1);
+            let (mut meta_x, title_room) = if inline {
+                // placed once the title's width is known
+                (0, right.saturating_sub(title_x + 1 + if meta_w > 0 { meta_w + 2 } else { 0 }))
+            } else {
+                let mx = right.saturating_sub(meta_w + 1);
+                (mx, mx.saturating_sub(title_x + 1))
+            };
             let mut style = base;
             if n.task == Some(TaskState::Done) {
                 style = style.fg(theme::DONE).add_modifier(Modifier::CROSSED_OUT);
@@ -598,8 +612,19 @@ impl App {
             let marker = if n.is_block() || n.is_embed() { " ▤" } else { "" };
             let shown = fit(&format!("{}{}", title, marker), title_room as usize);
             put(buf, title_x, y, &shown, title_room, style);
-            if meta_w > 0 && meta_x > title_x {
+            if inline {
+                meta_x = title_x + shown.width() as u16 + 2;
+            }
+            if meta_w > 0 && meta_x > title_x && meta_x + meta_w <= right {
                 put(buf, meta_x, y, &meta, meta_w, base.fg(theme::DIM));
+            }
+            if inline {
+                let px = if meta_w > 0 { meta_x + meta_w + 2 } else { meta_x };
+                let preview = self.preview(row.nref);
+                if !preview.is_empty() && px + 4 < right {
+                    let room = right - px - 1;
+                    put(buf, px, y, &fit(&preview, room as usize), room, base.fg(theme::DIM).add_modifier(Modifier::ITALIC));
+                }
             }
             if handle {
                 let hx = inner.x + inner.width - 2;
@@ -626,6 +651,18 @@ impl App {
                 &mut st,
             );
         }
+    }
+
+    /// The first line of a node's own text, whitespace collapsed.
+    fn preview(&self, r: NRef) -> String {
+        let t = self.vault.tree.resolved_child(r);
+        let n = self.vault.tree.node(t);
+        n.text_lines(self.vault.tree.text_of(t))
+            .into_iter()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("```"))
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default()
     }
 
     // ------------------------------------------------------------ reading
@@ -1073,7 +1110,14 @@ impl App {
             let key = a.key().map(|k| format!("{:>6}  ", k)).unwrap_or_else(|| "        ".into());
             let spans = vec![
                 (key, Style::default().fg(theme::DIM)),
-                (format!("{:<22}", a.label()), Style::default().add_modifier(Modifier::BOLD)),
+                (
+                    // a toggle shows its state beside its name
+                    match self.action_on(*a) {
+                        Some(on) => format!("{:<22}", format!("{} · {}", a.label(), if on { "on" } else { "off" })),
+                        None => format!("{:<22}", a.label()),
+                    },
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
                 (a.desc().to_string(), Style::default().fg(theme::DIM)),
             ];
             let sel = i == self.palette_sel;

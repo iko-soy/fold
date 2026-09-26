@@ -796,7 +796,7 @@ Dates are ISO, `YYYY-MM-DD`. The property editor refuses anything else for `due`
 
 Done items stay where they are: one line each, in the context that gave them
 meaning, which is the cheapest history there is. The panes dim them, and `zd` toggles
-hiding them for the session.
+hiding them (remembered with the view, §10.1).
 
 When a list is genuinely finished, *clear done* (palette) trashes every done item with no
 open descendants under `target` (default: current zoom root); task blocks'
@@ -837,20 +837,24 @@ the whole vault, live, no syntax. A query language is future work (§17, §19 de
 Four regions, each of them live under the pointer:
 
 - The **top bar**: the breadcrumb of the zoom root (`fold` is the vault root; every
-  segment is a link that zooms there), and buttons for *Filter*, *Capture*, *Undo*,
-  *Redo*, *Commands* and *Help*. Buttons shrink to their icons when the bar is narrow.
+  segment is a link that zooms there), and buttons for *Filter*, *Capture*, *Reading
+  pane*, *Undo*, *Redo*, *Commands* and *Help*. Buttons shrink to their icons when the bar
+  is narrow; a toggle's button looks pressed while it is on.
 - The **outline pane**: titles, fold markers (`▸ ▾`), task glyphs (`☐ ☑`), the block
-  marker (`▤`), and on the right a due date and the open/total count of the tasks below
-  (a leaf shows no count). Done tasks are dimmed and struck through; sections are bold.
-  Long titles end in `…`. Never bodies.
+  marker (`▤`), a due date and the open/total count of the tasks below (a leaf shows no
+  count). Done tasks are dimmed and struck through; sections are bold. Long titles end in
+  `…`. Beside the reading pane, the date and count sit at the pane's right edge and rows
+  show titles only. Without it, they follow the title, and after them, dimmed, comes the
+  first line of the node's own text, so no prose is out of sight.
 - The **reading pane**: `render(target, 1, true)`, the zoom root's or else the selected
   node's, with light Markdown styling (§10.9); a block's properties appear as a dimmed
   `⚑` line under its title, never as text. Its border carries the node's title and the
   buttons *Edit* and `⋯` (the node menu). While editing, the pane is the editor (§10.6) and
   its buttons are *Done* and *Revert*.
-- The **status bar**: the last message on the left; on the right the unresolved conflicts
-  (click to resolve), *done hidden* when `zd` is on (click to show), the file, and the save
-  state.
+- The **status bar**: the last message on the left (at start, a hint at the gestures and
+  `?`, cut down to *right-click for actions · ? help* where it doesn't fit); on the right
+  the unresolved conflicts (click to resolve), *done hidden* when `zd` is on (click to
+  show), the file, and the save state.
 
 The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
 bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor
@@ -858,13 +862,18 @@ bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and
 layout splits: outline on the left at a third of the width (minimum 30 columns); the border
 between the panes is a handle — drag it to resize. Below 80 columns the panes stack.
 
+**The view is remembered** per vault, in `$XDG_STATE_HOME/fold/views/`: whether the
+reading pane is shown, wrapping, hidden done tasks, the editor's keymap, the divider's
+place, the folds and the zoom. None of it is in the vault; another device keeps its own.
+A fold or zoom whose node has gone is dropped.
+
 **Long lines wrap** in the reading pane and the editor. Prose breaks after a space, and a
 wrapped list item's continuation rows hang under its text, not under its bullet or
 checkbox; a word longer than the pane breaks where it must. Lines inside fenced code break
 at the pane's edge instead, one column early, with `↪` marking each break, so code is
 never reflowed. Every screen row of a line is that line to the pointer: a click on any
 row selects it or places the cursor where it lands. `zw` (*Wrap lines*) turns wrapping
-off for the session, and long lines are cut at the edge. The outline never wraps: a long
+off, and long lines are cut at the edge. The outline never wraps: a long
 title ends in `…`.
 
 **The pointer.** Everything a key does, the pointer does too, and the screen shows where:
@@ -964,6 +973,7 @@ the popup — closes the topmost thing.
 | `o` | open external link under cursor (`xdg-open` / `open`) |
 | `[[` / `]]` | previous / next heading |
 | `/` | in-block search; `n` / `N` next / previous match |
+| `:` `?` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor |
 
 ### 10.5 Filter box
 
@@ -1023,8 +1033,11 @@ terminal is inserted as typed. Copying also sets the system clipboard (OSC 52). 
 inside the editor is the editor's own; each save is still one entry in the op log (§10.10).
 
 The keymap is `$FOLD_KEYS` (`normal`, `vim`, `helix`), or `--keys`; the *Editor keys*
-action, or the `⌨` label in the editor's border, switches it for the session. Undo inside the editor is the editor's own; each automatic save is one
-entry in the session op log (§10.10). The box is not a Markdown editor and stays one.
+action, or the `⌨` label in the editor's border, switches it, and the choice is remembered
+with the view (§10.1) unless `--keys` or `$FOLD_KEYS` chose the keymap for this run. When
+editing ends, focus returns to the pane it came from. Undo inside the editor is the
+editor's own; each automatic save is one entry in the session op log (§10.10). The box is
+not a Markdown editor and stays one.
 
 Properties are not text. `a`, or *Properties…* in the node menu, opens the **property
 editor**: a small form listing the
@@ -1055,9 +1068,10 @@ line until resolved (§12.5).
 
 `:`, or *Commands* in the top bar, opens a popup listing every action the TUI has — key,
 name, what it does — filtered as you type: names that start with the query first, then
-names and descriptions that contain it, then fuzzy matches. A click or `Enter` runs the
-highlighted action; if it needs an argument — a node for *Move to…* or *Go to…*, text for
-*Capture* — its prompt follows (§10.1). `Esc` or a click outside closes.
+names and descriptions that contain it, then fuzzy matches. A toggle shows its state
+beside its name (*Reading pane · on*). A click or `Enter` runs the highlighted action; if
+it needs an argument — a node for *Move to…* or *Go to…*, text for *Capture* — its prompt
+follows (§10.1). `Esc` or a click outside closes.
 
 There is no command syntax: nothing is typed except the search and the argument. Every
 action is in the palette under a readable name, and the four that have no key or button

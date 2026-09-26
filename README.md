@@ -43,8 +43,9 @@ starts a new vault with an `# Inbox`.
 
 The TUI is mouse-first, and every action also has a key.
 
-- **Click** a row to select it. Click `◨` in the top bar (or press `zp`) to show the
-  reading pane beside the outline, which shows the selected node. Click `▸`/`▾` to
+- **Click** a row to select it. Each row shows the first line of its node's text; click
+  `◨` in the top bar (or press `zp`) for the reading pane, which shows the whole selected
+  node beside the outline. Click `▸`/`▾` to
   fold, `☐` to check a task off, a breadcrumb in the top bar to zoom out.
 - **Double-click** a row to zoom into it. Double-click a line of text to edit it there.
 - **Right-click** a row (or click its `⋯`) for everything you can do to a node: edit, new
@@ -57,7 +58,8 @@ The TUI is mouse-first, and every action also has a key.
 Keys, in the outline: `j`/`k` move, `h`/`l` fold, `Enter` zooms, `e` edits, `x` checks a
 task, `n`/`N` add a sibling or child, `J`/`K` move a node, `>`/`<` indent, `r` moves a
 subtree elsewhere, `u`/`U` undo and redo, `?` shows everything. Everything is saved as you
-go; `q` quits.
+go; `q` quits. The view — the pane, folds, zoom, wrapping, the editor's keys — is remembered
+per vault for next time.
 
 ### The editor
 

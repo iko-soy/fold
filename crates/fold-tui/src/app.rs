@@ -28,6 +28,7 @@ mod highlight;
 mod markdown;
 mod mouse;
 mod ui;
+mod view;
 mod wrap;
 
 pub use action::Action;
@@ -38,6 +39,7 @@ pub fn node_menu_index(a: Action) -> usize {
     action::NODE_MENU.iter().position(|i| *i == Some(a)).expect("in the node menu")
 }
 pub use ui::Hit;
+pub use view::View;
 
 // ------------------------------------------------------------ state
 
@@ -63,6 +65,10 @@ pub struct FlatRow {
     pub depth: usize,
     pub via_embed: bool,
 }
+
+/// The status bar's greeting, and a shorter one where it doesn't fit.
+pub(crate) const HINT: &str = "double-click to zoom · right-click for actions · drag to move · ? help";
+pub(crate) const HINT_SHORT: &str = "right-click for actions · ? help";
 
 pub struct App {
     pub(crate) vault: Vault,
@@ -97,6 +103,8 @@ pub struct App {
     edit_keys: editor::Keys,
     edit_clip: editor::Clip,
     edit_last_key: Instant,
+    /// The pane that had focus when the editor opened, focused again after.
+    edit_return: Focus,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -169,7 +177,7 @@ impl App {
             wrap: true,
             show_reading: false,
             register: String::new(),
-            status: "click to select · double-click to zoom · right-click for actions · drag to move · ? help".into(),
+            status: HINT.into(),
             status_time: Instant::now(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -186,6 +194,7 @@ impl App {
                 .unwrap_or_default(),
             edit_clip: editor::Clip::default(),
             edit_last_key: Instant::now(),
+            edit_return: Focus::Outline,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -662,6 +671,46 @@ impl App {
         self.open_editor_on(target);
     }
 
+    /// The view settings to remember (§10.1).
+    pub fn view(&self) -> View {
+        View {
+            show_reading: self.show_reading,
+            wrap: self.wrap,
+            hide_done: self.hide_done,
+            keys: Some(self.edit_keys),
+            outline_width: self.ui.outline_width,
+            zoom: self.zoom_root.map(|z| self.vault.key_of(z)),
+            folded: self.folded.clone(),
+        }
+    }
+
+    /// Restore remembered view settings; `keep_keys` when `--keys` or
+    /// `$FOLD_KEYS` chose the keymap for this run.
+    pub fn apply_view(&mut self, v: View, keep_keys: bool) {
+        self.show_reading = v.show_reading;
+        self.wrap = v.wrap;
+        self.hide_done = v.hide_done;
+        if let (false, Some(k)) = (keep_keys, v.keys) {
+            self.edit_keys = k;
+        }
+        self.ui.outline_width = v.outline_width;
+        self.folded = v.folded;
+        self.zoom_root = v.zoom.and_then(|k| self.vault.find_by_key(&k)).filter(|&r| self.vault.tree.node(r).kind != Kind::Root);
+        self.cursor = 0;
+        self.clamp_cursor();
+    }
+
+    /// Whether a toggle is on, for buttons and the palette.
+    pub fn action_on(&self, a: Action) -> Option<bool> {
+        match a {
+            Action::ReadingPane => Some(self.show_reading),
+            Action::HideDone => Some(self.hide_done),
+            Action::Wrap => Some(self.wrap),
+            Action::RawMode => Some(self.raw_mode),
+            _ => None,
+        }
+    }
+
     /// Whether the reading pane is on screen: shown, or holding the editor.
     pub fn reading_visible(&self) -> bool {
         self.show_reading || self.mode == Mode::Edit
@@ -671,6 +720,9 @@ impl App {
     fn open_editor_on(&mut self, target: NRef) {
         let buf = fold_core::edit::open_editor(&self.vault, target);
         self.editor = Some(editor::Editor::new(buf, self.edit_keys, self.edit_clip.clone()));
+        if self.mode != Mode::Edit {
+            self.edit_return = self.focus;
+        }
         self.mode = Mode::Edit;
         self.focus = Focus::Reading;
         self.edit_last_key = Instant::now();
@@ -708,6 +760,7 @@ impl App {
             self.edit_clip = ed.clip;
         }
         self.mode = Mode::Normal;
+        self.focus = self.edit_return;
     }
 
     /// Whether the editor holds changes not yet written.
@@ -1133,7 +1186,7 @@ impl App {
         match self.mode {
             Mode::Normal => {
                 let starts_seq = match key.code {
-                    KeyCode::Char('z') => self.focus == Focus::Outline,
+                    KeyCode::Char('z') => true,
                     KeyCode::Char('g') => true,
                     KeyCode::Char('[') | KeyCode::Char(']') => self.focus == Focus::Reading,
                     _ => false,
@@ -1169,6 +1222,7 @@ impl App {
             self.edit_clip = ed.clip;
         }
         self.mode = Mode::Normal;
+        self.focus = self.edit_return;
         let _ = self.vault.reload();
         self.clamp_cursor();
         self.say("changes discarded");
@@ -1481,6 +1535,15 @@ impl App {
             KeyCode::Char('n') => self.next_match(&doc, 1),
             KeyCode::Char('N') => self.next_match(&doc, -1),
             KeyCode::Char('q') => self.quit = true,
+            // what isn't the pane's own works as it does in the outline
+            KeyCode::Char('m') => {
+                self.action_target = self.read_node();
+                self.run_action(Action::NodeMenu);
+            }
+            KeyCode::Char(':' | '?' | 'c' | 'C' | 'u' | 'U') => {
+                let rows = self.rows();
+                self.key_outline(key, rows);
+            }
             _ => {}
         }
     }
@@ -2031,6 +2094,10 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("unknown keymap {:?}: use normal, vim or helix", k))?;
         app.edit_keys = parsed;
     }
+    let keys_chosen = keys.is_some() || std::env::var_os("FOLD_KEYS").is_some();
+    if let Some(v) = view::load(dir) {
+        app.apply_view(v, keys_chosen);
+    }
     app.start_watcher();
     // a sync-conflict file present at startup starts the merge flow (§12.2)
     if let Ok(files) = app.vault.conflict_files() {
@@ -2051,6 +2118,7 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let res = run_loop(&mut terminal, &mut app);
+    let _ = view::save(dir, &app.view());
     disable_raw_mode()?;
     std::io::stdout().execute(DisableBracketedPaste)?;
     std::io::stdout().execute(DisableMouseCapture)?;
