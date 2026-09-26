@@ -1105,3 +1105,39 @@ fn discarding_the_buffer_deletes_a_block_cut_saved_in_transit_and_let_go() {
     assert_eq!(v.tree.files.len(), 1);
     assert_eq!(std::fs::read_to_string(d.path().join("root.md")).unwrap(), "# A\n\n- one\n- two\n");
 }
+
+#[test]
+fn a_block_title_line_indented_or_re_spelled_under_another_blocks_moves_into_it() {
+    // §5.2: the embed goes to the block whose title line holds the title
+    // line as it is written now, as the parser nests them (§3.1), blank
+    // lines between or not
+    let embed = |id: &fold_core::ident::Id| format!("![[{}]]", id.as_str());
+    let text = |v: &Vault, id| v.tree.files[v.tree.block_by_id(id).unwrap().0].text.clone();
+    // "- c" indented twice, under "  - b", a block in the item "- one"
+    let (_d, mut v) = vault_with("# A\n\n- one\n  - b\n- c\n");
+    let b = v.find_by_path(&["A".into(), "one".into(), "b".into()]).unwrap();
+    let b = ops::make_block(&mut v, b).unwrap();
+    let c = v.find_by_path(&["A".into(), "c".into()]).unwrap();
+    let c = ops::make_block(&mut v, c).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- c").unwrap();
+    buf.set_line(i, "    - c".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n  {}\n", embed(&b)));
+    assert!(text(&v, &b).ends_with(&format!("\n- b\n  {}\n", embed(&c))), "{}", text(&v, &b));
+    // "## c" re-spelled "### c" after a blank line, under the section "## b"
+    let (_d, mut v) = vault_with("# A\n\n## b\n\n## c\n");
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    let b = ops::make_block(&mut v, b).unwrap();
+    let c = v.find_by_path(&["A".into(), "c".into()]).unwrap();
+    let c = ops::make_block(&mut v, c).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "## c").unwrap();
+    buf.set_line(i, "### c".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n## {}\n", embed(&b)));
+    assert!(text(&v, &b).ends_with(&format!("\n# b\n## {}\n", embed(&c))), "{}", text(&v, &b));
+    assert!(text(&v, &c).ends_with("\n# c\n"), "{}", text(&v, &c));
+}

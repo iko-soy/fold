@@ -262,19 +262,19 @@ impl EditBuffer {
     /// Each nested block's embed goes to the block its title line (at
     /// `titles`) now sits in (§5.2), out of the block it was in or into one
     /// nested there, however the line got there: moved, re-indented or
-    /// re-spelled. Of the block holding the line above the title line and
-    /// the blocks that one is nested in, the innermost whose title line
-    /// holds it (`holds`). Blocks go in buffer order, so where a block sits
-    /// is settled before the blocks after it.
+    /// re-spelled. Of the block holding the line above the title line (the
+    /// blank lines between nest nothing) and the blocks that one is nested
+    /// in, the innermost whose title line holds it (`holds`). Blocks go in
+    /// buffer order, so where a block sits is settled before the blocks
+    /// after it.
     pub fn reparent(&mut self, titles: &BTreeMap<Owner, usize>) {
         let mut order: Vec<(usize, Owner)> = titles.iter().map(|(&o, &t)| (t, o)).collect();
         order.sort();
         for (t, o) in order {
             let Some(p) = self.owners.get(&o).and_then(|i| i.parent) else { continue };
-            if t == 0 || t > self.lines.len() {
-                continue;
-            }
-            let mut q = Some(self.lines[t - 1].owner);
+            let lines = &self.lines[..t.min(self.lines.len())];
+            let Some(above) = lines.iter().rev().find(|l| !l.text.trim().is_empty()) else { continue };
+            let mut q = Some(above.owner);
             while let Some(c) = q {
                 if c != o && self.nested_in(c, o).is_none() && self.holds(titles, c, o) {
                     break;
