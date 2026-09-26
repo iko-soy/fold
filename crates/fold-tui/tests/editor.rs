@@ -1176,3 +1176,22 @@ fn vim_put_below_an_empty_line_after_a_block_stays_in_the_parent() {
     let b = std::fs::read_to_string(&block).unwrap();
     assert_eq!((r, b), (format!("# A\n\n- one\n{}\n\nnew\na\nb\n", embed), before));
 }
+
+#[test]
+fn deleting_whole_lines_up_to_a_block_titles_end_deletes_the_block() {
+    // normal keymap: "- one" and "- task" selected from column 0 to the end
+    // of "- task" and deleted: the block's title line is deleted, so the
+    // block is (§5.2), and leaving the editor saves
+    let (d, mut app, _embed) = editing_task_block();
+    for k in [
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+    ] {
+        app.handle_key(k);
+    }
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal", "{}", draw(&mut app));
+    assert_eq!(root(&d), "# A\n\n\n- two\n");
+}

@@ -433,8 +433,11 @@ impl Editor {
 
     /// Delete `[a, b)`; returns what was deleted. A line deleted whole takes
     /// its tag with it (§5.2): what is left of a joined line keeps the tag of
-    /// line `a`, unless the range starts at column 0, when line `b` is what
-    /// is left (unless nothing of it is, at the end of the text).
+    /// line `a`, unless the range starts at column 0 and leaves some of line
+    /// `b`, or ends at its start (short of the end of the text): then line
+    /// `b` is what is left. A range from column 0 through the end of line
+    /// `b` deletes it whole, so a nested block's title line deleted that way
+    /// deletes the block.
     pub fn delete(&mut self, a: Pos, b: Pos) -> String {
         let (a, mut b) = order(a, b);
         if b.line >= self.lines() {
@@ -448,7 +451,7 @@ impl Editor {
         let first = self.line(a.line).to_string();
         let last = self.line(b.line).to_string();
         let rest = &last[byte(&last, b.col)..];
-        if a.col == 0 && a.line < b.line && (!rest.is_empty() || b.line + 1 < self.lines()) {
+        if a.col == 0 && a.line < b.line && (!rest.is_empty() || (b.col == 0 && b.line + 1 < self.lines())) {
             for l in (a.line..b.line).rev() {
                 self.buf.delete_line(l);
             }
