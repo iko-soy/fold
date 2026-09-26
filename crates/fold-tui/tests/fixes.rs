@@ -194,3 +194,15 @@ fn respelling_moves_the_node_and_keeps_the_cursor_on_it() {
     press(&mut app, "kJ");
     assert_eq!(root(&d), "# P\n\n- b\n\n## a\n");
 }
+
+#[test]
+fn editor_message_in_a_short_terminal_does_not_panic() {
+    let (_d, mut app) = app_with("# A\n\nbody\n");
+    press(&mut app, "e");
+    // the default keymap answers "nothing to undo", a message on the pane's
+    // last line; the pane has no inner rows at these sizes
+    app.handle_key(ctrl('z'));
+    for (w, h) in [(60u16, 5u16), (60, 6), (100, 4), (100, 3)] {
+        draw(&mut app, w, h);
+    }
+}

@@ -921,7 +921,8 @@ impl App {
             (None, Some(m)) => Some((m.clone(), false)),
             _ => None,
         };
-        let view = inner.height as usize - bottom.is_some() as usize;
+        // a short terminal can leave the pane no inner rows at all
+        let view = (inner.height as usize).saturating_sub(bottom.is_some() as usize);
         let (sel, block_cur) = (ed.selection(), ed.block_cursor());
         let wrap = self.wrap;
         let ed = self.editor.as_mut().unwrap();
@@ -973,7 +974,7 @@ impl App {
                 }
             }
         }
-        if let Some((text, input)) = bottom {
+        if let Some((text, input)) = bottom.filter(|_| inner.height > 0) {
             let y = inner.y + inner.height - 1;
             let style = if input { Style::default() } else { Style::default().fg(theme::WARN) };
             buf.set_style(Rect { x: inner.x, y, width: inner.width, height: 1 }, Style::default().bg(theme::BAR));
