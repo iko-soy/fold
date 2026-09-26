@@ -953,6 +953,30 @@ fn clamp_index(tree: &crate::tree::Tree, kids: &[NRef], want: usize, kinds: &[Ki
     want.min(kids.len()).clamp(lo, hi)
 }
 
+/// `doc` (shifted to a child position) with its top-level sections, and
+/// everything under them, re-levelled so the last is no shallower than
+/// `next`, the sibling section it is written before. A written level is
+/// honoured (§4.7), so a shallower heading would adopt `next` and every
+/// section after it (§3.1).
+fn level_before(tree: &crate::tree::Tree, next: Option<NRef>, doc: &str) -> String {
+    let Some(next) = next.filter(|&k| tree.node(k).kind == Kind::Section) else {
+        return doc.to_string();
+    };
+    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    let tops = &pf.nodes[pf.root_node].children;
+    // a document's sections come after its items (§3.1)
+    let Some(first) = tops.iter().map(|&c| &pf.nodes[c]).find(|n| n.kind == Kind::Section) else {
+        return doc.to_string();
+    };
+    let have = tops.last().and_then(|&c| pf.nodes[c].level).unwrap_or(1);
+    let need = tree.level(next);
+    if have >= need {
+        return doc.to_string();
+    }
+    let at = first.span.start;
+    format!("{}{}", &doc[..at], shift_lines(&doc[at..], (need - have) as isize, 0))
+}
+
 /// Write `doc` (already shifted to a child position of `parent`) as the
 /// `want`-th child node of `parent`, clamped by the ordering rule (§3.1).
 /// With `moving`, that node's own lines are removed in the same edit: text
@@ -1039,6 +1063,7 @@ fn place(
         text = format!("{}{}", &text[..start], &text[end..]);
         pos = after_removal(pos, start, end);
     }
+    let doc = level_before(tree, next, doc);
     let body = doc.trim_end_matches('\n');
     let insertion = match next_kind {
         Some(nk) => {
@@ -1377,6 +1402,7 @@ fn reposition(
     let kind = if to_section { Kind::Section } else { Kind::Item };
     if clamp_index(tree, &others, pos, &[kind]) == pos {
         let span = tree.node(r).span;
+        let new = level_before(tree, others.get(pos).copied(), &new);
         vault.write_span(r.0, span, &new)?;
         vault.reload()?;
         return Ok(false);

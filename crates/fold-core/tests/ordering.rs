@@ -565,3 +565,42 @@ fn drop_before_a_later_sibling_lands_before_it() {
         assert_eq!(root_text(&v), src);
     }
 }
+
+#[test]
+fn respelled_item_does_not_adopt_deeper_written_sibling_sections() {
+    // top-level sections written at `##`: honoured as written, still the root's
+    let (_d, mut v) = vault_with("- note\n\n## Projects\n\n## Areas\n");
+    let before = parents(&v);
+    assert!(v.find_by_path(&["Projects".into()]).is_some());
+    let r = at(&v, "note");
+    ops::toggle_spelling(&mut v, r).unwrap();
+    // `~`: "so no sibling changes parent" (§3.1, §10.3)
+    assert_eq!(others(&parents(&v), "note"), others(&before, "note"), "{}", root_text(&v));
+    assert!(v.find_by_path(&["Projects".into()]).is_some(), "{}", root_text(&v));
+    assert_ordered(&v);
+}
+
+#[test]
+fn pasted_section_does_not_adopt_deeper_written_next_sibling() {
+    let (_d, mut v) = vault_with("## A\n\n## B\n");
+    let before = parents(&v);
+    let r = at(&v, "A");
+    ops::paste(&mut v, r, "# T\n\n## T1\n", true).unwrap();
+    // T lands between A and B as a sibling, its child one below it; B keeps
+    // the root as its parent
+    assert_eq!(root_text(&v), "## A\n\n## T\n\n### T1\n\n## B\n");
+    assert_eq!(others(&others(&parents(&v), "T"), "T1"), others(&before, "T"));
+    assert!(v.find_by_path(&["T".into(), "T1".into()]).is_some(), "{}", root_text(&v));
+}
+
+#[test]
+fn promoted_section_does_not_adopt_deeper_written_next_sibling() {
+    // `<` on S lands it between P and R, top-level sections written at `##`
+    let (_d, mut v) = vault_with("## P\n\n### S\n\n## R\n");
+    let before = parents(&v);
+    let s = at(&v, "P/S");
+    ops::promote(&mut v, s).unwrap();
+    assert_eq!(root_text(&v), "## P\n\n## S\n\n## R\n");
+    assert_eq!(others(&parents(&v), "S"), others(&before, "S"));
+}
+
