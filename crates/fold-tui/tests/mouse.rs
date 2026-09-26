@@ -810,3 +810,37 @@ fn a_verb_that_moves_the_edited_node_keeps_the_editor_on_it() {
     assert_eq!(root(&d), "# A\n\n- a\n");
     assert_eq!(app.mode_pub(), "normal");
 }
+
+#[test]
+fn edit_from_a_menu_after_cutting_a_block_title_opens_on_the_menus_node() {
+    // as above, with the menu's Edit: opening an editor saves the open one
+    // first, which deletes the cut block and renumbers the files after it
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("root.md"),
+        "# A\n\n- one\n![[dozzod-binwes-talsun-worbec]]\n- two\n\n# B\n\n![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join("dozzod~cut.md"), "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- cut me\n").unwrap();
+    std::fs::write(
+        d.path().join("racfer~task.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- task\n  - sub\n",
+    )
+    .unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    typing(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    draw(&mut app);
+    let row = (0..10).find(|&i| app.rows().get(i).is_some_and(|r| app.title_of(r.nref) == "task")).unwrap();
+    right_click(&mut app, Hit::Row(row));
+    click(&mut app, Hit::MenuItem(fold_tui::app::node_menu_index(Action::Edit)));
+    assert_eq!(app.mode_pub(), "edit");
+    assert!(!d.path().join("dozzod~cut.md").exists(), "the cut block went with the old editor");
+    let s = draw(&mut app);
+    assert!(s.contains("- task") && s.contains("- sub"), "{}", s);
+}
