@@ -389,7 +389,9 @@ impl Editor {
     /// Insert text at a position; returns the position after it. New lines
     /// belong to the block of the line they follow (§5.2): the line they
     /// split, or at column 0 the line above, so a line opened or pasted above
-    /// a nested block's title line is not written into that block.
+    /// a nested block's title line is not written into that block. Text
+    /// starting with a line break at an empty line goes in below it (`o`,
+    /// `p`, Enter, Ctrl-D there), so those lines are that line's block's.
     pub fn insert(&mut self, at: Pos, s: &str) -> Pos {
         if s.is_empty() {
             return at;
@@ -406,7 +408,7 @@ impl Editor {
             self.buf.set_line(at.line, format!("{}{}{}", pre, s, post));
             return Pos::new(at.line, at.col + s.chars().count());
         }
-        if at.col == 0 && at.line > 0 {
+        if at.col == 0 && at.line > 0 && !(parts[0].is_empty() && post.is_empty()) {
             // whole lines go in after the line above, taking its tag; the
             // line at `at` keeps its own and only gains the last part
             let mut l = at.line - 1;

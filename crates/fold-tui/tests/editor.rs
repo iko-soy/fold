@@ -1135,3 +1135,44 @@ fn indenting_a_block_title_line_nests_the_block_where_the_line_sits() {
     assert_eq!(root(&d), format!("# A\n\n- one\n  {}\n- two\n", embed));
     assert!(task_file(&d));
 }
+
+/// root.md "# A\n\n- one\n![[task]]\n\na\nb\n"; returns the embed and the
+/// block's file.
+fn vault_with_block_then_text() -> (tempfile::TempDir, String, std::path::PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- task\n\na\nb\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let embed = format!("![[{}]]", id.as_str());
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n\na\nb\n", embed));
+    (d, embed, block)
+}
+
+#[test]
+fn vim_put_below_an_empty_line_after_a_block_stays_in_the_parent() {
+    // §5.2: a line pasted somewhere takes the tag of the line above it; `p`
+    // on the blank line after the block puts "a" and "b" below that blank
+    // line, which is A's, so they are A's text, not the block's
+    let (d, embed, block) = vault_with_block_then_text();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    // lines: "# A", "", "- one", "- task", "", "a", "b"
+    keys(&mut app, "ejjjjjyjkp:w⏎");
+    let r = root(&d);
+    let b = std::fs::read_to_string(&block).unwrap();
+    assert_eq!((r, b), (format!("# A\n\n- one\n{}\n\na\nb\na\nb\n", embed), before));
+    // `o` on that blank line opens a line of A below it, as Enter there does
+    // in the normal keymap
+    let (d, embed, block) = vault_with_block_then_text();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjjjonew⎋:w⏎");
+    let r = root(&d);
+    let b = std::fs::read_to_string(&block).unwrap();
+    assert_eq!((r, b), (format!("# A\n\n- one\n{}\n\nnew\na\nb\n", embed), before));
+}
