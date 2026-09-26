@@ -1195,3 +1195,68 @@ fn deleting_whole_lines_up_to_a_block_titles_end_deletes_the_block() {
     assert_eq!(app.mode_pub(), "normal", "{}", draw(&mut app));
     assert_eq!(root(&d), "# A\n\n\n- two\n");
 }
+
+#[test]
+fn cutting_a_block_title_and_pasting_it_back_in_place_keeps_its_nested_block() {
+    // Alt-Down then Alt-Up, or Ctrl-K then Ctrl-V (pasted straight back above
+    // "  - c") on b's title line: the text and every line's place are as they
+    // were, so c's embed must still be in b's file, not moved out to A (§5.2)
+    let cut_paste = [KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL), KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)];
+    let down_up = [KeyEvent::new(KeyCode::Down, KeyModifiers::ALT), KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)];
+    for seq in [down_up, cut_paste] {
+        let (d, mut app, b, c, b_file) = editing_nested_blocks();
+        let before = std::fs::read_to_string(&b_file).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        for k in seq {
+            app.handle_key(k);
+        }
+        keys(&mut app, "⎋");
+        assert_eq!(app.mode_pub(), "normal");
+        let r = root(&d);
+        let bf = std::fs::read_to_string(&b_file).unwrap();
+        assert_eq!((r, bf), (format!("# A\n\n- one\n{}\n- two\n", b), before), "{:?}; c is {}", seq[0], c);
+    }
+    // Vim's `ddP` and Helix's `xdP` on b's title line put it straight back too
+    for (keymap, seq) in [(fold_tui::app::EditKeys::Vim, "kddP:wq⏎"), (fold_tui::app::EditKeys::Helix, "kxdP:wq⏎")] {
+        let (d, mut app, b, _c, b_file) = editing_nested_blocks();
+        let before = std::fs::read_to_string(&b_file).unwrap();
+        app.set_edit_keys(keymap);
+        keys(&mut app, seq);
+        assert_eq!(app.mode_pub(), "normal");
+        let bf = std::fs::read_to_string(&b_file).unwrap();
+        assert_eq!((root(&d), bf), (format!("# A\n\n- one\n{}\n- two\n", b), before), "{:?}", keymap);
+    }
+}
+
+#[test]
+fn moving_a_block_under_another_blocks_title_moves_its_embed_into_that_block() {
+    // §5.2: the embed goes to the block the title line now sits in; "  - c"
+    // moved up from under "- e" to under "- b" is indented past b's title
+    // line, so it is b's now, and its embed goes into b's file
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- b\n- e\n  - c\n- two\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let mut block = |path: &[&str]| {
+        let n = v.find_by_path(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+        let id = fold_core::ops::make_block(&mut v, n).unwrap();
+        (format!("![[{}]]", id.as_str()), v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path))
+    };
+    let (c, _) = block(&["A", "e", "c"]);
+    let (e, e_file) = block(&["A", "e"]);
+    let (b, b_file) = block(&["A", "b"]);
+    drop(v);
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n{}\n- two\n", b, e));
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    // the editor shows "# A", "", "- one", "- b", "- e", "  - c", "- two"
+    for _ in 0..5 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n{}\n- two\n", b, e));
+    assert!(std::fs::read_to_string(&b_file).unwrap().ends_with(&format!("\n- b\n  {}\n", c)));
+    assert!(std::fs::read_to_string(&e_file).unwrap().ends_with("\n- e\n"));
+}
