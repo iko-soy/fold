@@ -181,3 +181,60 @@ fn a_very_long_line_does_not_overflow_the_styler() {
         assert_ne!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
     }
 }
+
+#[test]
+fn a_link_after_wide_text_is_clickable_where_drawn() {
+    // 28 wide characters fill the first row; the link is drawn on the second
+    let line = format!("{} see [docs](https://x.org)", "漢".repeat(28));
+    let (_d, mut app) = app_with(&format!("# A\n\n{}\n", line));
+    let s = draw(&mut app);
+    let y = s.iter().position(|l| l.contains("[docs]")).unwrap();
+    let x = col(&s[y], "docs");
+    assert_eq!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+}
+
+#[test]
+fn wide_text_on_an_earlier_row_does_not_shift_the_link_region() {
+    // 13 wide characters fill the first row, the link sits early on the second
+    let line = format!("{} {}see [docs](x) and plain words", "漢".repeat(13), "word ".repeat(6));
+    let (_d, mut app) = app_with(&format!("# A\n\n{}\n", line));
+    let s = draw(&mut app);
+    let y = s.iter().position(|l| l.contains("[docs]")).unwrap();
+    let docs = col(&s[y], "docs");
+    let plain = col(&s[y], "plain");
+    assert_eq!(app.hit_at(plain, y as u16), Some(Hit::DocLine(2)), "plain text is not the link: {:#?}", s);
+    assert_eq!(app.hit_at(docs, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+}
+
+#[test]
+fn a_checkbox_and_link_after_a_tab_are_clickable_where_drawn() {
+    // a tab before them is drawn as spaces to its tab stop
+    let (_d, mut app) = app_with("# A\n\n- [ ] x\tsee [docs](x)\n");
+    let s = draw(&mut app);
+    // the reading pane's row with the item (the outline may show it too, on
+    // the left)
+    let y = s.iter().rposition(|l| l.contains("[docs]")).unwrap();
+    let rcol = |n: &str| s[y][..s[y].rfind(n).unwrap()].chars().count() as u16;
+    assert_eq!(app.hit_at(rcol("☐"), y as u16), Some(Hit::DocCheck(2)), "{:#?}", s);
+    // exactly the link text is the link, not the brackets around it
+    let docs = rcol("docs");
+    for x in docs..docs + 4 {
+        assert_eq!(app.hit_at(x, y as u16), Some(Hit::Link(2)), "{:#?}", s);
+    }
+    for x in [docs - 1, docs + 4] {
+        assert_eq!(app.hit_at(x, y as u16), Some(Hit::DocLine(2)), "{:#?}", s);
+    }
+}
+
+#[test]
+fn a_link_wrapped_onto_the_next_row_is_clickable_on_both() {
+    let line = format!("{} [alpha beta gamma delta epsilon zeta](u) end", "x".repeat(40));
+    let (_d, mut app) = app_with(&format!("# A\n\n{}\n", line));
+    let s = draw(&mut app);
+    let y0 = s.iter().position(|l| l.contains("[alpha")).unwrap();
+    let y1 = s.iter().position(|l| l.contains("gamma")).unwrap();
+    assert_eq!(y1, y0 + 1, "{:#?}", s);
+    assert_eq!(app.hit_at(col(&s[y0], "alpha"), y0 as u16), Some(Hit::Link(2)), "{:#?}", s);
+    assert_eq!(app.hit_at(col(&s[y1], "gamma"), y1 as u16), Some(Hit::Link(2)), "{:#?}", s);
+    assert_eq!(app.hit_at(col(&s[y1], "end"), y1 as u16), Some(Hit::DocLine(2)), "{:#?}", s);
+}

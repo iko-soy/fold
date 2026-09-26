@@ -5,9 +5,10 @@
 use super::ui::theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-/// A styled line and the display columns of its clickable parts.
+/// A styled line and where its clickable parts are, as character columns
+/// of the styled text: the reading pane knows where each character is drawn
+/// (wide characters, tabs, wrapped rows), so it maps them to the screen.
 pub struct Styled {
     pub line: Line<'static>,
     /// Column of the checkbox glyph, if the line is a task.
@@ -90,7 +91,7 @@ impl Out {
         if s.is_empty() {
             return;
         }
-        self.col += s.width();
+        self.col += s.chars().count();
         self.spans.push(Span::styled(s.to_string(), style));
     }
 
@@ -230,5 +231,8 @@ mod tests {
         assert_eq!(s.link, Some((5, 9)));
         let s = style_line("  https://a.b/c tail", false);
         assert_eq!(s.link, Some((2, 15)));
+        // character columns, however wide the characters are drawn
+        let s = style_line("漢字 [docs](x)", false);
+        assert_eq!(s.link, Some((4, 8)));
     }
 }

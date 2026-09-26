@@ -756,15 +756,24 @@ impl App {
                 }
             };
             let parts = wrap_styled(&styled.line, cols, code[si].is_some());
+            // where each character is drawn: the clickable parts are
+            // character columns, and wide characters and tabs take more
+            let xs = if styled.check.is_some() || styled.link.is_some() {
+                super::wrap::columns(&styled.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            } else {
+                Vec::new()
+            };
             for (line, row) in parts {
                 let within = |c: usize| c >= row.start && c < row.end.max(row.start + 1);
-                let at = |c: usize| row.indent + c - row.start;
+                // a link wrapped onto the next row is a link there too
+                let on = |(a, b): (usize, usize)| within(a) || (a < row.start && b > row.start);
+                let at = |c: usize| row.indent + xs[c.clamp(row.start, row.end)] - xs[row.start];
                 rows.push(Drawn {
                     doc: *doc_line,
                     line,
                     code: code[si].is_some(),
                     check: styled.check.filter(|c| within(*c)).map(at),
-                    link: styled.link.filter(|(a, _)| within(*a)).map(|(a, b)| (at(a), at(b.min(row.end)))),
+                    link: styled.link.filter(|l| on(*l)).map(|(a, b)| (at(a), at(b))),
                 });
             }
         }
