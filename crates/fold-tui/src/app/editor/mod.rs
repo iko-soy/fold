@@ -218,6 +218,7 @@ impl Editor {
             return;
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.forget_goal();
         if self.mode != Mode::Insert && self.keys != Keys::Normal {
             // pasting in a normal mode puts the text after the cursor
             self.checkpoint();
@@ -720,6 +721,7 @@ impl Editor {
         }
         self.buf.lines = s.lines;
         self.cursor = s.cursor;
+        self.forget_goal();
         self.anchor = None;
         self.changes += 1;
         self.group = Group::None;
@@ -749,6 +751,12 @@ impl Editor {
 
     pub fn set_cursor(&mut self, p: Pos) {
         self.cursor = p;
+        self.forget_goal();
+    }
+
+    /// Up and down aim from where the cursor is now, not for the column an
+    /// earlier vertical move aimed for (after typing, undo, …).
+    fn forget_goal(&mut self) {
         self.want_col = None;
         self.want_x = None;
     }
@@ -1107,27 +1115,28 @@ impl Editor {
     /// Typing: replaces a selection, one undo step per run of typing.
     pub fn type_char(&mut self, c: char) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
         }
         self.cursor = self.insert(self.cursor, &c.to_string());
-        self.want_col = None;
     }
 
     /// Enter: a new line, keeping the current line's indentation.
     pub fn newline(&mut self) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
         }
         let indent: String = self.line(self.cursor.line).chars().take_while(|c| *c == ' ').collect();
         let indent: String = indent.chars().take(self.cursor.col).collect();
         self.cursor = self.insert(self.cursor, &format!("\n{}", indent));
-        self.want_col = None;
     }
 
     pub fn backspace(&mut self) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
             return;
@@ -1141,11 +1150,11 @@ impl Editor {
             self.delete(start, self.cursor);
             self.cursor = start;
         }
-        self.want_col = None;
     }
 
     pub fn delete_forward(&mut self) {
         self.checkpoint_typing();
+        self.forget_goal();
         if self.anchor.is_some() && self.keys == Keys::Normal {
             self.delete_selection();
             return;
@@ -1158,6 +1167,7 @@ impl Editor {
     /// Delete back to the start of the word (Ctrl-W, Alt-Backspace).
     pub fn delete_word_back(&mut self) {
         self.checkpoint();
+        self.forget_goal();
         let start = self.word_back(self.cursor, false);
         self.delete(start, self.cursor);
         self.cursor = start;

@@ -284,3 +284,46 @@ fn a_selection_over_a_tab_covers_its_spaces_and_no_more() {
     assert_eq!(bgs[..4], [sel; 4], "the tab's four cells are selected: {:?}", bgs);
     assert_ne!(bgs[4], sel, "the λ is not: {:?}", bgs);
 }
+
+#[test]
+fn typing_resets_the_editors_screen_row_goal_column() {
+    // wrapping on: after typing, Down aims for the column the cursor is at,
+    // not the one the previous Down aimed for (as with wrapping off)
+    let (_d, mut app) = app_with("# A\n\nabcdef\nx\nabcdef\n");
+    keys(&mut app, "e");
+    draw(&mut app);
+    // to column 1 of the first "abcdef", then Down onto the end of "x"
+    for c in [KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Down] {
+        key(&mut app, c);
+    }
+    keys(&mut app, "yz");
+    // the cursor is at column 3 of "xyz"; Down lands at column 3 below
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "Q");
+    key(&mut app, KeyCode::Esc);
+    let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
+    assert!(text.contains("\nxyz\nabcQdef\n"), "{}", text);
+}
+
+#[test]
+fn undo_resets_the_editors_screen_row_goal_column() {
+    // wrapping on: Ctrl-Z moves the cursor back to where the typing was, and
+    // the next Down aims from there, not from the column before the undo
+    let (_d, mut app) = app_with("# A\n\nabcdef\nx\nabcdef\n");
+    keys(&mut app, "e");
+    draw(&mut app);
+    for c in [KeyCode::Down, KeyCode::Down, KeyCode::End] {
+        key(&mut app, c);
+    }
+    keys(&mut app, "yz");
+    // Home, then Down onto column 0 of "x": the goal column is now 0
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Down);
+    // undo puts the cursor back at column 6 of "abcdef"
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    key(&mut app, KeyCode::Down);
+    keys(&mut app, "Q");
+    key(&mut app, KeyCode::Esc);
+    let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
+    assert!(text.contains("\nabcdef\nxQ\nabcdef\n"), "{}", text);
+}
