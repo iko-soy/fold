@@ -179,7 +179,12 @@ impl Walk<'_> {
                 return;
             }
         }
-        let clevel = (dlevel as isize + tree.level(c) as isize - tree.level(r) as isize).max(0);
+        // A section under an item can sit shallower than the item's section
+        // (§3.1: a skipped level above it is honoured), so the shift can
+        // take it below level 1. It prints at 1 then, and its subtree is
+        // levelled from there, so a child section still prints deeper.
+        let min = if cn.kind == Kind::Section { 1 } else { 0 };
+        let clevel = (dlevel as isize + tree.level(c) as isize - tree.level(r) as isize).max(min);
         self.node(c, clevel as usize, cindent, owner, outer);
     }
 

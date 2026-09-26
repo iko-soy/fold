@@ -450,3 +450,25 @@ fn empty_title_nodes_parse_everywhere() {
     let pf = parse_file("root.md", "# A\n\n- [ ] \n", 0, None);
     assert!(pf.nodes.iter().any(|n| n.task == Some(TaskState::Open) && n.title.is_empty()));
 }
+
+#[test]
+fn render_keeps_child_sections_under_items_nested() {
+    // A skipped-level section (§3.1) re-levelled by base − level(node)
+    // (§5.1) can push a section under an item below level 1; its child
+    // section must still print deeper than it, so that
+    // parse(render(t, 1, false)) keeps the tree's shape.
+    let t = tree_of("### Meeting\n- topic\n  ## Notes\n  ### Sub\n");
+    let m = t.resolved_children(t.root)[0];
+    let topic = t.resolved_children(m)[0];
+    let notes = t.resolved_children(topic)[0];
+    assert_eq!(t.resolved_children(notes).len(), 1, "Sub is a child of Notes");
+    let r = render(&t, m, 1, false);
+    assert_eq!(r, "# Meeting\n- topic\n  # Notes\n  ## Sub\n");
+    let t2 = tree_of(&r);
+    let m2 = t2.resolved_children(t2.root)[0];
+    let topic2 = t2.resolved_children(m2)[0];
+    assert_eq!(t2.resolved_children(topic2).len(), 1, "Notes and Sub became siblings:\n{r}");
+    let notes2 = t2.resolved_children(topic2)[0];
+    assert_eq!(t2.node(notes2).title, "Notes");
+    assert_eq!(t2.resolved_children(notes2).len(), 1, "{r}");
+}
