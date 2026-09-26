@@ -665,3 +665,25 @@ fn a_menu_verb_after_cutting_a_block_title_acts_on_the_menus_node() {
     click(&mut app, Hit::MenuItem(fold_tui::app::node_menu_index(Action::ToggleDone)));
     assert!(std::fs::read_to_string(&task).unwrap().contains("- [x] task"));
 }
+
+#[test]
+fn an_open_filter_survives_an_external_rewrite_that_shrinks_the_file() {
+    let (d, mut app) = app_with("# A\n\n- one\n- two\n- three\n");
+    typing(&mut app, "/thr");
+    assert!(draw(&mut app).contains("three"), "the filter lists three");
+    // another program rewrites the file while the filter is open (§11.2)
+    std::fs::write(d.path().join("root.md"), "# A\n").unwrap();
+    app.reload_external();
+    // the next frame must not index a node that no longer exists
+    draw(&mut app);
+    // a line inserted above renumbers the nodes: the hits are found again,
+    // and the selection stays on its node
+    let (d, mut app) = app_with("# A\n\n- one\n- two\n- three\n");
+    typing(&mut app, "/t");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    std::fs::write(d.path().join("root.md"), "# A\n\n- tea\n- one\n- two\n- three\n").unwrap();
+    app.reload_external();
+    assert!(draw(&mut app).contains("tea"), "the filter lists tea");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(title(&app), "three");
+}

@@ -317,8 +317,11 @@ impl App {
     /// the editor re-rendered. A new sync-conflict file starts the merge
     /// flow (§12).
     pub fn reload_external(&mut self) {
-        let edit = self.editor_before_write("external change");
+        // what popups show is held by key: the editor's save and the reload
+        // re-parse files, renumbering their nodes
         let props_key = self.props_target.map(|t| self.vault.key_of(t));
+        let filter_key = self.filter_rows.get(self.filter_sel).filter(|_| self.mode == Mode::Filter).map(|&r| self.vault.key_of(r));
+        let edit = self.editor_before_write("external change");
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
         // vault, then may close the editor, which reads the outline, before
@@ -341,7 +344,8 @@ impl App {
         }
         self.clamp_cursor();
         // the property form's node is found again, or the form closes; a
-        // target prompt lists its candidates again (the menu keeps a key)
+        // target prompt lists its candidates again, and the filter its hits,
+        // its selection staying on its node (the menu keeps a key)
         self.props_target = props_key.and_then(|k| self.find_exact(&k));
         if self.mode == Mode::Props {
             match self.props_target {
@@ -350,6 +354,13 @@ impl App {
             }
         }
         self.refresh_picks();
+        if self.mode == Mode::Filter {
+            self.update_filter();
+            let sel = filter_key.and_then(|k| self.find_exact(&k));
+            if let Some(i) = self.filter_rows.iter().position(|&r| Some(r) == sel) {
+                self.filter_sel = i;
+            }
+        }
         self.editor_after_write(edit);
     }
 
