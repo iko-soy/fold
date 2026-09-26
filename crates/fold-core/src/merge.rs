@@ -581,6 +581,10 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
             cfile, outcome.conflicts
         ));
         if !dry_run {
+            // the trash first, so a trash that cannot be made stops the
+            // merge before anything is written
+            let trash = crate::vault::trash_dir();
+            std::fs::create_dir_all(&trash)?;
             crate::vault::atomic_write(&bpath, &outcome.text)?;
             for (fname, text) in &outcome.conflict_blocks {
                 let fname = fresh_block_name(vault, fname, text);
@@ -590,11 +594,11 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
                 vault.reload()?;
                 place_sibling_embeds(vault, oid.as_ref(), &outcome.sibling_embeds)?;
             }
-            // the conflict file goes to trash (§12.4)
-            let trash = crate::vault::trash_dir();
-            std::fs::create_dir_all(&trash)?;
+            // the conflict file goes to trash (§12.4), which is often on
+            // another filesystem: a rename alone would fail there and leave
+            // it to be merged again
             let stamp2 = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
-            std::fs::rename(&cpath, trash.join(format!("{}-{}", stamp2, cfile.to_lowercase())))?;
+            crate::vault::move_file(&cpath, &trash.join(format!("{}-{}", stamp2, cfile.to_lowercase())))?;
         }
     }
     if !dry_run {

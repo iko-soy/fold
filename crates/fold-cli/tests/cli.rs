@@ -156,3 +156,48 @@ fn trash_restore_never_overwrites_root_md() {
     assert_eq!(std::fs::read_to_string(dir.path().join("root.md")).unwrap(), "# Keep\n");
     assert!(dir.path().join("root-restored-2.md").exists());
 }
+
+/// The trash lives outside the vault (§11.5), often on another filesystem
+/// (a Syncthing folder on an external disk vs `$XDG_STATE_HOME`). Merging
+/// must still move the conflict file to trash (copy + remove across
+/// filesystems), or every rerun merges the same conflict again and adds
+/// another duplicate conflict block.
+#[test]
+#[cfg(target_os = "linux")]
+fn merge_trashes_conflict_file_across_filesystems() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let Ok(state) = tempfile::tempdir_in("/dev/shm") else {
+        return;
+    };
+    let dev = |p: &std::path::Path| std::fs::metadata(p).unwrap().dev();
+    if dev(dir.path()) == dev(state.path()) {
+        return; // not a cross-filesystem setup on this machine
+    }
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- [ ] t\n").unwrap();
+    let c = "root.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), "# A\n\n- [x] t\n").unwrap();
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .arg("merge")
+        .assert()
+        .success();
+    assert!(!dir.path().join(c).exists(), "conflict file left in the vault");
+    let trash = state.path().join("fold").join("trash");
+    assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 1);
+    // idempotent: a second run finds nothing to merge and adds no blocks
+    let md_files = |d: &std::path::Path| {
+        std::fs::read_dir(d)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "md"))
+            .count()
+    };
+    let before = md_files(dir.path());
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .arg("merge")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no sync-conflict files"));
+    assert_eq!(md_files(dir.path()), before);
+}
