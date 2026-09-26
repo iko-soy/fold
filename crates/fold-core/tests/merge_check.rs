@@ -604,3 +604,21 @@ fn orphan_block_conflict_is_not_paired_with_an_unrelated_node() {
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn crlf_root_md_keeps_its_blank_lines_under_fix() {
+    // check --fix lays root.md's top-level nodes out itself; a blank line
+    // is blank whatever its line ending, so a loose list stays loose
+    // (§4.2) and none is added after text that already ends in one (§3.3)
+    for (before, after) in [
+        ("- a\r\n\r\n- b\r\n", "- a\n\n- b\n"),
+        ("intro\r\n\r\n- a\r\n", "intro\r\n\r\n- a\n"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.md"), before).unwrap();
+        let mut v = Vault::open(dir.path()).unwrap();
+        fold_core::check::fix(&mut v).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+        assert_eq!(text, after, "{:?}", before);
+    }
+}

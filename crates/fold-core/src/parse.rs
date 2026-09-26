@@ -762,7 +762,7 @@ pub fn unseparated_text(n: &Node, text: &str) -> Vec<usize> {
 
 /// Whether `s`, which ends at a line start, ends with a blank line: one that
 /// is empty or whitespace, whatever its line ending (`\r\n` is read too).
-fn ends_with_blank_line(s: &str) -> bool {
+pub(crate) fn ends_with_blank_line(s: &str) -> bool {
     let Some(s) = s.strip_suffix('\n') else {
         return false;
     };

@@ -1,7 +1,7 @@
 //! `notes check` diagnostics (§15.7) and `--fix` canonicalization (§4.2).
 
 use crate::ident::{filename, slug, split_filename, Id};
-use crate::parse::{Content, Kind};
+use crate::parse::{ends_with_blank_line, Content, Kind};
 use crate::render::render;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -300,7 +300,8 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             // frontmatter and intro text, exactly as found; then the root's
             // children in order — nodes rendered, text children verbatim,
             // one blank line between a node and what follows it unless both
-            // are items of a tight list (§4.2)
+            // are items of a tight list (§4.2); a line is blank whatever its
+            // line ending, so a CRLF file keeps its loose lists
             let mut s = f.text[..f.nodes[first].span.start].to_string();
             let root = &f.nodes[f.root_node];
             let from = root
@@ -312,23 +313,23 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             for c in &root.content[from..] {
                 let loose_after_prev = prev.map(|p| {
                     let pn = &f.nodes[p];
-                    pn.kind == Kind::Section || pn.span.text(&f.text).ends_with("\n\n")
+                    pn.kind == Kind::Section || ends_with_blank_line(pn.span.text(&f.text))
                 });
                 match *c {
                     Content::Node(k) => {
                         let kn = &f.nodes[k];
                         let blank = match loose_after_prev {
                             Some(loose) => loose || kn.kind == Kind::Section,
-                            None => !s.is_empty() && !s.ends_with("\n\n"),
+                            None => !s.is_empty() && !ends_with_blank_line(&s),
                         };
-                        if blank && !s.ends_with("\n\n") {
+                        if blank && !ends_with_blank_line(&s) {
                             s.push('\n');
                         }
                         s.push_str(&render(&vault.tree, (i, k), 1, false));
                         prev = Some(k);
                     }
                     Content::Text(sp) => {
-                        if prev.is_some() && !s.ends_with("\n\n") {
+                        if prev.is_some() && !ends_with_blank_line(&s) {
                             s.push('\n');
                         }
                         let t = sp.text(&f.text);
