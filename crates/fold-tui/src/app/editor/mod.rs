@@ -570,8 +570,7 @@ impl Editor {
             .map(|(o, t)| (o, if t < l1 { Some(t) } else if t > l2 { Some(t - n) } else { None }))
             .collect();
         self.settle(&left);
-        self.copy(text, true);
-        self.clip.tags = tags;
+        self.set_clip(text, true, tags);
     }
 
     /// Put the clipboard's whole lines above or below line `l`; returns the
@@ -727,8 +726,23 @@ impl Editor {
     // -------------------------------------------------------------- clipboard
 
     pub fn copy(&mut self, text: String, linewise: bool) {
+        self.set_clip(text, linewise, Vec::new());
+    }
+
+    /// Fill the clipboard. The blocks whose title lines it holds are in
+    /// transit until they are pasted back or the clipboard is replaced: the
+    /// buffer holds them, so a save meanwhile does not delete them (§5.2).
+    fn set_clip(&mut self, text: String, linewise: bool, tags: Vec<Option<Owner>>) {
         self.copied = Some(text.clone());
-        self.clip = Clip { text, linewise, tags: Vec::new() };
+        self.buf.hold(tags.iter().flatten().copied().collect());
+        self.clip = Clip { text, linewise, tags };
+    }
+
+    /// Leaving the editor: the clipboard keeps its text, but a block whose
+    /// title line was cut and not pasted back is deleted now (§5.2).
+    pub fn release_clip(&mut self) {
+        self.clip.tags.clear();
+        self.buf.hold(Vec::new());
     }
 
     fn after_cursor(&self) -> Pos {

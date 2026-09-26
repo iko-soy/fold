@@ -700,3 +700,43 @@ fn a_block_save_keeps_a_property_set_on_disk_meanwhile() {
     assert_eq!(disk, theirs.replace("- task", "- task (mine)"));
     assert!(disk.contains("due: 2026-10-01\n---\n\n- task (mine)\n"), "{}", disk);
 }
+
+#[test]
+fn a_held_block_title_is_in_transit_not_deleted() {
+    // §5.2: cutting a nested block's title line and pasting it moves the
+    // block. While the editor's clipboard holds the line, a save writes the
+    // parent without the embed and leaves the block and its file alone; put
+    // back, the block is embedded where it now sits; released without being
+    // put back, it is deleted like any block whose title line is.
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n- two\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block_path = v.tree.files[1].path.clone();
+    let block_before = v.tree.files[1].text.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    let cut = buf.lines[i].clone();
+    buf.delete_line(i);
+    buf.hold(vec![cut.owner]);
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# A\n\n- one\n- two\n");
+    assert_eq!(std::fs::read_to_string(d.path().join(&block_path)).unwrap(), block_before);
+    // pasted below "- two" with its tag: the block and its parent are dirty
+    let two = buf.lines.iter().position(|l| l.text == "- two").unwrap();
+    buf.lines.insert(two + 1, cut.clone());
+    buf.mark_dirty(cut.owner);
+    buf.mark_dirty(buf.lines[0].owner);
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n- two\n![[{}]]\n", id.as_str()));
+    assert_eq!(std::fs::read_to_string(d.path().join(&block_path)).unwrap(), block_before);
+    // cut again and saved, then the clipboard replaced: the block is deleted
+    buf.delete_line(two + 1);
+    buf.save_all(&mut v).unwrap();
+    assert!(d.path().join(&block_path).exists());
+    buf.hold(Vec::new());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# A\n\n- one\n- two\n");
+    assert!(!d.path().join(&block_path).exists());
+    assert!(buf.dirty.is_empty(), "{:?}", buf.dirty);
+}

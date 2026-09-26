@@ -46,6 +46,9 @@ pub struct EditBuffer {
     /// lines are the enclosing block's now, and each file goes to trash
     /// once no file embeds it.
     dropped: Vec<Owner>,
+    /// Nested blocks whose title line is in the editor's clipboard, cut
+    /// and not put back: in transit, not deleted (`hold`).
+    held: Vec<Owner>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +167,7 @@ impl EditBuffer {
             dirty: Vec::new(),
             base_hashes,
             dropped: Vec::new(),
+            held: Vec::new(),
         }
     }
 
@@ -177,6 +181,21 @@ impl EditBuffer {
     pub fn mark_dirty(&mut self, owner: Owner) {
         if !self.dirty.contains(&owner) {
             self.dirty.push(owner);
+        }
+    }
+
+    /// The nested blocks whose title line the editor's clipboard holds
+    /// (§5.2: cutting a block's title line and pasting it moves the block).
+    /// While held, a block with no title line in the buffer is in transit:
+    /// the enclosing block is written without its embed, and the block and
+    /// its file are left alone until the line is pasted back. A block
+    /// released with no line in the buffer is dirty again, so the next
+    /// save deletes it, as deleting its title line does.
+    pub fn hold(&mut self, owners: Vec<Owner>) {
+        for o in std::mem::replace(&mut self.held, owners) {
+            if !self.held.contains(&o) && !self.lines.iter().any(|l| l.owner == o) {
+                self.mark_dirty(o);
+            }
         }
     }
 
@@ -270,7 +289,7 @@ impl EditBuffer {
     /// line deletes the block: every line it still owned is re-tagged to
     /// the enclosing block, the blocks nested in it are nested in that
     /// block, and its file goes to trash once that block is written without
-    /// its embed.
+    /// its embed — unless the title line is held in the clipboard (`hold`).
     fn settle(&mut self) {
         // lines of a deleted block put back (by the editor's own undo) are
         // the enclosing block's text like the rest of them
@@ -303,12 +322,14 @@ impl EditBuffer {
                     moved = true;
                 }
                 if title.is_none() {
+                    self.dirty.retain(|d| *d != o);
+                }
+                if title.is_none() && !self.held.contains(&o) {
                     for i in self.owners.values_mut() {
                         if i.parent == Some(o) {
                             i.parent = Some(parent);
                         }
                     }
-                    self.dirty.retain(|d| *d != o);
                     self.dropped.push(o);
                 }
                 if moved {

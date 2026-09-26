@@ -804,3 +804,47 @@ fn a_refused_save_keeps_the_editor_open_with_its_text() {
     assert!(app.editor_dirty(), "with the typed text still in it");
     assert!(draw(&mut app).contains("# AX"));
 }
+
+fn ctrl(app: &mut App, c: char) {
+    app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+}
+
+#[test]
+fn undoing_a_saved_cut_of_a_block_title_puts_the_block_back() {
+    // the cut title line is in the clipboard, so a save between the cut and
+    // the undo leaves the block alone (§5.2); undo puts it back, embed and all
+    let (d, mut app, embed, block) = editing_task_block_with_body();
+    let before = std::fs::read_to_string(&block).unwrap();
+    ctrl(&mut app, 'k');
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+    ctrl(&mut app, 'z');
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", embed));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
+#[test]
+fn a_cut_block_title_not_pasted_back_deletes_the_block() {
+    // §5.2: deleting a nested block's title line deletes the block; a cut one
+    // is deleted once it can no longer be pasted back, when the editor
+    // closes or when something else is copied over it
+    let (d, mut app, _, block) = editing_task_block_with_body();
+    ctrl(&mut app, 'k');
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    assert!(!block.exists());
+    let (d, mut app, _, block) = editing_task_block_with_body();
+    ctrl(&mut app, 'k');
+    // the cursor is on "  body": copy it
+    ctrl(&mut app, 'c');
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    assert!(!block.exists());
+    // the clipboard holds "  body" alone, pasted as a copy above the cursor
+    ctrl(&mut app, 'v');
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n  body\n- two\n");
+}

@@ -892,6 +892,10 @@ impl App {
     /// save is refused the editor stays open with its text: nothing typed
     /// is dropped except by *Revert*.
     fn close_editor(&mut self) -> bool {
+        // a block cut and not pasted back is deleted now (§5.2)
+        if let Some(ed) = self.editor.as_mut() {
+            ed.release_clip();
+        }
         if !self.save_editor("exit") {
             self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
             return false;
