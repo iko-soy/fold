@@ -781,7 +781,11 @@ impl App {
         self.reveal(nr);
         self.focus = focus;
         self.open_editor_on(nr);
-        self.type_new_title();
+        // an open editor whose save is refused stays, with its text: the
+        // title is typed only into a fresh editor on the new node
+        if !self.editor_dirty() && self.editor_node() == Some(nr) {
+            self.type_new_title();
+        }
     }
 
     /// After `n` / `N` the editor types the new node's title (§10.6): the

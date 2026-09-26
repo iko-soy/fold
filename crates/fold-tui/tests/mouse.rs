@@ -707,3 +707,30 @@ fn a_reload_after_the_property_form_closed_does_not_crash() {
     app.reload_external();
     assert!(draw(&mut app).contains("new"));
 }
+
+#[test]
+fn a_new_node_whose_editor_cannot_open_leaves_the_open_editor_alone() {
+    // the editor is open on A with block b's body typed in, and another
+    // program changed b's file: its save is refused, and it stays open
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n![[racfer-hattes-mislup-nodrys]]\n- two\n").unwrap();
+    let b = d.path().join("racfer~b.md");
+    std::fs::write(&b, "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- b\n  body\n").unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    typing(&mut app, "e");
+    for _ in 0..4 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    typing(&mut app, "X");
+    std::fs::write(&b, "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- b\n  body, from Helix\n").unwrap();
+    // New child (palette, menu): the node is made in root.md, but the
+    // editor on A cannot be switched to it
+    app.run_action(Action::NewChild);
+    assert_eq!(app.mode_pub(), "edit");
+    typing(&mut app, "new");
+    let s = draw(&mut app);
+    assert!(!s.contains("# A new"), "typing for the new node went into A's title:\n{}", s);
+    assert!(s.contains("bodyX"), "{}", s);
+}
