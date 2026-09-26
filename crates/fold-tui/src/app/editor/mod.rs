@@ -1051,19 +1051,23 @@ impl Editor {
     }
 
     /// Find a character on the cursor's line: `f` (forward, on it), `t`
-    /// (forward, before it), `F`, `T`.
-    pub fn find_char(&self, from: Pos, c: char, kind: char, count: usize) -> Option<Pos> {
+    /// (forward, before it), `F`, `T`. A `t`/`T` target right next to the
+    /// cursor is found where the cursor is, as in Vim, unless `skip`: then
+    /// the search starts past it, as Helix's `t` and Vim's `;` do.
+    pub fn find_char(&self, from: Pos, c: char, kind: char, count: usize, skip: bool) -> Option<Pos> {
         let line: Vec<char> = self.line(from.line).chars().collect();
         let mut col = from.col;
-        for _ in 0..count.max(1) {
+        for k in 0..count.max(1) {
+            // after the first, each step starts past the target it found
+            let past = usize::from(skip || k > 0);
             col = match kind {
                 'f' | 't' => {
-                    let start = if kind == 't' { col + 2 } else { col + 1 };
+                    let start = if kind == 't' { col + 1 + past } else { col + 1 };
                     let i = (start.min(line.len())..line.len()).find(|&i| line[i] == c)?;
                     if kind == 't' { i - 1 } else { i }
                 }
                 _ => {
-                    let end = if kind == 'T' { col.saturating_sub(1) } else { col };
+                    let end = if kind == 'T' { col.saturating_sub(past) } else { col };
                     let i = (0..end).rev().find(|&i| line[i] == c)?;
                     if kind == 'T' { i + 1 } else { i }
                 }

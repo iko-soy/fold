@@ -246,14 +246,16 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
             } else {
                 kind
             };
-            find(e, kind, ch, n)?
+            // a repeat moves: it skips a `t`/`T` target next to the cursor,
+            // unless given a count (Vim's 'cpoptions' without `;`)
+            find(e, kind, ch, n, n == 1)?
         }
         _ => return None,
     })
 }
 
-fn find(e: &Editor, kind: char, ch: char, n: usize) -> Option<(Pos, Kind)> {
-    let to = e.find_char(e.cursor, ch, kind, n)?;
+fn find(e: &Editor, kind: char, ch: char, n: usize, skip: bool) -> Option<(Pos, Kind)> {
+    let to = e.find_char(e.cursor, ch, kind, n, skip)?;
     Some((to, if kind == 'f' || kind == 't' { Kind::Incl } else { Kind::Excl }))
 }
 
@@ -560,7 +562,7 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
     match p {
         'f' | 'F' | 't' | 'T' => {
             e.vim.last_find = Some((p, c));
-            if let Some((to, kind)) = find(e, p, c, count.unwrap_or(1)) {
+            if let Some((to, kind)) = find(e, p, c, count.unwrap_or(1), false) {
                 if let Some(op) = e.vim.op.take() {
                     let from = e.cursor;
                     apply(e, op, from, to, kind);

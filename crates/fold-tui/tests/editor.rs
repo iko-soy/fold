@@ -880,3 +880,29 @@ fn a_line_cut_before_a_reload_and_pasted_after_it_is_saved() {
     assert_eq!(app.mode_pub(), "normal");
     assert_eq!(root(&d), "# A\n\n- one\n- task\n- two\n\n# B\n\nb, from Helix\n");
 }
+
+#[test]
+fn vim_t_next_to_its_target_stays_put() {
+    let run = |keymap: fold_tui::app::EditKeys, text: &str, seq: &str| {
+        let (d, mut app) = app_with(&format!("# A\n\n{}\n", text));
+        app.set_edit_keys(keymap);
+        keys(&mut app, "ejj");
+        keys(&mut app, seq);
+        keys(&mut app, "⎋:w⏎");
+        root(&d).trim_start_matches("# A\n\n").trim_end().to_string()
+    };
+    let vim = |text: &str, seq: &str| run(fold_tui::app::EditKeys::Vim, text, seq);
+    // Vim: `t)` with `)` right after the cursor lands on the cursor, so `dt)`
+    // deletes the one character before `)`
+    assert_eq!(vim("foo(a) bar(b)", "fadt)"), "foo() bar(b)");
+    // `T(` with `(` right before it does not move: `dT(` deletes nothing
+    assert_eq!(vim("(b(a)", "fadT("), "(b(a)");
+    // only `;` and `,` repeating a `t`/`T` skip a target next to the cursor,
+    // and only without a count (Vim's 'cpoptions' without `;`)
+    assert_eq!(vim("a)b)c)", "t);x"), "a))c)");
+    assert_eq!(vim("(a(b(c", "$T(;x"), "(a((c");
+    assert_eq!(vim("a(b(c(d", "fct(,x"), "a((c(d");
+    assert_eq!(vim("a)b)c)d", "t)2;x"), "a))c)d");
+    // Helix's `t` always selects up to the next target it does not touch
+    assert_eq!(run(fold_tui::app::EditKeys::Helix, "a)b)", "t)d"), ")");
+}

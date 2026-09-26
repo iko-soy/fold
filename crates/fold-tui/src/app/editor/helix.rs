@@ -488,7 +488,8 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
             }
         }
         'f' | 't' | 'F' | 'T' => {
-            if let Some(to) = e.find_char(cur, c, p, n) {
+            // Helix's `t`/`T` look past a target next to the cursor
+            if let Some(to) = e.find_char(cur, c, p, n, true) {
                 select_to(e, cur, to);
             }
         }
