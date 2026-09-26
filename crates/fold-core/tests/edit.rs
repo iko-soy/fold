@@ -1028,6 +1028,32 @@ fn review_indenting_a_block_title_line_under_a_sibling_block_keeps_it_in_the_tre
 }
 
 #[test]
+fn review_a_line_split_off_above_a_re_indented_block_title_does_not_delete_the_block() {
+    // §5.2: only deleting its title line deletes a block; "note" split off
+    // above its re-indented title line is the enclosing block's text
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n  body\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block = d.path().join(&v.tree.files[1].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "  - task".into());
+    buf.set_line(i + 1, "    body".into());
+    // "note" typed at column 0, then Enter after it: the line splits, both
+    // parts keeping the line's tag
+    buf.set_line(i, "note  - task".into());
+    buf.set_line(i, "note".into());
+    buf.insert_line(i, "  - task".into());
+    buf.save_all(&mut v).unwrap();
+    assert!(
+        block.exists() && v.tree.files[0].text.contains(&format!("![[{}]]", id.as_str())),
+        "the block's file was trashed; root.md:\n{}",
+        v.tree.files[0].text
+    );
+}
+
+#[test]
 fn a_line_the_parser_would_nest_under_a_blocks_embed_is_not_saved() {
     // §4.7: an embed line has no lines nested under it in the parent file,
     // where the outline does not see them. The enclosing block's "- two"

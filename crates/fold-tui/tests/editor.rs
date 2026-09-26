@@ -1384,3 +1384,31 @@ fn review_indenting_a_block_title_line_under_a_sibling_blocks_title_keeps_it_in_
     let rows: Vec<String> = app.rows().iter().map(|r| app.title_of(r.nref)).collect();
     assert!(rows.contains(&"c".to_string()), "c is gone from the outline: {:?}; root.md {:?}", rows, root(&d));
 }
+
+#[test]
+fn review_typing_a_line_above_a_tabbed_block_title_keeps_the_block() {
+    // §5.2: "note" typed at the start of task's re-indented title line and
+    // split off with Enter is A's text; the title line is still there, so
+    // the block and its file stay
+    let (d, mut app, embed, block) = editing_task_block_with_body();
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    keys(&mut app, "note⏎⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert!(block.exists() && root(&d).contains(&embed), "block file exists: {}; root.md:\n{}", block.exists(), root(&d));
+}
+
+#[test]
+fn an_item_typed_at_the_start_of_a_block_title_and_split_off_is_the_parents() {
+    // §5.2: "- new" typed at the start of task's title line and split off
+    // with Enter is a line in front of the title line: A's, not a new title
+    // for task with its old one written under it into task's file
+    let (d, mut app, embed, block) = editing_task_block_with_body();
+    let before = std::fs::read_to_string(&block).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    keys(&mut app, "- new⏎⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n- one\n- new\n{}\n- two\n", embed));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}

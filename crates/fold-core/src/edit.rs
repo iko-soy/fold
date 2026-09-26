@@ -312,32 +312,47 @@ impl EditBuffer {
         oi > qi || (oi == qi && qh.is_some_and(|q| oh.is_none_or(|o| o > q)))
     }
 
-    /// The line where nested block `o`'s text starts (§5.2): its first line
-    /// if that is a title line of its kind at its display indent — a heading
-    /// for a section, a bullet for an item — or, re-indented or re-spelled,
-    /// a title line of either kind at any indent that is not one of the
-    /// block's children (`left_first`); else the first title line of its
-    /// kind at its display indent below it, a heading no deeper than the
-    /// block's level (deeper ones are its children). None: its title line
-    /// was deleted.
+    /// The line where nested block `o`'s text starts (§5.2): the first title
+    /// line of either kind at any indent named as the block is in its file
+    /// (`file_title`), whatever lines of the block come before it, typed or
+    /// split off in front of it; else its first line if that is a title line
+    /// of its kind at its display indent — a heading for a section, a
+    /// bullet for an item — or, re-indented or re-spelled, a title line of
+    /// either kind at any indent that is not one of the block's children
+    /// (`left_first`); else the first title line of its kind at its display
+    /// indent below it, a heading no deeper than the block's level (deeper
+    /// ones are its children). None: its title line was deleted.
     fn title_line(&self, vault: &Vault, o: Owner) -> Option<usize> {
         let info = self.owners.get(&o)?;
+        let named = self.file_title(vault, o);
         let mut fence = None;
         let mut first = true;
+        let mut found = None;
         for (i, l) in self.lines.iter().enumerate().filter(|(_, l)| l.owner == o) {
             let in_code = fence_transition(&l.text, &mut fence) || fence.is_some();
             if let Some((indent, heading)) = title_form(&l.text).filter(|_| !in_code) {
-                let own = indent == info.indent && heading.is_some() == info.section;
-                if first && (own || !self.left_first(vault, o, &l.text)) {
+                if named == Some(after_marker(&l.text)) {
                     return Some(i);
                 }
-                if own && heading.is_none_or(|h| h <= info.level.max(1)) {
-                    return Some(i);
+                let own = indent == info.indent && heading.is_some() == info.section;
+                let title = (first && (own || !self.left_first(vault, o, &l.text)))
+                    || (own && heading.is_none_or(|h| h <= info.level.max(1)));
+                if title && found.is_none() {
+                    found = Some(i);
                 }
             }
             first = false;
         }
-        None
+        found
+    }
+
+    /// Nested block `o`'s title in its file as last read or written, after
+    /// its marker (`after_marker`).
+    fn file_title<'v>(&self, vault: &'v Vault, o: Owner) -> Option<&'v str> {
+        let (file, root) = self.owners.get(&o).and_then(|i| self.locate(vault, i))?;
+        let f = &vault.tree.files[file];
+        let n = f.nodes.get(root?)?;
+        Some(after_marker(&f.text[n.title_span.start..n.title_span.end.min(f.text.len())]))
     }
 
     /// Whether `line`, first of block `o`'s lines, is the title line of one
