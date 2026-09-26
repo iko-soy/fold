@@ -667,6 +667,7 @@ impl App {
                 Ok(nr) => {
                     self.move_cursor_to(nr);
                     self.act_edit();
+                    self.type_new_title();
                     return;
                 }
                 Err(e) => Err(e),
@@ -696,6 +697,7 @@ impl App {
                         self.cursor += 1 + i;
                     }
                     self.act_edit();
+                    self.type_new_title();
                     return;
                 }
                 Err(e) => Err(e),
@@ -705,6 +707,21 @@ impl App {
             Ok(()) => self.refresh_after("node created"),
             Err(e) => self.say(format!("error: {}", e)),
         }
+    }
+
+    /// After `n` / `N` the editor types the new node's title (§10.6): the
+    /// cursor goes after the marker and its space, in insert mode as after
+    /// Vim's or Helix's `o`. The space is the buffer's alone until something
+    /// is typed, so a node left untitled is written as it was.
+    fn type_new_title(&mut self) {
+        let Some(ed) = self.editor.as_mut() else { return };
+        if let Some(l) = ed.buf.lines.first_mut() {
+            if !l.text.ends_with(' ') {
+                l.text.push(' ');
+            }
+        }
+        ed.set_cursor(editor::Pos::new(0, ed.len(0)));
+        ed.mode = editor::Mode::Insert;
     }
 
     // -------------------------------------------------------- editor (§10.6)

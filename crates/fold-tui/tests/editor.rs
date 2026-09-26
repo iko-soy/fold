@@ -745,3 +745,31 @@ fn huge_counts_stop_at_the_end_of_the_text() {
     assert_eq!(run(fold_tui::app::EditKeys::Helix, "3>u"), text);
     assert_eq!(run(fold_tui::app::EditKeys::Helix, &format!("{}>", huge)), text);
 }
+
+#[test]
+fn typing_after_n_titles_the_new_node() {
+    // §10.6: `n` / `N` put the cursor on the new node in the editor, so the
+    // first thing typed is its title, after the marker
+    let (d, mut app) = app_with("- a\n");
+    keys(&mut app, "nb⎋");
+    assert_eq!(root(&d), "- a\n- b\n");
+    let (d, mut app) = app_with("# A\n");
+    keys(&mut app, "nB⎋");
+    assert_eq!(root(&d), "# A\n\n# B\n");
+    let (d, mut app) = app_with("- a\n");
+    keys(&mut app, "Nc⎋");
+    let text = root(&d);
+    assert!(text.starts_with("- a\n") && text.lines().any(|l| l == "  - c"), "{:?}", text);
+    // Vim and Helix start typing too, as after `o`
+    for k in [fold_tui::app::EditKeys::Vim, fold_tui::app::EditKeys::Helix] {
+        let (d, mut app) = app_with("- a\n");
+        app.set_edit_keys(k);
+        keys(&mut app, "nb⎋:wq⏎");
+        assert_eq!(root(&d), "- a\n- b\n");
+        assert_eq!(app.mode_pub(), "normal");
+    }
+    // a new node left untitled stays as it was written
+    let (d, mut app) = app_with("- a\n");
+    keys(&mut app, "n⎋");
+    assert_eq!(root(&d), "- a\n-\n");
+}
