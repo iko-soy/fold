@@ -459,3 +459,16 @@ fn undoing_a_move_out_of_a_block_puts_the_embed_back_in_it() {
     assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", b));
     assert_eq!(std::fs::read_to_string(&b_file).unwrap(), before);
 }
+
+#[test]
+fn helix_x_r_above_a_block_keeps_the_block() {
+    // `r` over a whole line and its end replaces that line; the block's
+    // title line below it keeps its tag (§5.2)
+    let (d, block) = vault_with_bullet_block();
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Helix);
+    keys(&mut app, "ejjxr-:w⏎");
+    assert!(root(&d).starts_with("# A\n\n-----\n![["), "{}", root(&d));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
