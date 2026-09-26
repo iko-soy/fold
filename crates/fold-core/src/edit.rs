@@ -465,20 +465,20 @@ impl EditBuffer {
         // was read (or last written) through this buffer.
         let on_disk = std::fs::read_to_string(vault.dir.join(&path)).unwrap_or_default();
         if self.base_hashes.get(&path).map(|h| *h != hash(&on_disk)).unwrap_or(false) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{} changed on disk; not overwriting", path),
-            ));
+            return Err(std::io::Error::other(format!(
+                "{} changed on disk; not overwriting",
+                path
+            )));
         }
         let f = &vault.tree.files[file];
         // §4.9: a block file with text or an embed before its root is
         // read-only until fixed — the bytes before the root are not in the
         // buffer, and rewriting the file would drop them
         if malformed_block_file(f) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{}: text or an embed before the block's root; read-only until fixed", path),
-            ));
+            return Err(std::io::Error::other(format!(
+                "{}: text or an embed before the block's root; read-only until fixed",
+                path
+            )));
         }
         if let Some(ni) = node {
             // §5.2 step 2: a block's text parses to exactly one root-level
@@ -490,10 +490,10 @@ impl EditBuffer {
                     ..b.clone()
                 };
                 if malformed_block_file(&parse_file(&path, &out, file, Some(b))) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("{}: the block's text must start with its title line; not saved", path),
-                    ));
+                    return Err(std::io::Error::other(format!(
+                        "{}: the block's text must start with its title line; not saved",
+                        path
+                    )));
                 }
             }
             // the block IS the file: keep its frontmatter, replace the rest
@@ -548,8 +548,7 @@ impl EditBuffer {
         match errs.len() {
             0 => Ok(n),
             1 => Err(errs.remove(0)),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            _ => Err(std::io::Error::other(
                 errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "),
             )),
         }
