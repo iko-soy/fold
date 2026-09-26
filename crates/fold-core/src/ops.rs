@@ -1327,9 +1327,12 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
         }
         Span { start: sp.start, end: e }
     };
-    let a = core(vault.tree.node(r).span);
-    let b = core(vault.tree.node(other).span);
-    let (first, second) = if a.start < b.start { (a, b) } else { (b, a) };
+    let (fr, sr) = if vault.tree.node(r).span.start < vault.tree.node(other).span.start {
+        (r, other)
+    } else {
+        (other, r)
+    };
+    let (first, second) = (core(vault.tree.node(fr).span), core(vault.tree.node(sr).span));
     let with_nl = |t: &str| {
         if t.ends_with('\n') {
             t.to_string()
@@ -1337,12 +1340,29 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
             format!("{}\n", t)
         }
     };
+    // The written level and indent decide the parent: a sibling written
+    // deeper than the one after it (a skipped heading level, §4.7, or a
+    // wider indent) would nest under that one once below it, and J/K keep
+    // every other node's parent (§15.6). So the node moving down is written
+    // at the level and indent of the one moving up, its subtree re-levelled
+    // with it, as a moved node is (§4.2).
+    let (fnode, snode) = (vault.tree.node(fr), vault.tree.node(sr));
+    let lower = if (fnode.level, fnode.indent) == (snode.level, snode.indent) {
+        with_nl(first.text(&text))
+    } else {
+        let base = snode.level.unwrap_or_else(|| vault.tree.level(fr));
+        let pad = " ".repeat(snode.indent);
+        render(&vault.tree, fr, base, false)
+            .lines()
+            .map(|l| if l.is_empty() { "\n".to_string() } else { format!("{}{}\n", pad, l) })
+            .collect()
+    };
     let mut new_text = format!(
         "{}{}{}{}",
         &text[..first.start],
         with_nl(second.text(&text)),
         &text[first.end..second.start],
-        with_nl(first.text(&text)),
+        lower,
     );
     let rest = &text[second.end..];
     new_text.push_str(rest);

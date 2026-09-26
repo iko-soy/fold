@@ -630,3 +630,38 @@ fn fixing_a_heading_embed_level_keeps_following_sections_in_place() {
     assert_eq!(parents(&v), before, "{}", root_text(&v));
     assert_eq!(root_text(&v), root);
 }
+
+#[test]
+fn move_up_past_a_deeper_written_sibling_keeps_parents() {
+    // `### Note` skips a level but is still Doc's child, a sibling of Part
+    let (_d, mut v) = vault_with("# Doc\n\n### Note\n\n## Part\n");
+    assert_eq!(v.tree.node(at(&v, "Doc/Note")).kind, Kind::Section);
+    let before = others(&parents(&v), "Part");
+    let r = at(&v, "Doc/Part");
+    ops::move_sibling(&mut v, r, false).unwrap();
+    assert_eq!(others(&parents(&v), "Part"), before, "{}", root_text(&v));
+    assert_ordered(&v);
+    // the node moving down takes the level of the one moving up, and its
+    // subtree comes with it
+    let (_d, mut v) = vault_with("# Doc\n\n### Note\n\ntext\n\n#### Sub\n\n## Part\n");
+    let before = parents(&v);
+    let r = at(&v, "Doc/Part");
+    ops::move_sibling(&mut v, r, false).unwrap();
+    assert_eq!(root_text(&v), "# Doc\n\n## Part\n\n## Note\n\ntext\n\n### Sub\n");
+    assert_eq!(parents(&v), before);
+    // siblings all written deeper stay as written: none nests under another
+    let src = "# Doc\n\n### A\n\n### B\n\n### C\n";
+    let (_d, mut v) = vault_with(src);
+    let before = parents(&v);
+    let r = at(&v, "Doc/A");
+    ops::move_sibling(&mut v, r, true).unwrap();
+    assert_eq!(root_text(&v), "# Doc\n\n### B\n\n### A\n\n### C\n");
+    assert_eq!(parents(&v), before);
+    // an item indented deeper than the sibling after it (accepted on read)
+    let (_d, mut v) = vault_with("- P\n    - a\n      - kid\n  - b\n");
+    let before = parents(&v);
+    let r = at(&v, "P/b");
+    ops::move_sibling(&mut v, r, false).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), "- P\n  - b\n  - a\n    - kid\n");
+}
