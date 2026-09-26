@@ -1007,3 +1007,29 @@ fn a_block_an_orphan_embeds_too_is_inlined_where_the_root_reaches_it() {
     assert_eq!(r, "# A\n\n- C\n  - S\n");
     assert!(v.find_by_path(&["A".into(), "C".into(), "S".into()]).is_some());
 }
+
+#[test]
+fn respelling_an_item_keeps_its_setext_child_under_it() {
+    // a setext heading is read (§4.2); respelling its parent must convert
+    // it with the rest of the subtree, not leave a level-1 underline that
+    // takes it out of the tree it was in
+    let (d, mut v) = vault_with("# P\n\n- a\n  Sub\n  ===\n  body\n");
+    let a = at(&v, &["P", "a"]);
+    assert_eq!(v.tree.resolved_children(a).len(), 1);
+    ops::toggle_spelling(&mut v, a).unwrap();
+    assert!(
+        v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(),
+        "{}",
+        read(&d, "root.md")
+    );
+    // so for a heading under an item written shallower than its position
+    // gives (§3.1): it stays one below its parent, respelled and back
+    let (d, mut v) = vault_with("# P\n\n- a\n  # Sub\n  body\n\n- b\n");
+    let a = at(&v, &["P", "a"]);
+    ops::toggle_spelling(&mut v, a).unwrap();
+    assert!(v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(), "{}", read(&d, "root.md"));
+    let a = at(&v, &["P", "a"]);
+    ops::toggle_spelling(&mut v, a).unwrap();
+    assert!(v.find_by_path(&["P".into(), "a".into(), "Sub".into()]).is_some(), "{}", read(&d, "root.md"));
+    assert!(v.find_by_path(&["P".into(), "b".into()]).is_some(), "{}", read(&d, "root.md"));
+}

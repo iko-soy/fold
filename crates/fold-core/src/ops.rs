@@ -1456,12 +1456,16 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let file = r.0;
     let text = vault.tree.files[file].text.clone();
     let span = Span { start: n.span.start, end: n.span.end.min(text.len()) };
-    // a setext title is respelled from its ATX form, so its text is kept and
-    // its underline goes (§4.2)
-    let src = match setext_as_atx(&vault.tree, r) {
-        Some((ts, atx)) => format!("{}{}", atx, &text[ts.end..span.end]),
-        None => span.text(&text).to_string(),
-    };
+    // respelled from the subtree as a move writes it (§4.2): every heading
+    // in it ATX, a setext one converted, at the level its position gives,
+    // so re-levelling keeps each under the node it was under; at the node's
+    // indent, with the blank lines that end its span
+    let blanks = span.text(&text).lines().rev().take_while(|l| l.trim().is_empty()).count();
+    let rendered: String = crate::render::render_lines(&vault.tree, r, vault.tree.level(r), false)
+        .into_iter()
+        .map(|l| l.text + "\n")
+        .collect();
+    let src = shift_lines(&rendered, 0, n.indent as isize) + &"\n".repeat(blanks);
     if stand != r {
         // a block: respell its file's root at level 1, then its embed
         let respelled = respell(&src, to_section, 1);
