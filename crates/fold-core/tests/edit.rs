@@ -843,3 +843,37 @@ fn review_undoing_an_editor_save_leaves_another_files_sync_alone() {
         "undoing the save reverted another device's change to a file it never touched"
     );
 }
+
+#[test]
+fn review_a_block_is_not_trashed_while_the_file_on_disk_embeds_it() {
+    // A block cut in the editor is in transit: the parent is saved without
+    // its embed. Another device's root.md, which still embeds it, then
+    // lands (§12.1). Releasing the clipboard deletes the block only once no
+    // file embeds it (§5.2): the parent's save is refused (changed on
+    // disk), so root.md on disk still embeds the block and its file must
+    // stay, not go to the trash leaving that embed broken
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n- two\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block = d.path().join(&v.tree.files[1].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    let cut = buf.lines[i].owner;
+    buf.delete_line(i);
+    buf.hold(vec![cut]);
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# A\n\n- one\n- two\n");
+    assert!(block.exists(), "in transit");
+    let theirs = format!("# A\n\n- one\n![[{}]]\n- two, from phone\n", id.as_str());
+    std::fs::write(d.path().join("root.md"), &theirs).unwrap();
+    buf.hold(Vec::new());
+    let res = buf.save_all(&mut v);
+    assert_eq!(std::fs::read_to_string(d.path().join("root.md")).unwrap(), theirs);
+    assert!(
+        block.exists(),
+        "save {:?}: root.md embeds {} but its file went to the trash",
+        res.map_err(|e| e.to_string()),
+        id.as_str()
+    );
+}

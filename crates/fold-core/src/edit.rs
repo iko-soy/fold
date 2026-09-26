@@ -377,14 +377,20 @@ impl EditBuffer {
 
     /// Move deleted blocks' files to the trash (§11.5) once no file embeds
     /// them any more: once the block that held the embed has been written.
+    /// That is the block its lines went to, and it must be saved (not
+    /// dirty, its save not refused) with its file on disk as written: a
+    /// file another program changed may embed the block again.
     fn trash_dropped(&self, vault: &mut Vault) -> std::io::Result<()> {
         loop {
             let file = self.dropped.iter().find_map(|o| {
                 let id = self.owners.get(o)?.id.as_ref()?;
-                match vault.tree.embed_of(id) {
-                    Some(_) => None,
-                    None => vault.tree.block_by_id(id).map(|r| r.0),
+                let s = self.surviving(*o);
+                if self.dirty.contains(&s) || vault.tree.embed_of(id).is_some() {
+                    return None;
                 }
+                let (holder, _) = self.locate(vault, self.owners.get(&s)?)?;
+                vault.check_unchanged(holder).ok()?;
+                vault.tree.block_by_id(id).map(|r| r.0)
             });
             match file {
                 Some(f) => vault.trash_file(f)?,
