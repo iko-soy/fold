@@ -150,7 +150,7 @@ fn capture_inner(
     // refused before the inbox or its day is created
     let mut line = item_line(&title)?;
     let dest = match target {
-        Some(t) => t,
+        Some(t) => write_target(&vault.tree, t)?,
         None => {
             let inbox = find_or_create_inbox(vault)?;
             find_or_create_day(vault, inbox)?
@@ -282,6 +282,9 @@ fn append_child_line(
     line: &str,
     section_ok: bool,
 ) -> std::io::Result<NRef> {
+    // under the node an embed stands for: an embed line has no children
+    // in its file (§6.2)
+    let parent = write_target(&vault.tree, parent)?;
     let parent_key = vault.key_of(parent);
     let node = vault.tree.node(parent);
     let file = parent.0;
@@ -373,7 +376,7 @@ pub fn toggle_task(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
 
 /// Toggle task-ness itself (§10.3 `t`).
 pub fn toggle_taskness(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
-    let r = vault.tree.resolved_child(r);
+    let r = write_target(&vault.tree, r)?;
     let state = match vault.tree.node(r).task {
         Some(_) => None,
         None => Some(TaskState::Open),
@@ -843,7 +846,7 @@ fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
 
 /// Refile: move a subtree under a new parent as its last child (§6.5).
 pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<bool> {
-    let dest = vault.tree.resolved_child(dest);
+    let dest = write_target(&vault.tree, dest)?;
     let n = vault.tree.node(r);
     // guard: cannot refile into own subtree — ancestry followed through
     // embeds, so a destination inside a nested block counts too
@@ -947,6 +950,19 @@ fn stand_in(tree: &crate::tree::Tree, r: NRef) -> NRef {
         }
     }
     r
+}
+
+/// The node a verb writes into at `r`: a block's own embed is the block
+/// (§4.7). An embed that resolves to nothing, broken or a second embed of
+/// a block (§6.2), is only a line of the file that holds it: it has no
+/// checkbox, properties or children of its own, so the verb is refused
+/// rather than writing them into that file.
+fn write_target(tree: &crate::tree::Tree, r: NRef) -> std::io::Result<NRef> {
+    let t = tree.resolved_child(r);
+    if tree.node(t).is_embed() {
+        return Err(io_err("a broken or duplicate embed has no node to write to"));
+    }
+    Ok(t)
 }
 
 /// Indent of a child of `parent` (§3.1): items nest under items, everything
@@ -1337,7 +1353,7 @@ pub fn set_property(vault: &mut Vault, r: NRef, key: &str, value: &str) -> std::
     let target = if vault.tree.node(r).is_block() {
         r
     } else if vault.tree.node(r).is_embed() {
-        vault.tree.resolved_child(r)
+        write_target(&vault.tree, r)?
     } else {
         // make_block reloads, so `r` is stale: find the new block by its id
         let id = make_block(vault, r)?;

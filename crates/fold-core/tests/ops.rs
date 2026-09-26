@@ -1133,3 +1133,78 @@ fn clearing_a_done_block_trashes_the_blocks_embedded_in_it() {
     assert!(!d.path().join("dozzod~t.md").exists(), "T was left embedded nowhere");
     assert_eq!(read(&d, "root.md"), "# A\n\n- open\n");
 }
+
+#[test]
+fn setting_a_property_on_a_second_embed_never_writes_the_file_that_holds_it() {
+    const ID_S: &str = "lacnum-walbyn-dirlyn-havtyp";
+    let x_text = format!("---\nid: {ID_B}\n---\n\n- X\n  ![[{ID_S}]]\n");
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n![[{ID_S}]]\n\n# B\n\n![[{ID_B}]]\n"),
+        &[("dozzod~x.md", &x_text), ("lacnum~s.md", &format!("---\nid: {ID_S}\n---\n\n- S\n"))],
+    );
+    let x = at(&v, &["B", "X"]);
+    let second = v.tree.resolved_children(x)[0];
+    assert!(v.tree.node(second).is_embed(), "the second embed reads as broken");
+    let res = ops::set_property(&mut v, second, "due", "2026-10-01");
+    assert_eq!(
+        read(&d, "dozzod~x.md"),
+        x_text,
+        "set_property on S's second embed ({:?}) wrote into X's file",
+        res.map_err(|e| e.to_string())
+    );
+}
+
+#[test]
+fn verbs_that_write_into_a_node_refuse_a_second_embed() {
+    // a second embed of S reads as broken (§6.2): no node is there to hold
+    // a checkbox, properties or children, and an embed line has no
+    // children in its file. Each verb refuses, writing nothing, instead of
+    // writing into X's file, which holds the embed
+    const ID_S: &str = "lacnum-walbyn-dirlyn-havtyp";
+    fn second(v: &Vault) -> fold_core::tree::NRef {
+        v.tree.resolved_children(at(v, &["B", "X"]))[0]
+    }
+    type Verb = fn(&mut Vault) -> std::io::Result<()>;
+    let verbs: [(&str, Verb); 7] = [
+        ("toggle_taskness", |v| {
+            let e = second(v);
+            ops::toggle_taskness(v, e)
+        }),
+        ("set_property", |v| {
+            let e = second(v);
+            ops::set_property(v, e, "due", "2026-10-01").map(drop)
+        }),
+        ("append_child_public", |v| {
+            let e = second(v);
+            ops::append_child_public(v, e, "new").map(drop)
+        }),
+        ("capture_to", |v| {
+            let e = second(v);
+            ops::capture_to(v, "new", false, e).map(drop)
+        }),
+        ("refile", |v| {
+            let (c, e) = (at(v, &["C", "c"]), second(v));
+            ops::refile(v, c, e).map(drop)
+        }),
+        ("move_node into", |v| {
+            let (c, e) = (at(v, &["C", "c"]), second(v));
+            ops::move_node(v, c, e, ops::Drop::Into).map(drop)
+        }),
+        ("demote", |v| {
+            let y = at(v, &["B", "X", "y"]);
+            ops::demote(v, y).map(drop)
+        }),
+    ];
+    let root = format!("# A\n\n![[{ID_S}]]\n\n# B\n\n![[{ID_B}]]\n\n# C\n\n- c\n");
+    let x_text = format!("---\nid: {ID_B}\n---\n\n- X\n  ![[{ID_S}]]\n  - y\n");
+    let s_text = format!("---\nid: {ID_S}\n---\n\n- S\n");
+    for (name, verb) in verbs {
+        let (d, mut v) = vault_files(&root, &[("dozzod~x.md", &x_text), ("lacnum~s.md", &s_text)]);
+        assert!(v.tree.node(second(&v)).is_embed(), "the second embed reads as broken");
+        let res = verb(&mut v);
+        assert_eq!(read(&d, "dozzod~x.md"), x_text, "{} wrote into X's file", name);
+        assert_eq!(read(&d, "root.md"), root, "{} wrote root.md", name);
+        assert_eq!(read(&d, "lacnum~s.md"), s_text, "{} wrote S's file", name);
+        assert!(res.is_err(), "{} did nothing and said nothing", name);
+    }
+}
