@@ -1,46 +1,30 @@
 //! Syntax highlighting of fenced code in the reading pane (§10.9), with
-//! tree-sitter grammars compiled into the binary. A fence's info string picks
-//! the language; anything unknown stays plain.
+//! tree-sitter grammars compiled into the binary: every grammar published on
+//! crates.io that builds against tree-sitter 0.27 and has a highlights query
+//! (the table is `grammars.rs`). A fence's info string picks the language;
+//! anything unknown stays plain.
 
 use super::ui::theme;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use super::grammars::GRAMMARS;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-/// Capture names the grammars' queries use, in the order styles are looked up.
+/// Capture names to recognise. A query's capture maps to the longest of
+/// these that is a dot-separated prefix of it (`keyword.control.return` →
+/// `keyword`), so the roots cover every grammar's naming; the longer names
+/// are the ones styled differently from their root.
 const NAMES: &[&str] = &[
-    "attribute",
-    "comment",
-    "constant",
-    "constant.builtin",
-    "constructor",
-    "embedded",
-    "escape",
-    "function",
-    "function.builtin",
-    "function.macro",
-    "function.method",
-    "keyword",
-    "label",
-    "module",
-    "number",
-    "operator",
-    "property",
-    "punctuation",
-    "punctuation.bracket",
-    "punctuation.delimiter",
-    "punctuation.special",
-    "string",
-    "string.escape",
-    "string.special",
-    "tag",
-    "type",
-    "type.builtin",
-    "variable",
-    "variable.builtin",
-    "variable.parameter",
+    "attribute", "boolean", "character", "comment", "conditional", "constant", "constant.builtin",
+    "constructor", "define", "delimiter", "embedded", "error", "escape", "exception", "field", "float",
+    "function", "function.builtin", "function.macro", "include", "keyword", "label", "macro", "markup",
+    "markup.heading", "markup.italic", "markup.link", "markup.raw", "markup.strong", "method", "module",
+    "namespace", "number", "operator", "parameter", "preproc", "property", "punctuation", "repeat", "special",
+    "storageclass", "string", "string.escape", "string.regex", "string.regexp", "string.special", "structure",
+    "symbol", "tag", "text", "text.literal", "text.title", "text.uri", "title", "type", "type.builtin", "uri",
+    "variable", "variable.builtin", "variable.member", "variable.parameter",
 ];
 
 fn style_for(name: &str) -> Style {
@@ -48,94 +32,63 @@ fn style_for(name: &str) -> Style {
     let s = Style::default();
     match (root, name) {
         ("comment", _) => s.fg(theme::DIM).add_modifier(Modifier::ITALIC),
-        ("keyword", _) => s.fg(Color::Magenta),
-        ("function", _) | ("constructor", _) => s.fg(Color::LightBlue),
-        ("type", _) | ("module", _) => s.fg(Color::Yellow),
         (_, "string.escape") | ("escape", _) => s.fg(Color::Cyan),
-        ("string", _) => s.fg(Color::Green),
-        ("number", _) | ("constant", _) => s.fg(Color::Indexed(209)),
-        ("property", _) | ("attribute", _) | ("label", _) => s.fg(Color::Cyan),
+        (_, "string.regex") | (_, "string.regexp") => s.fg(Color::LightGreen),
+        ("string", _) | ("character", _) | (_, "text.literal") | (_, "markup.raw") => s.fg(Color::Green),
+        ("keyword", _) | ("conditional", _) | ("repeat", _) | ("exception", _) | ("include", _)
+        | ("storageclass", _) | ("define", _) | ("preproc", _) => s.fg(Color::Magenta),
+        (_, "function.macro") | ("macro", _) => s.fg(Color::LightMagenta),
+        ("function", _) | ("method", _) | ("constructor", _) => s.fg(Color::LightBlue),
+        ("type", _) | ("module", _) | ("namespace", _) | ("structure", _) => s.fg(Color::Yellow),
+        ("number", _) | ("float", _) | ("boolean", _) | ("constant", _) | ("symbol", _) => s.fg(Color::Indexed(209)),
+        ("property", _) | ("field", _) | (_, "variable.member") | ("attribute", _) | ("label", _) => s.fg(Color::Cyan),
         ("tag", _) => s.fg(Color::LightRed),
         (_, "variable.builtin") => s.fg(Color::LightRed),
-        ("operator", _) | ("punctuation", _) => s.fg(Color::Gray),
+        (_, "markup.heading") | ("title", _) | (_, "text.title") => s.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        (_, "markup.strong") => s.add_modifier(Modifier::BOLD),
+        (_, "markup.italic") => s.add_modifier(Modifier::ITALIC),
+        (_, "markup.link") | ("uri", _) | (_, "text.uri") => s.fg(Color::LightCyan).add_modifier(Modifier::UNDERLINED),
+        ("error", _) => s.fg(Color::LightRed),
+        ("operator", _) | ("punctuation", _) | ("delimiter", _) => s.fg(Color::Gray),
         _ => s,
     }
 }
 
-/// The languages, by the names a fence's info string may use.
-fn language(name: &str) -> Option<&'static str> {
-    Some(match name.to_ascii_lowercase().as_str() {
-        "rust" | "rs" => "rust",
-        "python" | "py" | "python3" => "python",
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "typescript" | "ts" => "typescript",
-        "tsx" => "tsx",
-        "bash" | "sh" | "shell" | "zsh" | "console" => "bash",
-        "json" | "jsonc" => "json",
-        "toml" => "toml",
-        "yaml" | "yml" => "yaml",
-        "go" | "golang" => "go",
-        "c" | "h" => "c",
-        "nix" => "nix",
-        "html" | "htm" => "html",
-        "css" => "css",
-        _ => return None,
+/// Index into `GRAMMARS` by every name a fence may use (ids and aliases,
+/// lower-case).
+fn by_name() -> &'static HashMap<String, usize> {
+    static MAP: OnceLock<HashMap<String, usize>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for (i, g) in GRAMMARS.iter().enumerate() {
+            m.insert(g.id.to_string(), i);
+            for a in g.aliases {
+                m.entry(a.to_string()).or_insert(i);
+            }
+        }
+        m
     })
 }
 
-fn build(lang: &'static str) -> Option<HighlightConfiguration> {
-    use tree_sitter::Language;
-    let (language, highlights): (Language, String) = match lang {
-        "rust" => (tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::HIGHLIGHTS_QUERY.into()),
-        "python" => (tree_sitter_python::LANGUAGE.into(), tree_sitter_python::HIGHLIGHTS_QUERY.into()),
-        "javascript" => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY),
-        ),
-        // TypeScript's query extends JavaScript's
-        "typescript" => (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            format!("{}\n{}", tree_sitter_typescript::HIGHLIGHTS_QUERY, tree_sitter_javascript::HIGHLIGHT_QUERY),
-        ),
-        "tsx" => (
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            format!(
-                "{}\n{}\n{}",
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
-            ),
-        ),
-        "bash" => (tree_sitter_bash::LANGUAGE.into(), tree_sitter_bash::HIGHLIGHT_QUERY.into()),
-        "json" => (tree_sitter_json::LANGUAGE.into(), tree_sitter_json::HIGHLIGHTS_QUERY.into()),
-        "toml" => (tree_sitter_toml_ng::LANGUAGE.into(), tree_sitter_toml_ng::HIGHLIGHTS_QUERY.into()),
-        "yaml" => (tree_sitter_yaml::LANGUAGE.into(), tree_sitter_yaml::HIGHLIGHTS_QUERY.into()),
-        "go" => (tree_sitter_go::LANGUAGE.into(), tree_sitter_go::HIGHLIGHTS_QUERY.into()),
-        "c" => (tree_sitter_c::LANGUAGE.into(), tree_sitter_c::HIGHLIGHT_QUERY.into()),
-        "nix" => (tree_sitter_nix::LANGUAGE.into(), tree_sitter_nix::HIGHLIGHTS_QUERY.into()),
-        "html" => (tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY.into()),
-        "css" => (tree_sitter_css::LANGUAGE.into(), tree_sitter_css::HIGHLIGHTS_QUERY.into()),
-        _ => return None,
-    };
-    let mut config = HighlightConfiguration::new(language, lang, &highlights, "", "").ok()?;
-    config.configure(NAMES);
-    Some(config)
+/// A language's configuration, compiled on first use (a query costs a few
+/// milliseconds; most vaults use a handful of languages).
+fn config(i: usize) -> Option<&'static HighlightConfiguration> {
+    static CONFIGS: OnceLock<Vec<OnceLock<Option<HighlightConfiguration>>>> = OnceLock::new();
+    let all = CONFIGS.get_or_init(|| GRAMMARS.iter().map(|_| OnceLock::new()).collect());
+    all.get(i)?
+        .get_or_init(|| {
+            let g = &GRAMMARS[i];
+            let mut c = HighlightConfiguration::new((g.language)(), g.id, &(g.highlights)(), "", "").ok()?;
+            c.configure(NAMES);
+            Some(c)
+        })
+        .as_ref()
 }
 
-/// Each language's configuration, compiled on first use (a query costs a few
-/// milliseconds; most vaults use two or three languages).
-fn config(lang: &'static str) -> Option<&'static HighlightConfiguration> {
-    static CONFIGS: OnceLock<HashMap<&'static str, OnceLock<Option<HighlightConfiguration>>>> = OnceLock::new();
-    let all = CONFIGS.get_or_init(|| {
-        [
-            "rust", "python", "javascript", "typescript", "tsx", "bash", "json", "toml", "yaml", "go", "c", "nix",
-            "html", "css",
-        ]
-        .into_iter()
-        .map(|l| (l, OnceLock::new()))
-        .collect()
-    });
-    all.get(lang)?.get_or_init(|| build(lang)).as_ref()
+/// The ids of every language that can be highlighted.
+#[cfg(test)]
+fn languages() -> impl Iterator<Item = &'static str> {
+    GRAMMARS.iter().map(|g| g.id)
 }
 
 /// Whether a fence's info string names a language we can highlight.
@@ -143,14 +96,14 @@ pub fn supported(info: &str) -> bool {
     info_language(info).is_some()
 }
 
-fn info_language(info: &str) -> Option<&'static str> {
+fn info_language(info: &str) -> Option<usize> {
     // `rust`, `rust,ignore`, `{.python}`, `py title="x"`: the first word
     let word = info
         .trim()
         .trim_start_matches(['{', '.'])
         .split(|c: char| c.is_whitespace() || c == ',' || c == '}')
         .next()?;
-    language(word)
+    by_name().get(&word.to_ascii_lowercase()).copied()
 }
 
 /// Highlight a code block: one list of spans per line of `code`, or `None`
@@ -194,11 +147,21 @@ mod tests {
 
     #[test]
     fn every_grammar_compiles_its_query() {
-        for lang in [
-            "rust", "python", "javascript", "typescript", "tsx", "bash", "json", "toml", "yaml", "go", "c", "nix",
-            "html", "css",
-        ] {
-            assert!(config(lang).is_some(), "{} does not compile", lang);
+        let failed: Vec<&str> = (0..GRAMMARS.len()).filter(|&i| config(i).is_none()).map(|i| GRAMMARS[i].id).collect();
+        assert!(failed.is_empty(), "queries that do not compile: {:?}", failed);
+        assert!(GRAMMARS.len() >= 140);
+    }
+
+    #[test]
+    fn names_are_unique_and_common_fences_resolve() {
+        let mut ids: Vec<&str> = languages().collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), GRAMMARS.len());
+        for fence in ["rust", "py", "js", "ts", "tsx", "sh", "zsh", "json", "toml", "yaml", "go", "c", "c++", "c#",
+            "java", "kotlin", "swift", "ruby", "php", "lua", "haskell", "ocaml", "elixir", "sql", "html", "css",
+            "xml", "nix", "dockerfile", "makefile", "diff", "zig", "scala", "dart", "r", "julia"] {
+            assert!(supported(fence), "{} should be highlighted", fence);
         }
     }
 

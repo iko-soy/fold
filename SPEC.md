@@ -1028,12 +1028,17 @@ Line-based, not a full renderer: headings coloured by level, task checkboxes sho
 
 **Fenced code** sits on a tinted background, its fence dimmed and its info string in the
 accent colour, and is **syntax-highlighted** with tree-sitter when the info string's first
-word names a known language: Rust (`rust`, `rs`), Python (`python`, `py`), JavaScript
-(`js`, `jsx`), TypeScript (`ts`, `tsx`), shell (`bash`, `sh`, `zsh`, `console`), JSON,
-TOML, YAML, Go, C, Nix, HTML and CSS. `rust,ignore`, `{.python}` and `sh title=x` work
-too. The grammars are compiled into the binary and each is loaded on first use; the block
-is highlighted as a whole (so a string or comment spanning lines is right) and cached until
-its text changes. Any other language, or a block its grammar cannot parse, is shown in the
+word names a known language. The app compiles in every tree-sitter grammar published on
+crates.io that builds against its tree-sitter version and has a highlights query — about
+140 languages, from Ada to Zig, including every mainstream programming, shell, markup,
+config, query and hardware-description language that has such a crate — keyed by the
+language's name and its usual fence aliases (`rs`, `py`, `js`, `ts`, `sh`, `c++`, `c#`,
+`kt`, `rb`, `hs`, `ex`, `yml`, `makefile`, `dockerfile`, `sql`, …). Where a grammar crate
+ships a highlights query without exporting it, the app carries a copy
+(`crates/fold-tui/queries/`, with its provenance). `rust,ignore`, `{.python}` and `sh
+title=x` work too. Each grammar is loaded on first use; the block is highlighted as a whole
+(so a string or comment spanning lines is right) and cached until its text changes. Any
+other language, or a block its grammar cannot parse, is shown in the
 plain code colour. Highlighting is the reading pane's only: the editor is a plain text box
 (§10.6). Raw text is
 never hidden: `#`, `-`, `**` and link targets stay on screen, dimmed. `zr` shows exact
