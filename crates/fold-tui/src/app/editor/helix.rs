@@ -302,10 +302,16 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             } else {
                 e.checkpoint();
             }
-            let gone = e.delete(s, en);
-            if !alt {
-                let lw = gone.ends_with('\n') && s.col == 0;
-                e.copy(gone, lw);
+            if c == 'd' && !alt && s.col == 0 && en.col == 0 && en.line > s.line {
+                // whole lines are cut, so a nested block's title line put
+                // back moves the block (§5.2)
+                e.cut_lines(s.line, en.line - 1);
+            } else {
+                let gone = e.delete(s, en);
+                if !alt {
+                    let lw = gone.ends_with('\n') && s.col == 0;
+                    e.copy(gone, lw);
+                }
             }
             e.anchor = None;
             e.set_cursor(s);
@@ -327,25 +333,23 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             }
             e.checkpoint();
             let (s, en) = range(e);
-            let at = if clip.linewise {
-                if c == 'p' {
-                    if en.col == 0 && en.line > s.line { en } else { Pos::new((en.line + 1).min(e.lines()), 0) }
+            if clip.linewise {
+                // whole lines below the selection's last line or above its
+                // first, a nested block cut with its title line moving back
+                // with them (§5.2); the lines put in are selected
+                let first = if c == 'p' {
+                    let l = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
+                    e.put_clip_lines(l, true)
                 } else {
-                    Pos::new(s.line, 0)
-                }
-            } else if c == 'p' {
-                en
-            } else {
-                s
-            };
-            let end = if clip.linewise && at.line >= e.lines() {
-                let last = e.lines() - 1;
-                e.put_lines(last, &clip.text, true);
-                Pos::new(e.lines(), 0)
-            } else {
-                e.insert(at, &clip.text)
-            };
-            let at = if clip.linewise && at.line >= e.lines() { Pos::new(e.lines() - clip.text.matches('\n').count(), 0) } else { at };
+                    e.put_clip_lines(s.line, false)
+                };
+                let last = first + clip.text.matches('\n').count().max(1) - 1;
+                e.anchor = Some(Pos::new(first, 0));
+                e.cursor = Pos::new(last, e.len(last));
+                return out;
+            }
+            let at = if c == 'p' { en } else { s };
+            let end = e.insert(at, &clip.text);
             e.anchor = Some(at);
             e.cursor = e.prev(end).unwrap_or(end);
         }

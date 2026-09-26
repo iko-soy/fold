@@ -665,9 +665,9 @@ fn apply(e: &mut Editor, op: char, from: Pos, to: Pos, kind: Kind) {
         let (l1, l2) = (s.line, en.line);
         match op {
             'd' => {
+                // cut, so a nested block's title line put back moves the block (§5.2)
                 e.checkpoint();
-                let t = e.delete_lines(l1, l2);
-                e.copy(t, true);
+                e.cut_lines(l1, l2);
                 e.cursor = Pos::new(e.cursor.line, e.first_non_blank(e.cursor.line));
             }
             'y' => {
@@ -741,8 +741,10 @@ fn put(e: &mut Editor, after: bool, n: usize) {
     e.checkpoint();
     let text = clip.text.repeat(n.max(1));
     if clip.linewise {
+        // one put of cut lines moves a nested block they hold (§5.2);
+        // more are copies
         let l = e.cursor.line;
-        let first = e.put_lines(l, &text, after);
+        let first = if n > 1 { e.put_lines(l, &text, after) } else { e.put_clip_lines(l, after) };
         e.cursor = Pos::new(first, e.first_non_blank(first));
     } else {
         let at = if after { Pos::new(e.cursor.line, (e.cursor.col + 1).min(e.len(e.cursor.line))) } else { e.cursor };

@@ -906,3 +906,39 @@ fn vim_t_next_to_its_target_stays_put() {
     // Helix's `t` always selects up to the next target it does not touch
     assert_eq!(run(fold_tui::app::EditKeys::Helix, "a)b)", "t)d"), ")");
 }
+
+#[test]
+fn deleting_a_block_title_line_in_vim_or_helix_and_putting_it_back_moves_the_block() {
+    // §5.2: moving a nested block's title line (cut and paste in the editor)
+    // moves its embed, in every keymap: Vim's `dd` then `P`/`p`, Helix's
+    // `xd` then `P`/`p`
+    for (keymap, seq, moved_up) in [
+        (fold_tui::app::EditKeys::Vim, "ddkP:w⏎", true),
+        (fold_tui::app::EditKeys::Vim, "ddp:w⏎", false),
+        (fold_tui::app::EditKeys::Helix, "xdkP:w⏎", true),
+        (fold_tui::app::EditKeys::Helix, "xdp:w⏎", false),
+    ] {
+        let (d, mut app, embed, block) = editing_task_block_with_body();
+        let before = std::fs::read_to_string(&block).unwrap();
+        app.set_edit_keys(keymap);
+        keys(&mut app, seq);
+        let want = if moved_up {
+            format!("# A\n\n{}\n- one\n  body\n- two\n", embed)
+        } else {
+            format!("# A\n\n- one\n  body\n{}\n- two\n", embed)
+        };
+        assert_eq!(root(&d), want, "{:?} {}", keymap, seq);
+        // the body left behind is the parent's; the block keeps its title
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), before.replace("  body\n", ""));
+    }
+    // a line yanked and put is a copy, of the block above it: the block is
+    // not duplicated
+    for (keymap, seq) in [(fold_tui::app::EditKeys::Vim, "yyjp:w⏎"), (fold_tui::app::EditKeys::Helix, "xyjp:w⏎")] {
+        let (d, mut app, embed, block) = editing_task_block_with_body();
+        let before = std::fs::read_to_string(&block).unwrap();
+        app.set_edit_keys(keymap);
+        keys(&mut app, seq);
+        assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", embed), "{:?} {}", keymap, seq);
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), before.replace("  body\n", "  body\n- task\n"));
+    }
+}
