@@ -214,12 +214,17 @@ impl App {
             self.outline_scroll += 1;
         }
         let rows = self.rows();
-        let target = self
-            .ui
-            .rows_geom
-            .iter()
-            .find(|(_, gy, _)| *gy == y)
-            .map(|&(j, _, title_x)| (j, if x < title_x { Drop::Before } else { Drop::Into }));
+        // only over an outline row (§10.1): released anywhere else, over the
+        // reading pane or a border, the drag does nothing
+        let target = match self.ui.hit_at(x, y) {
+            Some(Hit::Row(j) | Hit::Fold(j) | Hit::Check(j) | Hit::RowMenu(j)) => self
+                .ui
+                .rows_geom
+                .iter()
+                .find(|(gj, _, _)| *gj == j)
+                .map(|&(j, _, title_x)| (j, if x < title_x { Drop::Before } else { Drop::Into })),
+            _ => None,
+        };
         self.ui.drop = target.filter(|(j, _)| *j != from);
         let name = |i: usize| rows.get(i).map(|r| self.vault.tree.node(r.nref).title.clone()).unwrap_or_default();
         let msg = match self.ui.drop {

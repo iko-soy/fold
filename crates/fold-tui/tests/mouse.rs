@@ -617,3 +617,22 @@ fn folding_above_the_selection_keeps_it() {
     click(&mut app, Hit::Fold(0));
     assert_eq!(title(&app), "A");
 }
+
+#[test]
+fn dropping_outside_the_outline_does_nothing() {
+    let (d, mut app) = app_with("# A\n\n- a1\n\n# B\n\n- b1\n");
+    // rows: A, a1, B, b1 — drag b1 out into the reading pane, level with A
+    draw(&mut app);
+    let from = app.hit_pos(Hit::Row(3)).unwrap();
+    let a = app.hit_pos(Hit::Row(0)).unwrap();
+    let (px, _) = app.hit_pos(Hit::ReadingPane).unwrap();
+    assert!(
+        matches!(app.hit_at(px, a.1), Some(Hit::ReadingPane | Hit::DocLine(_))),
+        "the drop point is in the reading pane, not on an outline row"
+    );
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(ev(MouseEventKind::Drag(MouseButton::Left), (px, a.1)));
+    draw(&mut app);
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (px, a.1)));
+    assert_eq!(root(&d), "# A\n\n- a1\n\n# B\n\n- b1\n");
+}
