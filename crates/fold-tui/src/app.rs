@@ -846,7 +846,11 @@ impl App {
     /// Open the built-in editor over a node's subtree (§10.6).
     fn open_editor_on(&mut self, target: NRef) {
         // an editor already open saves first; one whose save is refused
-        // stays, with its text
+        // stays, with its text. A block cut and not pasted back is deleted
+        // now, as on leaving it (§5.2)
+        if let Some(ed) = self.editor.as_mut() {
+            ed.release_clip();
+        }
         if !self.save_editor("switch") {
             return;
         }
@@ -984,7 +988,9 @@ impl App {
     /// or a reload (§10.6, §11.2): the editor saves first. Returns what it
     /// is open on and the files as they are, for `editor_after_write`.
     fn editor_before_write(&mut self, why: &str) -> Option<(NodeKey, ops::Snapshot)> {
-        self.editor.as_ref()?;
+        // the editor is re-rendered after, so a block cut and not pasted
+        // back cannot be pasted as itself any more: it is deleted now (§5.2)
+        self.editor.as_mut()?.release_clip();
         self.save_editor(why);
         let key = self.editor_key()?;
         Some((key, ops::Snapshot::take(&self.vault, why)))

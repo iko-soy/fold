@@ -990,3 +990,17 @@ fn undoing_a_save_that_took_in_another_programs_change_keeps_that_change() {
     keys(&mut app, "u");
     assert_eq!(root(&d), "# A\n\nbody\n\n# B\n\nother, from Helix\n");
 }
+
+#[test]
+fn a_cut_block_title_is_deleted_when_a_reload_re_renders_the_editor() {
+    // the re-rendered editor cannot paste the line back as the block, so the
+    // block is deleted then (§5.2), not left in a file embedded nowhere
+    let (d, mut app, _, block) = editing_task_block_with_body();
+    ctrl(&mut app, 'k');
+    ctrl(&mut app, 's');
+    assert!(block.exists(), "in transit");
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n  body\n- two\n\n# C\n").unwrap();
+    app.reload_external();
+    assert!(!block.exists());
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n\n# C\n");
+}
