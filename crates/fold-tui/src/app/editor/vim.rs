@@ -296,12 +296,23 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.vim.op = None;
         e.vim.op_count = 0;
         // cw on a word is ce; dw stops at the end of the line
-        let c = if op == 'c' && (c == 'w' || c == 'W') && e.char_at(e.cursor).is_some_and(|ch| !ch.is_whitespace()) {
+        let cw = op == 'c' && (c == 'w' || c == 'W') && e.char_at(e.cursor).is_some_and(|ch| !ch.is_whitespace());
+        let c = if cw {
             if c == 'w' { 'e' } else { 'E' }
         } else {
             c
         };
-        if let Some((mut to, kind)) = motion(e, c, n) {
+        // but from the last character of a word, that character is the
+        // first word (Vim's end_word with stop): `cw` there changes just it
+        let m = if cw && e.word_at(e.cursor, c == 'E').1.col == e.cursor.col + 1 {
+            match n.unwrap_or(1) {
+                1 => Some((e.cursor, Kind::Incl)),
+                k => motion(e, c, Some(k - 1)),
+            }
+        } else {
+            motion(e, c, n)
+        };
+        if let Some((mut to, kind)) = m {
             if (c == 'w' || c == 'W') && to.line > e.cursor.line {
                 to = Pos::new(e.cursor.line, e.len(e.cursor.line));
             }

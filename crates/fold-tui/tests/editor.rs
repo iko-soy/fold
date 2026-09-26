@@ -494,3 +494,22 @@ fn vim_counted_undo_is_not_repeated_by_dot() {
     keys(&mut app, "ggjj.:w⏎");
     assert_eq!(root(&d), "# A\n\nc\nd\n");
 }
+
+#[test]
+fn vim_cw_at_the_end_of_a_word_changes_only_that_word() {
+    // a one-letter word: `cw` changes `a`, not `a cat`
+    let (d, mut app) = app_with("# A\n\na cat\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjcwthe⎋:w⏎");
+    assert_eq!(root(&d), "# A\n\nthe cat\n");
+    // the last letter of a word: `cw` on the `e` of `one` changes `e`, not `e two`
+    let (d, mut app) = app_with("# A\n\none two\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjllcwX⎋:w⏎");
+    assert_eq!(root(&d), "# A\n\nonX two\n");
+    // with a count, the first word is that character, as in Vim: `2cw` changes `e two`
+    let (d, mut app) = app_with("# A\n\none two three\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjll2cwX⎋:w⏎");
+    assert_eq!(root(&d), "# A\n\nonX three\n");
+}
