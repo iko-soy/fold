@@ -273,3 +273,40 @@ fn a_conflict_copy_the_merge_leaves_alone_does_not_reopen_the_conflict_view() {
     assert_eq!(fold_core::merge::conflict_pairs(app.vault_mut()).len(), 2);
     assert_eq!(app.mode_pub(), "conflict");
 }
+
+#[test]
+fn a_merge_while_a_refused_edit_is_open_under_a_zoom_does_not_crash() {
+    let titles = |app: &App| -> Vec<String> { app.rows().iter().map(|r| app.title_of(r.nref)).collect() };
+    let embeds = "  ![[dozzod-binwes-talsun-worbec]]\n  ![[lacnum-walbyn-dirlyn-havtyp]]\n  ![[racfer-hattes-mislup-nodrys]]\n";
+    let dir = tempfile::tempdir().unwrap();
+    let block = |name: &str, id: &str, text: &str| {
+        std::fs::write(dir.path().join(name), format!("---\nid: {}\n---\n\n{}", id, text)).unwrap();
+    };
+    std::fs::write(dir.path().join("root.md"), format!("- Top\n{}- [ ] T\n", embeds)).unwrap();
+    block("dozzod~b.md", "dozzod-binwes-talsun-worbec", "- B\n");
+    block("lacnum~l.md", "lacnum-walbyn-dirlyn-havtyp", "- L\n");
+    block("racfer~z.md", "racfer-hattes-mislup-nodrys", "- Z\n");
+    let mut app = App::new(dir.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Char('j')));
+    }
+    app.handle_key(key(KeyCode::Enter)); // zoom into Z, the last file
+    assert_eq!(titles(&app), ["Z"]);
+    app.handle_key(key(KeyCode::Char('e')));
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(key(KeyCode::Char('x')));
+    // another device changed Z (the save is refused), deleted B and L, and
+    // its root.md came back as a sync-conflict copy
+    block("racfer~z.md", "racfer-hattes-mislup-nodrys", "- Z\n  - z1\n");
+    std::fs::remove_file(dir.path().join("dozzod~b.md")).unwrap();
+    std::fs::remove_file(dir.path().join("lacnum~l.md")).unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        format!("- Top\n{}- [x] T\n", embeds),
+    )
+    .unwrap();
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(titles(&app), ["Z", "z1"]);
+}

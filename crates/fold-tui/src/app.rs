@@ -320,7 +320,10 @@ impl App {
         let edit = self.editor_before_write("external change");
         let props_key = self.props_target.map(|t| self.vault.key_of(t));
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
-        let zoom_key = self.zoom_root.map(|z| self.vault.key_of(z));
+        // the zoom is held by key (§11.2): the merge flow re-parses the
+        // vault, then may close the editor, which reads the outline, before
+        // the reload is over
+        self.anchor_zoom();
         // sync-conflict files start the merge flow (§11.2)
         match self.vault.conflict_files() {
             Ok(files) if !files.is_empty() => self.merge_conflict_files("merged"),
@@ -330,7 +333,7 @@ impl App {
                 }
             }
         }
-        self.zoom_root = zoom_key.and_then(|k| self.vault.find_by_key(&k));
+        self.settle_zoom();
         if let Some(k) = cursor_key {
             if let Some(r) = self.vault.find_by_key(&k) {
                 self.move_cursor_to(r);
