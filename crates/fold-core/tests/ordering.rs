@@ -665,3 +665,69 @@ fn move_up_past_a_deeper_written_sibling_keeps_parents() {
     assert_eq!(parents(&v), before, "{}", root_text(&v));
     assert_eq!(root_text(&v), "- P\n  - b\n  - a\n    - kid\n");
 }
+
+// P sits under an item under `# S`, so its position gives it level 2 while
+// it and its sections are written a level shallower (§3.1: honoured as
+// written). A section written after one of them at the level P's position
+// gives would parse as that one's child.
+const SHALLOW: &str = "# S\n\n- i\n  # P\n  ## C\n";
+
+#[test]
+fn section_refiled_after_a_shallower_written_sibling_is_not_adopted_by_it() {
+    let (_d, mut v) = vault_with(&format!("{}\n# X\n", SHALLOW));
+    let before = others(&parents(&v), "X");
+    let (x, p) = (at(&v, "X"), at(&v, "S/i/P"));
+    ops::refile(&mut v, x, p).unwrap();
+    assert!(v.find_by_path(&["S".into(), "i".into(), "P".into(), "X".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "X"), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), format!("{}\n  ## X\n", SHALLOW));
+    assert_ordered(&v);
+}
+
+#[test]
+fn section_pasted_between_shallower_written_siblings_is_not_adopted() {
+    // no deeper than C before it, no shallower than D after it
+    let src = format!("{}  ## D\n", SHALLOW);
+    let (_d, mut v) = vault_with(&src);
+    let before = parents(&v);
+    let c = at(&v, "S/i/P/C");
+    ops::paste(&mut v, c, "# T\n", true).unwrap();
+    assert!(v.find_by_path(&["S".into(), "i".into(), "P".into(), "T".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "T"), before, "{}", root_text(&v));
+    assert_ordered(&v);
+}
+
+#[test]
+fn new_last_child_section_after_a_shallower_written_sibling_is_not_adopted() {
+    // N on P: a section beside C, not under it
+    let (_d, mut v) = vault_with(SHALLOW);
+    let before = parents(&v);
+    let p = at(&v, "S/i/P");
+    let x = ops::append_child_public(&mut v, p, "x").unwrap();
+    assert_eq!(v.tree.node(x).title, "x");
+    assert!(v.find_by_path(&["S".into(), "i".into(), "P".into(), "x".into()]).is_some(), "{}", root_text(&v));
+    assert_eq!(others(&parents(&v), "x"), before, "{}", root_text(&v));
+}
+
+#[test]
+fn making_a_block_of_a_section_after_a_shallower_written_sibling_keeps_its_parent() {
+    // the embed replaces P where it is written; at the level P's position
+    // gives it would parse as C's child
+    let (_d, mut v) = vault_with("# S\n\n- i\n  # C\n  # P\n");
+    let before = parents(&v);
+    let p = at(&v, "S/i/P");
+    ops::make_block(&mut v, p).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+}
+
+#[test]
+fn capture_after_a_shallower_written_day_starts_a_day_beside_it() {
+    // an Inbox spelled as an item, its day written by hand at `#`
+    let (_d, mut v) = vault_with("- Inbox\n  # 2000-01-01\n  - old\n");
+    let r = ops::capture(&mut v, "new", false).unwrap();
+    let path = v.tree.path(r);
+    assert_eq!(path.len(), 3, "{:?}\n{}", path, root_text(&v));
+    assert_eq!(path[0], "Inbox");
+    assert_ne!(path[1], "2000-01-01", "{}", root_text(&v));
+    assert!(v.find_by_path(&["Inbox".into(), "2000-01-01".into(), "old".into()]).is_some());
+}

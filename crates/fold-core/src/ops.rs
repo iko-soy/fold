@@ -184,8 +184,11 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
         }
     }
     // `## <today>` as the last child of Inbox (§7), at its child indent: an
-    // Inbox respelled as an item is still the inbox (§3.1)
+    // Inbox respelled as an item is still the inbox (§3.1); no deeper than
+    // a day before it as written, which would take it as its child
+    let last = vault.tree.raw_children(inbox).last().copied();
     let level = vault.tree.level(inbox) + 1;
+    let level = written_level(&vault.tree, last).map_or(level, |w| level.min(w));
     let indent = child_indent(&vault.tree, inbox);
     let heading = format!(
         "{}{} {}",
@@ -299,11 +302,12 @@ fn append_child_line(
                 *kids.iter().rev().find(|&&c| is_section(c)).unwrap()
             };
             let title = line.trim_start().strip_prefix("- ").unwrap_or(line.trim_start());
-            // at the last section's written indent, which its parent reaches
+            // at the last section's written indent, which its parent
+            // reaches, and written level, which keeps it beside it
             let heading = format!(
                 "{}{} {}",
                 " ".repeat(vault.tree.node(last).indent),
-                "#".repeat(vault.tree.level(last)),
+                "#".repeat(written_level(&vault.tree, Some(last)).unwrap_or(1)),
                 title
             );
             let pos = trimmed_end(&text, node.span);
@@ -975,15 +979,25 @@ fn clamp_index(tree: &crate::tree::Tree, kids: &[NRef], want: usize, kinds: &[Ki
     want.min(kids.len()).clamp(lo, hi)
 }
 
+/// The level of `k` as written, if it is a section. A written level is
+/// honoured (§4.7): a section written after it deeper than that is its
+/// child, and one written before it shallower than that takes it (and
+/// every section after it) as a child (§3.1). The level `k`'s position
+/// gives can be deeper: under an item, sections may be written shallower.
+fn written_level(tree: &crate::tree::Tree, k: Option<NRef>) -> Option<usize> {
+    k.map(|k| tree.node(k)).filter(|n| n.kind == Kind::Section).map(|n| n.level.unwrap_or(1))
+}
+
 /// `doc` (shifted to a child position) with its top-level sections, and
-/// everything under them, re-levelled so the last is no shallower than
-/// `next`, the sibling section it is written before. A written level is
-/// honoured (§4.7), so a shallower heading would adopt `next` and every
-/// section after it (§3.1).
-fn level_before(tree: &crate::tree::Tree, next: Option<NRef>, doc: &str) -> String {
-    let Some(next) = next.filter(|&k| tree.node(k).kind == Kind::Section) else {
+/// everything under them, re-levelled to stay siblings of the sections
+/// around them (`written_level`): no deeper than `prev`, the sibling
+/// section they are written after, and no shallower than `next`, the one
+/// they are written before.
+fn level_among(tree: &crate::tree::Tree, prev: Option<NRef>, next: Option<NRef>, doc: &str) -> String {
+    let (most, least) = (written_level(tree, prev), written_level(tree, next));
+    if most.is_none() && least.is_none() {
         return doc.to_string();
-    };
+    }
     let pf = crate::parse::parse_file("clip.md", doc, 0, None);
     let tops = &pf.nodes[pf.root_node].children;
     // a document's sections come after its items (§3.1)
@@ -991,12 +1005,12 @@ fn level_before(tree: &crate::tree::Tree, next: Option<NRef>, doc: &str) -> Stri
         return doc.to_string();
     };
     let have = tops.last().and_then(|&c| pf.nodes[c].level).unwrap_or(1);
-    let need = tree.level(next);
-    if have >= need {
+    let want = most.map_or(have, |m| have.min(m)).max(least.unwrap_or(1));
+    if want == have {
         return doc.to_string();
     }
     let at = first.span.start;
-    format!("{}{}", &doc[..at], shift_lines(&doc[at..], (need - have) as isize, 0))
+    format!("{}{}", &doc[..at], shift_lines(&doc[at..], want as isize - have as isize, 0))
 }
 
 /// Write `doc` (already shifted to a child position of `parent`) as the
@@ -1085,7 +1099,8 @@ fn place(
         text = format!("{}{}", &text[..start], &text[end..]);
         pos = after_removal(pos, start, end);
     }
-    let doc = level_before(tree, next, doc);
+    let prev = idx.checked_sub(1).map(|i| kids[i]);
+    let doc = level_among(tree, prev, next, doc);
     let body = doc.trim_end_matches('\n');
     let insertion = match next_kind {
         Some(nk) => {
@@ -1248,8 +1263,17 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     // §4.7), keeping the blank lines that separated it from what follows
     let span = n.span;
     let indent = " ".repeat(n.indent);
+    // at its level, but no deeper than the sibling section before it as
+    // written, which would take the embed as its child
+    let prev = n.parent.and_then(|p| {
+        let kids = &vault.tree.files[file].nodes[p].children;
+        let i = kids.iter().position(|&c| c == r.1)?;
+        i.checked_sub(1).map(|i| (file, kids[i]))
+    });
+    let level = vault.tree.level(r);
+    let level = written_level(&vault.tree, prev).map_or(level, |w| level.min(w));
     let mut embed = match n.kind {
-        Kind::Section => format!("{}{} ![[{}]]\n", indent, "#".repeat(vault.tree.level(r)), id),
+        Kind::Section => format!("{}{} ![[{}]]\n", indent, "#".repeat(level), id),
         _ => format!("{}![[{}]]\n", indent, id),
     };
     let old = span.text(&vault.tree.files[file].text);
@@ -1458,7 +1482,8 @@ fn reposition(
     let kind = if to_section { Kind::Section } else { Kind::Item };
     if clamp_index(tree, &others, pos, &[kind]) == pos {
         let span = tree.node(r).span;
-        let new = level_before(tree, others.get(pos).copied(), &new);
+        let prev = pos.checked_sub(1).map(|i| others[i]);
+        let new = level_among(tree, prev, others.get(pos).copied(), &new);
         vault.write_span(r.0, span, &new)?;
         vault.reload()?;
         return Ok(false);
