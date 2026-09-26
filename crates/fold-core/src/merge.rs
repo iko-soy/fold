@@ -99,7 +99,6 @@ fn standalone_tree(text: &str) -> Tree {
         props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
         frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
         frontmatter_span: fm.as_ref().map(|f| f.span),
-        edge_span: None,
     };
     let pf = parse_file("m.md", text, 0, Some(block));
     Tree {
@@ -682,7 +681,7 @@ fn parse_conflict_name(name: &str) -> (String, String) {
     (device, stamp)
 }
 
-/// Find unresolved conflict blocks: blocks with a `conflict:` key (§10.8).
+/// Find unresolved conflict blocks: blocks with a `conflict:` key (§10.7).
 /// Returns (ours, theirs) pairs; theirs is the block right after ours.
 pub fn conflict_pairs(vault: &Vault) -> Vec<(NRef, NRef)> {
     conflict_pairs_tree(&vault.tree)
@@ -701,16 +700,8 @@ pub fn conflict_pairs_tree(tree: &Tree) -> Vec<(NRef, NRef)> {
                             let p = nd.parent.map(|pp| (fi, pp)).unwrap();
                             let sibs = tree.raw_children(p);
                             if let Some(pos) = sibs.iter().position(|&s| s == (fi, ni)) {
-                                // a section's conflict is its first child
-                                // (see merge_pair); anything else follows ours
-                                let ours = if pos > 0 {
-                                    Some(sibs[pos - 1])
-                                } else if tree.node(p).kind == Kind::Section {
-                                    Some(p)
-                                } else {
-                                    None
-                                };
-                                if let Some(ours) = ours {
+                                // the conflict block is ours' next sibling (§12.4)
+                                if let Some(ours) = pos.checked_sub(1).map(|i| sibs[i]) {
                                     let ours = {
                                         let rc = tree.resolved_child(ours);
                                         if rc != ours { rc } else { ours }

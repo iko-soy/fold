@@ -41,8 +41,6 @@ pub struct Block {
     /// Byte span of the whole frontmatter (fences plus one trailing blank
     /// line), if present.
     pub frontmatter_span: Option<Span>,
-    /// Byte span of the embed line in the parent file (None for root.md).
-    pub edge_span: Option<Span>,
 }
 
 impl Block {
@@ -63,7 +61,7 @@ pub enum Content {
 pub struct Node {
     pub kind: Kind,
     pub title: String,
-    /// From the checkbox on the title line, or `todo:` for a block.
+    /// From the checkbox on the title line (§4.5).
     pub task: Option<TaskState>,
     /// Byte span of the title line (no trailing newline).
     pub title_span: Span,
@@ -693,47 +691,19 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         diagnostics,
     };
 
-    if let Some(mut b) = block {
+    if let Some(b) = block {
         if is_block_file {
             // The block root is the first top-level node.
             if let Some(&first) = pf.nodes[root_idx].children.first() {
-                // Task state is the checkbox on the block's own title line,
-                // as for any node (§4.5). A legacy `todo:` key is read only
-                // when there is no checkbox, and is non-canonical either way.
-                if b.prop("todo").is_some() {
-                    pf.nodes[first]
-                        .noncanonical
-                        .push("todo: key (the state belongs on the title line)".into());
-                }
-                if pf.nodes[first].task.is_none() {
-                    pf.nodes[first].task = match b.prop("todo") {
-                        Some("open") => Some(TaskState::Open),
-                        Some("done") => Some(TaskState::Done),
-                        _ => None,
-                    };
-                }
-                if matches!(b.prop("todo"), Some(v) if v != "open" && v != "done") {
-                    let d = Diag {
-                        span: b.frontmatter_span.unwrap_or_default(),
-                        message: "todo: value must be open or done".into(),
-                    };
-                    pf.diagnostics.push(d);
-                }
                 pf.nodes[first].block = Some(b);
             }
         } else {
             // root.md: attach to the implicit Root.
-            b.edge_span = None;
             pf.nodes[root_idx].block = Some(b);
             pf.nodes[root_idx].task = None;
         }
     }
     pf
-}
-
-/// Whether a title line carries a checkbox right after its marker (§4.3).
-pub fn title_has_checkbox(line: &str) -> bool {
-    classify_title(line).map(|(_, info)| info.task.is_some()).unwrap_or(false)
 }
 
 /// Starts of the text children that follow a child node with no blank line

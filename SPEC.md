@@ -4,204 +4,6 @@ Status: draft 0.40 · 2026-09-26
 Working name: not chosen yet. This document uses `notes` as the binary name; rename freely.
 Language: Rust · TUI: ratatui · Sync: Syncthing · History: file versioning on one node
 
-Changes in 0.40: one spelling of task state. A block's state is the checkbox on its own
-title line, like any node's; `todo:` is gone (read on legacy files, migrated on the next
-toggle or `check --fix`), so `rg '\[ \]'` is the whole open-task list (§4.5, §8). Block
-files keep their names when titles change; `check --fix` renames on request (§6.4). A block
-file's later column-0 lines are adopted by its root instead of making it read-only (§4.9).
-Verbs track nodes by key — titles plus ordinals among same-titled siblings — never by title
-path (§3.4). Undo records exactly the files an operation touched and refuses if one changed
-since (§10.11). Text after a child node is always preceded by a blank line (§4.2), and a
-heading embed's level is checked against its position (§4.7). §3.1 states what the ordering
-rule costs.
-
-Changes in 0.39: a node's children are an ordered list of **text children** and **child
-nodes**, interleaved as they are in the file; the body is just the leading text (§3.1, §3.3).
-Children obey one ordering rule, `(text | item)* section*`, because Markdown cannot close a
-heading: every verb that places a node keeps it, and `~` moves the node it respells to the
-boundary between items and sections instead of silently re-parenting its siblings (§3.1,
-§10.3). Text children are not outline rows and stay where they are when nodes around them
-move. A section block's embed is a **heading embed**, `## ![[id]]`, so it keeps its place
-among section siblings (§4.7). Merge compares a node's text children as one field and places
-insertions by the ordering rule (§12.4).
-
-Changes in 0.38: no external editor in 1.0. `E`, the inline-frontmatter spelling, the
-`inline` render mode and `$EDITOR` are gone; the built-in editor is the only editor (§10.6,
-§17). Frontmatter never appears as text anywhere.
-
-Changes in 0.37: `E` is scoped to the selected node and replaces its subtree wholesale on
-exit. The text handed to `$EDITOR` carries every nested block's frontmatter **inline**, as a
-`---` block under its title line, `id` included, so blocks come back matched exactly by id;
-no line diff, no heuristics (§4.4, §10.6). `e` is unchanged.
-
-Changes in 0.36: editing is continuous. The built-in editor is one text over the resolved
-subtree with no locked lines, no dimming and no commit key: every line carries its owning
-block invisibly, edits apply to whichever block the cursor is in, and blocks are saved
-automatically when the cursor leaves them, after a short pause, and on exit (§5.2, §10.6).
-The *make block* / *cut* distinction is not visible while typing.
-
-Changes in 0.35: vocabulary. *Document*, *part* and *cut* were one concept and are now
-**block**: a node with an id, a file and properties, edited alone. *Edge* is **embed**,
-which is what `![[id]]` is. The *document pane* is the *reading pane*. Storage sections
-still say "file" where they mean bytes on disk.
-
-Changes in 0.34: every edit changes exactly one file. The editor still shows the whole
-resolved subtree, but only the lines owned by one **part** — the file the cursor node lives
-in — are editable; the rest is context, shown but locked, and the status line names the
-part. Splice is single-file again; the multi-file distributor is gone (§5.2, §10.6).
-
-Changes in 0.33: properties never appear in text. The resolved rendering the user reads and
-edits has no frontmatter and no property blocks; properties are edited in a form (`a`,
-§10.6) and shown as a dimmed header in the document pane. Splice never touches
-frontmatter.
-
-Changes in 0.32: files are invisible when editing. The user edits a slice of one large
-document: `e`/`E` open the **resolved** subtree — documents inlined, no `![[id]]`, no ids —
-with each node's properties shown as a `---` block under its title line (§4.4). Splice
-parses the result and distributes it back to whichever files own the text, cutting,
-moving and trashing files as the text requires (§5.2). Files are storage, not UI.
-
-Changes in 0.31: one editing model. `e` opens the selected subtree's Markdown —
-`render(cursor, 1, false)`, frontmatter included — in an editor and splices it back; `E`
-does the same in `$EDITOR`. Title editing, the block editor and the property editor are
-gone: a title, a property, a body are all just text in the subtree (§10.6).
-
-Changes in 0.30: the `:` command line is a command palette — a fuzzy picker over every
-action, showing its key, prompting for arguments after selection (§10.9). No command syntax
-to learn or type.
-
-Changes in 0.29: frontmatter is text. No value types, no `tags` key, no `--set`/`--due` on
-capture, no relative date forms. The app knows five keys — `id`, `todo`, `due`, `done`,
-`conflict` — reads them as strings, validates the two dates as ISO when it writes them, and
-preserves every other line verbatim (§3.2, §4.4).
-
-Changes in 0.28: the query language, saved views, query blocks, the `v` picker, result
-views, `notes query` and `--json` are out of 1.0 (§17). `query` fences are reserved. The
-fresh vault is `# Inbox` alone. The filter box (§10.5) is the only search.
-
-Changes in 0.27: no config file. `config.toml` and its seven keys are gone; the vault comes
-from `$NOTES_VAULT` or the working directory, the editor from `$EDITOR`, and the rest is
-fixed or a session toggle (`zd`, `zr`). The trash is the only thing outside the vault (§14).
-
-Changes in 0.26: the CLI is six commands: `notes`, `capture`, `query`, `check [--fix]`,
-`merge`, `trash`. `init`, `config`, `view`, `ls`, `set`, `unset`, `cut`, `archive`,
-`canonicalize` and `adopt` are gone; the TUI does each of them, and `check --fix` absorbs
-canonicalize (§13). Foreign `.md` files can no longer be adopted; paste their text instead.
-
-Changes in 0.25: more removals. The cancelled task state (`[-]`, `todo: cancelled`,
-`cancelled:`, `X`) and the `priority` and `repeat` keys are gone. No tabs, no `:sort`, no
-create-from-filter-box, no `notes inbox` / `props` / `id`, no `keys.*` rebinding or theme,
-no `Ctrl-w`. The `Waiting` default view is gone and the `Inbox` view is now `Queue`.
-`notes render`, `:export` and the `--plain` lowering are removed: there is no export in 1.0
-(§17); `render` remains an internal function.
-
-Changes in 0.24: seven removals. One edge shape, `![[id]]`, and a document's file starts
-with the node as spelled — no more `#`-always rule (§4.7, §4.9). No in-session three-way
-merge: a splice that finds its span changed writes a conflict document like any other
-conflict (§5.2). No fuzzy title matching in merge (§12.4). Files without a valid `id` are
-ignored, not "unmanaged" (§4.1). Archive is plain refile under `Archive` (§6.5). No
-`--as dir/`: the vault is flat and prefixes are unique vault-wide (§6.4). No `conflicts/`
-directory and no `conflict_with` key: conflict copies are ordinary documents marked
-`conflict:`, stitched in next to ours (§12.4).
-
-Changes in 0.23: no cache and no per-device state. The index is rebuilt from the vault on
-every start; there are no shadow copies, so sync-conflict merging is two-way (§11.3, §12.3).
-The in-session splice conflict keeps its three-way base in memory.
-
-Changes in 0.22: `uncut` removed. A cut is permanent; a document stays a file until deleted.
-Conflict resolution copies text instead of uncutting (§12.5).
-
-Changes in 0.21: a document's task state is the frontmatter key `todo: open | done |
-cancelled`, not a checkbox on its title line. Checkboxes remain the syntax for nodes that
-are not files. Cut and uncut convert between the two (§4.5, §8).
-
-Changes in 0.20: the separator between id prefix and name in filenames is `~`:
-`racfer~order-new-switch.md`. Words inside the prefix stay `-`-joined.
-
-Changes in 0.19: filename prefixes are unique on their own, ignoring the title: no two files
-in a directory share a prefix, whatever their names (§6.4).
-
-Changes in 0.18: ids are 64 bits, four `@p` words (`racfer-hattes-dozzod-binwes`). Filenames
-start with the shortest prefix of the id — one word by default — that is unique in the
-directory, and grow a word at a time when a collision is found, locally or at merge (§6.4,
-§12.2). The `-2` suffix is gone.
-
-Changes in 0.17: filenames are `<word>-<name>.md`, where `<word>` is the first word of the
-id (`racfer-order-new-switch.md`). Same-title documents no longer collide across devices
-except at 1 in 65,536; the merge engine treats an id mismatch as a name collision, not a
-conflict (§6.4, §12.2).
-
-Changes in 0.16: `@key(value)` annotations removed. All metadata is frontmatter again, so
-only documents carry it: `done:` and `cancelled:` are stamped on task documents, inline
-tasks record state only, and nothing records creation time. Conflict copies are documents
-in `conflicts/` again, with `conflict:` frontmatter. `@` appears only in the query language.
-
-Changes in 0.15: the "no syntax of our own" restriction is lifted (§1). Consequences:
-one structural node kind with two spellings, either nestable under either (§3.1);
-heading levels unbounded, `§5.3` level overflow gone; any node can be a task, headings
-included (§4.5); a document's task state lives on its own title line, edges carry none
-(§4.7, §4.9); the app stamps `@created`, `@done`, `@cancelled` as title-line annotations on
-any node (§3.2); the id moves from the filename into `id:` frontmatter, filenames are plain
-slugs, edges are `![[id]]` (§3.4, §6.4); `|` is allowed in titles; merge conflicts are
-inline `@conflict` siblings, `conflicts/` is gone (§12.4). `notes render --plain` lowers
-the format to standard Markdown for export (§5.1).
-
-Changes in 0.14: `[[wiki-links]]` between nodes removed from 1.0 — no link syntax, resolution,
-rename rewriting, backlinks or tombstones. `[[…]]` in titles and bodies is opaque text,
-preserved verbatim and reserved (§4.6, §17). Edges (`![[id-name]]`) and external
-`[text](url)` links are unchanged.
-
-Changes in 0.13: capture appends under a `## <today>` child of `Inbox`, created on demand.
-Fixed behaviour, not a setting; the day title is ISO `YYYY-MM-DD`.
-
-Changes in 0.12: every path component the app writes is lowercase — file names, directory
-names (including `--as`), temp and trash names. Titles keep their case; resolution is
-case-insensitive.
-
-Changes in 0.11: no vault settings at all. Capture always goes to the level-1 section titled
-`Inbox`, created if missing. `root.md` has no frontmatter in a fresh vault.
-
-Changes in 0.10: `done_precision` and `conflicts` removed. `done:` records a date; conflict
-documents live in `conflicts/`. `inbox` is the only vault setting.
-
-Changes in 0.9: `archive` and `:archive-done` removed — done items stay where they are,
-a display toggle hides them, and `:clear-done` trashes them when a list is finished.
-(An `archive` section as a plain refile target returns later — see §6.5.)
-`suggest_bytes` removed — the app never suggests cuts. Three vault settings remain:
-`inbox`, `done_precision`, `conflicts`.
-
-Changes in 0.8: `capture` renamed `inbox` and is a plain link target (no date template);
-`children: files` removed, so there are no section settings and no derived directories;
-`cut`, `rename`, `transliterate` and `id_words` removed — cuts are property-triggered or
-manual, filenames follow titles, names keep Unicode, ids are two words. Five vault settings
-remain: `inbox`, `archive`, `done_precision`, `conflicts`, `suggest_bytes`.
-
-Changes in 0.7: `dir` and `sort` removed. The only section setting is `children: files`;
-its files go in a directory named after the section. New children are always appended.
-
-Changes in 0.6: `config.toml` is gone. Vault settings are `root.md`'s frontmatter; section
-settings (`children`) are the section's own frontmatter; saved views are query
-blocks. A fresh vault is initialised with a `root.md` that lists every setting at its default,
-commented. Only an optional, device-local file for UI preferences remains.
-
-Changes in 0.5: the journal is no longer a concept. Capture appends to a configurable,
-date-templated target (default `Inbox/{date}`), and "children of this section are always
-files" is a general `[[cut.auto]]` rule. Journal days become ordinary documents; the id-less
-filename shape and the date resolution step are gone.
-
-Changes in 0.4: ids are two-word phonemic names in Urbit's `@p` syllable scheme
-(`racfer-hattes`, 32 bits) instead of 8-character base32.
-
-Changes in 0.3: document files are named `<id>-<name>.md`, where the id is an 8-character
-random base32 string and the name is a slug of the title. Links and edges resolve by id, so
-they survive renames and stale rewrites; the name is decoration for humans and other tools.
-
-Changes in 0.2: all inline attribute syntax (`@key(value)`) removed. Properties exist only as
-YAML frontmatter of a file, so a node that needs properties becomes a file ("document").
-Items can be cut into documents; their checkbox stays on the edge in the parent list.
-`@id` removed; the file slug is the identity. Merge conflicts are stored as documents in
-`conflicts/`. Task-state syntax `[ ]`, `[x]`, `[-]` is unchanged.
-
 ---
 
 ## 1. Purpose and principles
@@ -356,7 +158,6 @@ Reserved keys (the app assigns semantics; users may still read/write them by han
 | Key | Value | Meaning |
 |---|---|---|
 | `id` | four `@p` words | The block's identity (§3.4). Present on every managed file; never on `root.md`. |
-| `todo` | `open` \| `done` | **Legacy.** Before 0.40 it held a block's task state. Read only when the block's title line has no checkbox, reported by `notes check`, and removed on the next toggle or `check --fix`, which write the checkbox instead (§4.5). The app never writes it. |
 | `due` | `YYYY-MM-DD` | Task due date; shown in the outline. |
 | `done` | `YYYY-MM-DD` | Written when a task block is checked; removed when unchecked. |
 | `conflict` | `<device> <timestamp>` | Marks a "theirs" copy written by the merge engine (§12.4). |
@@ -542,8 +343,7 @@ Inside the app, frontmatter is storage: the reading pane shows a block's propert
 dimmed header computed from the index, the property editor (`a`, §10.6) changes them, and
 the built-in editor's text (§5.1, `resolve_blocks = true`) contains none.
 
-Frontmatter never appears as text to the user. (An inline `---`-under-the-title spelling
-was designed for an external editor and is set aside with it, §17.)
+Frontmatter never appears as text to the user.
 
 ### 4.5 Tasks
 
@@ -569,9 +369,8 @@ There is no cancelled state. A task that will never be done is either checked of
 deleted.
 
 Embeds carry no state: the checkbox travels with the title line into the block's file when
-it is made (§6.1). A legacy `todo:` key (§3.2) is read as the state when the title line has
-no checkbox; if both are present the checkbox wins. A task section has its own state *and*
-the derived count of its subtree. See §8.
+it is made (§6.1). A task section has its own state *and* the derived count of its subtree.
+See §8.
 
 ### 4.6 Links
 
@@ -801,7 +600,7 @@ Edge cases follow from the tags, not from rules:
 ### 5.3 Levels
 
 Heading levels are unbounded (§3.1), so splice never changes a node's spelling and never
-demotes anything. The level-overflow rule of earlier drafts is gone.
+demotes anything.
 
 ### 5.4 One function, three uses
 
@@ -1012,8 +811,8 @@ Out of scope for 1.0. Nothing is reserved for it.
 ## 9. Query language
 
 Not in 1.0. Search is the filter box (§10.5): fuzzy title match plus full-text match over
-the whole vault, live, no syntax. A query language with saved views was designed and set
-aside (§17, open decision 16); the ```` ```query ```` fence is reserved for it (§4.8).
+the whole vault, live, no syntax. A query language is future work (§17, §19 decision 16); the
+```` ```query ```` fence is reserved for it (§4.8).
 
 ---
 
@@ -1084,7 +883,7 @@ aside (§17, open decision 16); the ```` ```query ```` fence is reserved for it 
 | `r` | refile: fuzzy-pick a destination; `Ctrl-Enter` = as first child |
 | `c` / `C` | capture to the inbox as bullet / as task |
 | `/` | filter box (§10.5) |
-| `:` | command palette (§10.9); `?` help |
+| `:` | command palette (§10.8); `?` help |
 | `u` / `U` | undo / redo |
 | `q` | quit (nothing is ever unsaved in normal mode) |
 
@@ -1128,7 +927,7 @@ app keeps track. Blocks are saved on their own:
 The status line shows the title of the block the cursor is in, dimmed, and a dot while
 something is unsaved — the only two hints that blocks exist. `Ctrl-c` discards changes made
 since the last save. Undo inside the editor is the editor's own; each automatic save is one
-entry in the session op log (§10.11). The box is not a Markdown editor and stays one.
+entry in the session op log (§10.10). The box is not a Markdown editor and stays one.
 
 Properties are not text. `a` opens the **property editor**: a small form listing the
 node's keys and values, where you add, change and delete entries. `due` and `done` accept
@@ -1142,11 +941,7 @@ editing are the same gesture. `x`, `t`, `~`, `>`/`<`, `J`/`K`, `r` and `d` are t
 structural verbs; they exist because toggling a checkbox should not require the editor,
 and each saves the editor first.
 
-### 10.7 (removed)
-
-Result views went with the query language (§9).
-
-### 10.8 Conflict view
+### 10.7 Conflict view
 
 Entered when a `.sync-conflict-*` file is detected or a splice hits a changed span. Shows
 each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
@@ -1154,7 +949,7 @@ each conflict pair (ours in place, the `conflict:` block right after it) side by
 Unresolved pairs remain as `conflict:` blocks and stay listed in the status
 line until resolved (§12.5).
 
-### 10.9 Command palette
+### 10.8 Command palette
 
 `:` opens a popup listing every action the TUI has, filtered live by fuzzy match (nucleo)
 on the action's name and description, each row showing its key binding if it has one.
@@ -1168,14 +963,14 @@ action reachable by key is in the palette under a readable name (*make block*,
 *canonicalize*, *check*, *merge*. `?` is the same popup filtered to show keys, so help and
 palette are one thing.
 
-### 10.10 Markdown styling in the reading pane
+### 10.9 Markdown styling in the reading pane
 
 Line-based, not a full renderer: headings by level, task glyphs (`☐ ☑`), resolved blocks'
 properties dimmed at the end of the line, underlined external links, styled code fences,
 `**bold**` / `*em*` / `` `code` `` inline, blockquote bars. Raw text is never hidden;
 `zr` shows exact source, frontmatter included.
 
-### 10.11 Undo, redo, saving
+### 10.10 Undo, redo, saving
 
 Every mutation is an operation with an inverse (span edits, file create/move/delete,
 including making blocks). The session op log powers `u` / `U`. Outline verbs write
@@ -1313,7 +1108,7 @@ algorithm is deterministic and idempotent.
 
 ### 12.5 Resolution
 
-The conflict view (§10.8) lists every `conflict:` block, each shown against the sibling
+The conflict view (§10.7) lists every `conflict:` block, each shown against the sibling
 before it, and the status line counts them. Resolving a pair:
 
 - **keep ours** — delete the conflict block and its embed (to trash);
@@ -1355,16 +1150,16 @@ recovery session needs. Everything else is a TUI verb.
 
 ## 14. Settings
 
-There are no vault settings. Everything that would have been one is either fixed behaviour
-or content: the inbox is the section titled `Inbox` (§7);
+There are no vault settings. Everything that could be one is either fixed behaviour or
+content: the inbox is the section titled `Inbox` (§7);
 filenames are an id prefix plus the title; names keep Unicode; ids are four words in
 frontmatter (§6.4); making blocks
 are property-triggered or manual only; `done:` records a date; conflict copies are
 blocks marked `conflict:`. Each was a knob nobody needs to agree on with a file. Two vaults that
 contain the same Markdown behave identically.
 
-There are no device settings either. The app reads no file outside the vault. What used to
-be configuration is now:
+There are no device settings either. The app reads no file outside the vault. What other
+tools keep in configuration is:
 
 - the vault: `--vault PATH`, else `$NOTES_VAULT`, else the nearest ancestor of `$PWD`
   containing `root.md`, else `~/notes`;
@@ -1516,9 +1311,7 @@ gets wrong. What other tools see:
 Encryption; CRDT / operation-log sync; a mobile client (the file format is its contract);
 a query language, saved views and `--json` output (the ```` ```query ```` fence is reserved); attachment management beyond ignoring `assets/`; full Markdown
 rendering or WYSIWYG; plugins; task recurrence; spaced repetition; whiteboards; multiple
-vaults open at once; general transclusion; an external `$EDITOR` handoff (designed:
-resolved subtree with frontmatter inline under each block's title, ids included, replaced
-wholesale on exit); properties on non-blocks; export or lowering
+vaults open at once; general transclusion; an external `$EDITOR` handoff; properties on non-blocks; export or lowering
 to standard Markdown (the four non-standard forms of §4.2 are the whole gap); a cancelled
 task state; wiki-links between nodes and backlinks
 (`[[…]]` is reserved, §4.6); rendering the format correctly in third-party editors.
@@ -1539,7 +1332,7 @@ task state; wiki-links between nodes and backlinks
 
 ---
 
-## 19. Open decisions
+## 19. Decisions
 
 1. **Name.** Binary `notes` is a placeholder.
 2. **Dated inbox, ISO titles, fixed.** Capture creates `## YYYY-MM-DD` under `Inbox`. There
@@ -1548,85 +1341,61 @@ task state; wiki-links between nodes and backlinks
 3. **Filenames are named once.** A title change does not rename the file: renames sync as
    delete-plus-create and race with edits on other devices. The id prefix identifies the
    file; the name is a hint that `notes check --fix` refreshes on request.
-3b. **Id format.** Four-word `@p` names (64 bits). Two words (32 bits) were enough for
-   identity but left the one-word filename prefix with only 16 bits of room to grow; four
-   words make the id collision-free in practice and give the prefix three words of slack.
-   Chosen for being pronounceable, typeable from memory, and self-validating against the
-   syllable tables; nobody is expected to type all four.
-4. **Task sections.** Any node can be a task, so a project heading can be checked off. The
+4. **Id format.** Four-word `@p` names (64 bits): collision-free in practice, with three words
+   of slack for the filename prefix to grow into. Pronounceable, typeable from memory, and
+   self-validating against the syllable tables; nobody is expected to type all four.
+5. **Task sections.** Any node can be a task, so a project heading can be checked off. The
    derived count is still shown beside it; there is no roll-up in either direction (§8.3).
-4b. **One spelling of task state.** The checkbox, for every node. Until 0.39 blocks used
-   `todo:` in frontmatter instead; that hid block tasks from `rg '\[ \]'` and cost a
-   conversion every time a task became a block. All-frontmatter was never an option (it
-   would make every task a file). A block keeps one thing a plain task lacks: `done:`.
-5. **Two task states.** Open and done. Cancelled was removed: it was a third value in every
-   table, a second date key, and a key binding, for a distinction between "done" and
-   "won't do" that a deleted line or a done line expresses well enough. `[-]` is read as
-   done for old vaults.
-6. **No un-block.** Earlier drafts had an inverse of making a block that dropped the frontmatter. Removed:
-   a verb whose defining feature is discarding data is a footgun, and the manual route
-   (yank, paste, delete) makes the loss explicit. Revisit only if vaults fill with
-   blocks nobody wanted.
-7. **No export.** `notes render` and the `--plain` lowering were removed for 1.0. The
-   resolved render is now only what the reading pane reads; a standalone-Markdown exporter
-   is a later feature with a known scope (§4.2's four forms).
-8. **No fuzzy matching in merge.** A node retitled on one device and edited on another
-   comes out of a merge as two nodes. The fuzzy title match that would have paired them
-   needed a tunable threshold and could pair the wrong nodes; a duplicate is cheaper to
-   fix than a wrong pairing, so the step was removed.
-8b. **Two-way merge, no cache.** Shadow copies would have made sync merges three-way and
-   resolved most differences automatically; they were the only per-device state and were
-   removed with it (§11.3). Sync conflicts now produce a conflict pair for every differing
-   field. The mitigation is structural: keep concurrently-edited things in separate files
-   (§12.1), so conflicts are small and rare. If they turn out to be neither, a per-device
-   base is the thing to bring back.
-9. **Text is edited as text, properties as a form.** Earlier drafts had a title editor and
-   a block editor beside an external-editor handoff; those collapsed into one subtree edit,
-   and the external handoff was then dropped from 1.0 (§17). Properties briefly appeared in
-   the text as `---` blocks and were taken out again: frontmatter is a storage format, and
-   showing it would surface files. The property editor is the one non-text edit. The
-   built-in editor is a text box; if it wants to become a Markdown editor, stop.
-10. **Inbox by title.** Capture finds the inbox by the title `Inbox`. Renaming it means the
-    next capture creates a new one. A hidden marker property was the alternative and would
-    have been the last setting.
-10b. **No config file.** Seven presentation keys, each already available from the environment
-    or replaceable by a key binding, were not worth a file format, a lookup order, and a
-    `notes config` command. If a real per-device need appears (a colour-blind palette, say)
-    it can come back as one environment variable.
-11. **Windows.** Slugs and atomic writes are Windows-safe by design; nothing else is tested.
-12. **No links in 1.0.** Storing links by id, displaying the live title, and rewriting labels
-    on rename were all designed and then cut for the first implementation. Embeds already
-    prove the id machinery; links can return on top of it without changing the file format,
-    which is why `[[…]]` is reserved rather than free.
-13. **No per-node timestamps.** Title-line annotations (`@done(…)`, `@created(…)`) were
-    tried in 0.15 and removed: one metadata mechanism is worth more than inline completion
-    dates. An inline task that needs a date becomes a block; the day section is the
-    only creation stamp anything else gets.
-13b. **Flat vault.** `--as dir/` was removed; the app never creates a directory and ignores
-    any it finds. Hierarchy is embeds, and one place for files keeps prefixes unique
-    vault-wide with no per-directory rule.
-14. **Prefix collisions.** Two blocks whose ids share a first word are `racfer~notes.md`
+6. **One spelling of task state.** The checkbox, for every node, so `rg '\[ \]'` finds every
+   open task and making a block never converts anything. Frontmatter holds only what a
+   checkbox cannot: `done:`.
+7. **Two task states.** Open and done. "Won't do" is a deleted line or a done line; a third
+   state would cost a value in every table, a second date key and a key binding. `[-]` is
+   read as done.
+8. **No un-block.** There is no inverse of making a block: it would have to discard the
+   frontmatter, and a verb whose defining feature is discarding data is a footgun. The
+   manual route (yank, paste, delete) makes the loss explicit.
+9. **No export.** The resolved render is what the reading pane shows; a standalone-Markdown
+   exporter is future work with a known scope (§4.2's four forms).
+10. **No fuzzy matching in merge.** A node retitled on one device and edited on another
+    comes out of a merge as two nodes. A fuzzy title match would need a tunable threshold and
+    could pair the wrong nodes; a duplicate is cheaper to fix than a wrong pairing.
+11. **Two-way merge, no cache.** A per-device base copy would make sync merges three-way,
+    but it would be the only per-device state (§11.3). Sync conflicts therefore produce a
+    conflict pair for every differing field; the mitigation is structural — keep
+    concurrently-edited things in separate files (§12.1), so conflicts are small and rare.
+12. **Text is edited as text, properties as a form.** One subtree edit in a text box covers
+    titles, bodies and structure. Frontmatter is a storage format, and showing it would
+    surface files, so the property editor is the one non-text edit. The built-in editor is a
+    text box; if it wants to become a Markdown editor, stop.
+13. **Inbox by title.** Capture finds the inbox by the title `Inbox`. Renaming it means the
+    next capture creates a new one. A hidden marker property would be the only setting.
+14. **No config file.** Presentation choices are fixed or session toggles; a config format, a
+    lookup order and a `notes config` command are not worth it. A real per-device need (a
+    colour-blind palette, say) would be one environment variable.
+15. **Windows.** Slugs and atomic writes are Windows-safe by design; nothing else is tested.
+16. **No links or query language in 1.0.** Embeds prove the id machinery, and links can be
+    built on it without changing the file format, which is why `[[…]]` is reserved rather
+    than free. The likely query shape is "everything is a key" (`due:..today`, text is
+    literal, `-` negates, `..` ranges); until then the filter box is the only search and the
+    `query` fence is reserved.
+17. **No per-node timestamps.** One metadata mechanism is worth more than inline annotations
+    such as `@done(…)`. An inline task that needs a date becomes a block; the day section is
+    the only creation stamp anything else gets.
+18. **Flat vault.** The app never creates a directory and ignores any it finds. Hierarchy is
+    embeds, and one place for files keeps prefixes unique vault-wide with no per-directory
+    rule.
+19. **Prefix collisions.** Two blocks whose ids share a first word are `racfer~notes.md`
     and `racfer-wolsun~order-new-switch.md`, regardless of their titles; the prefix grows only
-    as far as needed and never shrinks (§6.4). Uniqueness is judged on the prefix alone, not
-    the whole filename, so the prefix is a complete address and titles can change freely.
-    The cost is that roughly one file in 256 needs a second word from day one; that was
-    judged cheaper than a rule that depends on titles. The full id was rejected as too long
-    for a name, the bare slug as too collision-prone across devices, and a numeric `-2` as
-    meaningless.
-17. **Ownership travels with lines.** Three other models were tried: distributing a
-    multi-file edit back by re-matching nodes (needs heuristics and a prompt when they
-    fail), showing nested blocks as placeholders (leaks files into the text), and locking
-    every block but one (a seam the user has to work around). Tagging each buffer line with
-    its block and saving blocks as the cursor leaves them needs no matching, shows no seam,
-    and still writes each file from its own text. An external editor cannot carry tags;
-    the design for one (frontmatter inline, ids included, subtree replaced on exit) is
-    parked in §17.
-16. **No query language in 1.0.** Several syntaxes were sketched — boolean with `@key`, a
-    search box with `is:` and `key:value`, and "everything is a key" (`todo:open
-    due:..today`, text is literal, `-` negates, `..` ranges). The last is the likely
-    shape when it returns. Until then the filter box is the only search and the `query`
-    fence is reserved.
-15. **Third-party editors are readers, not editors.** Once the format owns syntax, Obsidian
-    and friends stop being a safe place to restructure a vault. Editing a body paragraph
-    there is still fine; moving headings is not. This is the price of §1 principle 2 and is
-    accepted.
+    as far as needed and never shrinks (§6.4). Uniqueness is judged on the prefix alone, so
+    the prefix is a complete address and titles can change freely. Roughly one file in 256
+    needs a second word from day one, which is cheaper than any rule that depends on titles;
+    the full id is too long for a name, the bare slug too collision-prone across devices, and
+    a numeric `-2` meaningless.
+20. **Ownership travels with lines.** Each editor line is tagged with its block, and blocks
+    are saved as the cursor leaves them. That needs no re-matching of nodes after an edit,
+    shows no seam between files, and still writes each file from its own text. An external
+    editor cannot carry the tags, so there is none in 1.0 (§17).
+21. **Third-party editors are readers, not editors.** Once the format owns syntax, Obsidian
+    and friends are not a safe place to restructure a vault. Editing a paragraph there is
+    fine; moving headings is not. This is the price of §1 principle 2 and is accepted.

@@ -1,6 +1,6 @@
 //! Structural operations on the tree (§5.2, §6, §7, §8). Every op mutates
 //! files through the vault; the undo log records what each one changed as
-//! an `Inverse` (§10.11).
+//! an `Inverse` (§10.10).
 
 use crate::ident::{slug, Id};
 use crate::parse::{Kind, Span, TaskState};
@@ -38,7 +38,7 @@ pub struct Change {
     pub after: Option<String>,
 }
 
-/// One entry of the session op log (§10.11): exactly the files an operation
+/// One entry of the session op log (§10.10): exactly the files an operation
 /// changed, created or deleted, before and after.
 #[derive(Debug, Clone)]
 pub struct Inverse {
@@ -78,7 +78,7 @@ impl Inverse {
 
     /// Undo: put every touched file back as it was before. Refuses, writing
     /// nothing, if any of them is no longer as the operation left it — an
-    /// external change since then (§10.11).
+    /// external change since then (§10.10).
     pub fn undo(&self, vault: &mut Vault) -> std::io::Result<()> {
         self.swap(vault, false)
     }
@@ -210,7 +210,6 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
     }
     Err(io_err("day section not created"))
 }
-
 
 fn append_top_section(vault: &mut Vault, title: &str) -> std::io::Result<NRef> {
     let root_file = 0;
@@ -383,7 +382,7 @@ pub fn toggle_taskness(vault: &mut Vault, r: NRef) -> std::io::Result<()> {
 
 /// Write a node's task state (§4.5, §8.1): the checkbox on its title line
 /// (`None` removes it). For a block, `done:` is stamped when it is checked
-/// and removed otherwise, and a legacy `todo:` key is dropped.
+/// and removed otherwise.
 pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io::Result<()> {
     let n = vault.tree.node(r);
     let is_block = n.is_block();
@@ -417,9 +416,6 @@ pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io
             _ => None,
         };
         set_frontmatter_key(vault, file, "done", done.as_deref())?;
-        if vault.tree.files[file].nodes.iter().any(|n| n.block.as_ref().and_then(|b| b.prop("todo")).is_some()) {
-            set_frontmatter_key(vault, file, "todo", None)?;
-        }
     }
     Ok(())
 }
@@ -706,7 +702,6 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
         props: Default::default(),
         frontmatter_raw: String::new(),
         frontmatter_span: None,
-        edge_span: None,
     };
     let pf = crate::parse::parse_file("clip.md", text, 0, Some(block));
     let tree = crate::tree::Tree {
@@ -1280,7 +1275,6 @@ fn reposition(
     place(vault, Some(r), parent, pos, &new).map(|_| true)
 }
 
-
 /// A node's text respelled: its title line as a section at `level` or as an
 /// item, and everything under it shifted to match — an item's content sits
 /// two columns in, a section's at its own indent, and nested headings stay
@@ -1350,43 +1344,6 @@ pub fn promote(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let rendered = render(&vault.tree, m, 1, false);
     let shifted = shift_document(&rendered, vault.tree.level(grand), child_indent(&vault.tree, grand));
     place(vault, Some(m), grand, pos + 1, &shifted)
-}
-
-/// Rename a node's title (used by the editor when it detects a title change,
-/// and by tests).
-pub fn rename_title(vault: &mut Vault, r: NRef, new_title: &str) -> std::io::Result<()> {
-    let n = vault.tree.node(r);
-    let file = r.0;
-    let ts = n.title_span;
-    let line = ts.text(&vault.tree.files[file].text).to_string();
-    // replace only the title text after the marker/checkbox
-    let marker_len = line.len() - line.trim_start().len();
-    let after_indent = &line[marker_len..];
-    let prefix_len = if after_indent.starts_with('#') {
-        let h = after_indent.chars().take_while(|&c| c == '#').count();
-        marker_len + h + 1
-    } else if after_indent.starts_with("- ") {
-        marker_len + 2
-    } else {
-        marker_len
-    };
-    let mut prefix = line[..prefix_len].to_string();
-    // keep checkbox
-    let rest = &line[prefix_len..];
-    let checkbox = if rest.starts_with("[ ] ") {
-        "[ ] "
-    } else if rest.starts_with("[x] ") || rest.starts_with("[X] ") || rest.starts_with("[-] ") {
-        "[x] "
-    } else {
-        ""
-    };
-    if !checkbox.is_empty() {
-        prefix.push_str(checkbox);
-    }
-    // the file keeps its name: names are set once, and `check --fix`
-    // brings them up to date on request (§6.4)
-    let new_line = format!("{}{}", prefix, new_title);
-    vault.write_span(file, ts, &new_line)
 }
 
 /// Append a plain item child titled `title` under `parent`; returns the new

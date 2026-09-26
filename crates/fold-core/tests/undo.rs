@@ -1,4 +1,4 @@
-//! The session op log (§10.11): an entry holds exactly the files an
+//! The session op log (§10.10): an entry holds exactly the files an
 //! operation touched; undo and redo refuse when one changed since.
 
 use fold_core::ops::{self, Inverse, Snapshot};

@@ -1,17 +1,14 @@
 //! The vault on disk: loading, indexing, atomic span-preserving writes,
 //! trash (§4.1, §11).
 
-use crate::ident::{filename, slug, split_filename, Id};
+use crate::ident::{split_filename, Id};
 use crate::parse::{parse_file, parse_frontmatter, Block, Kind, ParsedFile, Span};
 use crate::tree::{NRef, Tree};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct Vault {
     pub dir: PathBuf,
     pub tree: Tree,
-    /// blake3 hash of each file's text as last read or written by us (§5.2.5).
-    pub hashes: Vec<String>,
 }
 
 /// A file found in the vault directory that the parser ignores (§4.1).
@@ -44,7 +41,6 @@ impl Vault {
                 root: (0, 0),
                 blocks: Vec::new(),
             },
-            hashes: Vec::new(),
         };
         v.reload()?;
         Ok(v)
@@ -53,7 +49,6 @@ impl Vault {
     /// Rebuild the index from the vault (§11.3).
     pub fn reload(&mut self) -> std::io::Result<()> {
         let mut files: Vec<ParsedFile> = Vec::new();
-        let mut hashes = Vec::new();
         let root_text = read_if_exists(&self.dir.join("root.md"))?.unwrap_or_default();
         let root_block = Block {
             id: None,
@@ -65,9 +60,7 @@ impl Vault {
                 .map(|f| f.raw)
                 .unwrap_or_default(),
             frontmatter_span: parse_frontmatter(&root_text).map(|f| f.span),
-            edge_span: None,
         };
-        hashes.push(blake3::hash(root_text.as_bytes()).to_hex().to_string());
         files.push(parse_file("root.md", &root_text, 0, Some(root_block)));
 
         let mut entries: Vec<String> = std::fs::read_dir(&self.dir)?
@@ -96,14 +89,12 @@ impl Vault {
                 None => continue, // ignored: never parsed (§4.1)
             };
             let idx = files.len();
-            hashes.push(blake3::hash(text.as_bytes()).to_hex().to_string());
             let block = Block {
                 id: Some(id),
                 path: name.clone(),
                 props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
                 frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
                 frontmatter_span: fm.as_ref().map(|f| f.span),
-                edge_span: None,
             };
             files.push(parse_file(&name, &text, idx, Some(block)));
         }
@@ -122,39 +113,12 @@ impl Vault {
                 }
             }
         }
-        // Set each block's edge_span by finding its embed in some file.
-        for f in files.iter_mut() {
-            for n in f.nodes.iter_mut() {
-                n.block.as_mut().map(|b| b.edge_span = None);
-            }
-        }
-        for ((fi, ni), id) in &blocks {
-            let mut found: Option<Span> = None;
-            let mut count = 0;
-            for f in files.iter() {
-                for n in &f.nodes {
-                    if n.embed.as_ref() == Some(id) {
-                        count += 1;
-                        if found.is_none() {
-                            found = Some(n.title_span);
-                        }
-                    }
-                }
-            }
-            if count > 1 {
-                // duplicate embed: diagnostic (§6.2); recorded in check
-            }
-            if let Some(span) = found {
-                files[*fi].nodes[*ni].block.as_mut().unwrap().edge_span = Some(span);
-            }
-        }
 
         self.tree = Tree {
             files,
             root: (0, 0),
             blocks,
         };
-        self.hashes = hashes;
         Ok(())
     }
 
@@ -203,11 +167,6 @@ impl Vault {
         self.tree.files.iter().position(|f| f.path == path)
     }
 
-    /// The file a node lives in, and its recorded hash.
-    pub fn hash_of(&self, file: usize) -> &str {
-        &self.hashes[file]
-    }
-
     /// Replace a byte span in a file atomically (§11.1), then re-parse.
     pub fn write_span(&mut self, file: usize, span: Span, replacement: &str) -> std::io::Result<()> {
         let f = &self.tree.files[file];
@@ -242,7 +201,6 @@ impl Vault {
                 props: parse_frontmatter(text).map(|f| f.props).unwrap_or_default(),
                 frontmatter_raw: parse_frontmatter(text).map(|f| f.raw).unwrap_or_default(),
                 frontmatter_span: parse_frontmatter(text).map(|f| f.span),
-                edge_span: None,
             })
         } else {
             old_block.map(|mut b| {
@@ -260,7 +218,6 @@ impl Vault {
             })
         };
         self.tree.files[file] = parse_file(&path, text, file, block);
-        self.hashes[file] = blake3::hash(text.as_bytes()).to_hex().to_string();
         self.restitch();
         Ok(())
     }
@@ -280,48 +237,7 @@ impl Vault {
                 }
             }
         }
-        for f in self.tree.files.iter_mut() {
-            for n in f.nodes.iter_mut() {
-                if let Some(b) = n.block.as_mut() {
-                    b.edge_span = None;
-                }
-            }
-        }
-        for ((fi, ni), id) in &blocks {
-            let mut edge: Option<Span> = None;
-            for f in self.tree.files.iter() {
-                for n in &f.nodes {
-                    if n.embed.as_ref() == Some(id) {
-                        edge = Some(n.title_span);
-                    }
-                }
-            }
-            if let Some(span) = edge {
-                self.tree.files[*fi].nodes[*ni]
-                    .block
-                    .as_mut()
-                    .unwrap()
-                    .edge_span = Some(span);
-            }
-        }
         self.tree.blocks = blocks;
-    }
-
-    /// Create a new block file (§6.1): picks a unique prefix, writes
-    /// `render(node, 1, false)` with frontmatter, returns the file index.
-    pub fn create_block_file(
-        &mut self,
-        id: &Id,
-        title: &str,
-        body: &str,
-    ) -> std::io::Result<usize> {
-        let prefix = self.unique_prefix(id);
-        let name = slug(title);
-        let fname = filename(&prefix, &name);
-        let text = format!("---\nid: {}\n---\n\n{}", id, body);
-        atomic_write(&self.dir.join(&fname), &text)?;
-        self.reload()?;
-        Ok(self.file_index(&fname).unwrap())
     }
 
     /// Shortest prefix of `id` not already used by another file (§6.4).
@@ -345,27 +261,6 @@ impl Vault {
             .filter(|f| Some(f.path.as_str()) != own)
             .filter_map(|f| split_filename(&f.path).map(|(p, _)| p.to_string()))
             .collect()
-    }
-
-    /// Rename a block's file after a title change (§6.4).
-    pub fn rename_block_file(&mut self, file: usize, new_title: &str) -> std::io::Result<()> {
-        let old_path = self.tree.files[file].path.clone();
-        let node = &self.tree.files[file];
-        let root_node = node.nodes[node.root_node].children[0];
-        let id = match &node.nodes[root_node].block {
-            Some(b) => b.id.clone().unwrap(),
-            None => return Ok(()),
-        };
-        let prefix = split_filename(&old_path)
-            .map(|(p, _)| p.to_string())
-            .unwrap_or_else(|| self.unique_prefix_except(&id, Some(&old_path)));
-        let new_name = filename(&prefix, &slug(new_title));
-        if new_name == old_path {
-            return Ok(());
-        }
-        std::fs::rename(self.dir.join(&old_path), self.dir.join(&new_name))?;
-        self.reload()?;
-        Ok(())
     }
 
     /// Move a file to the trash (§11.5) and remove it from the vault.
@@ -618,12 +513,6 @@ impl Vault {
         }
     }
 
-    /// Collect every node in the resolved tree (for the outline and filter).
-    pub fn all_nodes(&self) -> Vec<NRef> {
-        let mut out = Vec::new();
-        self.tree.walk(self.tree.root, &mut |_, r| out.push(r));
-        out
-    }
 }
 
 /// Case-insensitive title comparison, Unicode-aware (§3.4).
@@ -631,10 +520,3 @@ pub fn title_eq(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
 }
 
-/// Map from id string to NRef, for embed resolution in the TUI.
-pub fn id_map(tree: &Tree) -> HashMap<String, NRef> {
-    tree.blocks
-        .iter()
-        .map(|(r, id)| (id.as_str().to_string(), *r))
-        .collect()
-}

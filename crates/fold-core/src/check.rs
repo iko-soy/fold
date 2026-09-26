@@ -141,15 +141,6 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                 message: "filename is not <prefix>~<name>.md".into(),
             }),
         }
-        // task key sanity
-        if let Some(todo) = b.prop("todo") {
-            if todo != "open" && todo != "done" {
-                out.push(Diagnostic {
-                    file: b.path.clone(),
-                    message: format!("todo: must be open or done, got {:?}", todo),
-                });
-            }
-        }
         for k in ["due", "done"] {
             if let Some(v) = b.prop(k) {
                 if !is_iso_date(v) {
@@ -307,19 +298,6 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         };
         if canonical != f.text {
             vault.write_file_text(i, &canonical)?;
-            count += 1;
-        }
-    }
-    // legacy `todo:` keys: the canonical render above wrote the state as the
-    // title line's checkbox, so the key goes (§4.5)
-    for i in 0..vault.tree.files.len() {
-        let f = &vault.tree.files[i];
-        let migrated = f.nodes.iter().any(|n| {
-            n.block.as_ref().and_then(|b| b.prop("todo")).is_some()
-                && crate::parse::title_has_checkbox(n.title_span.text(&f.text))
-        });
-        if migrated {
-            crate::ops::set_frontmatter_key(vault, i, "todo", None)?;
             count += 1;
         }
     }

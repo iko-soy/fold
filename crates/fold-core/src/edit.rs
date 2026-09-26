@@ -413,17 +413,3 @@ pub fn open_editor(vault: &Vault, root: NRef) -> EditBuffer {
     EditBuffer::build(vault, root)
 }
 
-/// Renames detected by the splice: if a block's title line changed, its file
-/// is renamed (§5.2 edge case). Returns the new title if the first owned
-/// line's title differs from the stored one.
-pub fn title_of_first_line(line: &str) -> Option<String> {
-    let t = line.trim_start();
-    if t.starts_with('#') {
-        let h = t.chars().take_while(|&c| c == '#').count();
-        Some(t[h..].trim().to_string())
-    } else if let Some(rest) = t.strip_prefix("- ") {
-        Some(rest.trim().to_string())
-    } else {
-        None
-    }
-}

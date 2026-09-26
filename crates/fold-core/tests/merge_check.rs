@@ -147,7 +147,7 @@ fn check_reports_bad_dates() {
     std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
     std::fs::write(
         dir.path().join("racfer~task.md"),
-        format!("---\nid: {}\ntodo: open\ndue: next friday\n---\n\n- task\n", id),
+        format!("---\nid: {}\ndue: next friday\n---\n\n- [ ] task\n", id),
     )
     .unwrap();
     let v = Vault::open(dir.path()).unwrap();

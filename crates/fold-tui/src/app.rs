@@ -77,7 +77,6 @@ pub struct App {
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
     props_sel: usize,
-    props_editing: Option<String>,
     // text prompt (refile destination, capture text)
     prompt: Option<Prompt>,
     // reading pane (§10.4)
@@ -85,7 +84,7 @@ pub struct App {
     read_search: String,
     read_matches: Vec<usize>,
     read_match_idx: usize,
-    // conflict view (§10.8)
+    // conflict view (§10.7)
     conflict_idx: usize,
     // watcher (§11.2)
     watcher: Option<notify::RecommendedWatcher>,
@@ -159,7 +158,6 @@ impl App {
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
-            props_editing: None,
             prompt: None,
             read_cursor: 0,
             read_search: String::new(),
@@ -189,7 +187,6 @@ impl App {
         })
     }
 
-    pub fn pane_outline_pub(&self) -> Rect { self.pane_outline }
     pub fn toolbar_labels(&self) -> Vec<String> {
         self.toolbar.iter().map(|(_, a)| a.to_string()).collect()
     }
@@ -223,7 +220,6 @@ impl App {
     pub fn props_row_pos(&self, i: usize) -> Option<(u16, u16)> {
         self.props_row_rects.get(i).map(|r| (r.x, r.y))
     }
-    pub fn pane_reading_pub(&self) -> Rect { self.pane_reading }
 
     /// Turn mouse support on (called by run(); off in tests).
     pub fn enable_mouse(&mut self) {
@@ -304,21 +300,8 @@ impl App {
         due
     }
 
-    pub fn poll_watcher_debug(&mut self) -> String {
-        let mut n = 0;
-        let mut msgs = Vec::new();
-        if let Some(rx) = &self.watch_rx {
-            while let Ok(res) = rx.try_recv() {
-                n += 1;
-                msgs.push(format!("{:?}", res.map(|e| e.kind)));
-            }
-        }
-        let poll = self.poll_watcher();
-        format!("{} events: {:?} poll={} self_write={:?}", n, msgs, poll, self.self_write_until.elapsed())
-    }
-
     /// Reload after an external change (§11.2): editor saves first, then
-    /// re-parse, cursor re-attached by id, path, nearest ancestor. A new
+    /// re-parse, cursor re-attached by id, key, deepest surviving step. A new
     /// sync-conflict file starts the merge flow (§12).
     pub fn reload_external(&mut self) {
         if self.edit_buf.is_some() {
@@ -852,17 +835,10 @@ impl App {
             Vec::new()
         };
         self.props_sel = 0;
-        self.props_editing = None;
         self.mode = Mode::Props;
     }
 
     pub fn key_props(&mut self, key: KeyEvent) {
-        if self.props_editing.is_some() {
-            // handled by the prompt path
-            self.mode = Mode::Normal;
-            self.props_editing = None;
-            return;
-        }
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -1765,7 +1741,7 @@ impl App {
     }
 
     /// Turn the pending snapshot into an op-log entry holding exactly the
-    /// files the verb changed (§10.11); a verb that changed nothing leaves
+    /// files the verb changed (§10.10); a verb that changed nothing leaves
     /// no entry and keeps the redo stack.
     fn settle_undo(&mut self) {
         if let Some(snap) = self.pending_undo.take() {
@@ -2849,7 +2825,7 @@ fn style_markdown_line(l: &str, vault: &Vault, _ctx: NRef) -> Line<'static> {
     Line::from(TSpan::raw(l.to_string()))
 }
 
-/// The help text, shared by `?` in the TUI and `fold help` (§10.9).
+/// The help text, shared by `?` in the TUI and `fold help` (§10.8).
 pub fn help_text() -> Vec<Line<'static>> {
     let entries: &[(&str, &str)] = &[
         ("", "fold — a tree of notes and tasks in plain Markdown."),

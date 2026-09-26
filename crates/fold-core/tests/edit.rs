@@ -1,4 +1,4 @@
-use fold_core::edit::{open_editor, title_of_first_line, Owner};
+use fold_core::edit::{open_editor, Owner};
 use fold_core::ops;
 use fold_core::vault::Vault;
 
@@ -119,13 +119,6 @@ fn deleting_nested_block_title_trashes_block() {
         .find(|o| o.file == 1)
         .unwrap();
     assert_eq!(block_owner, Owner { file: 1, block_ord: 1 });
-}
-
-#[test]
-fn title_detection() {
-    assert_eq!(title_of_first_line("# Hello"), Some("Hello".into()));
-    assert_eq!(title_of_first_line("- [ ] Task"), Some("[ ] Task".into()));
-    assert_eq!(title_of_first_line("plain"), None);
 }
 
 // ---------------------------------------------------------------- regressions

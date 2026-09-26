@@ -10,7 +10,6 @@ fn tree_of(text: &str) -> Tree {
         props: Default::default(),
         frontmatter_raw: String::new(),
         frontmatter_span: None,
-        edge_span: None,
     };
     let pf = parse_file("root.md", text, 0, Some(block));
     assert!(pf.diagnostics.is_empty(), "diags: {:?}", pf.diagnostics);
@@ -175,7 +174,6 @@ fn block_file_tree() -> Tree {
         props: Default::default(),
         frontmatter_raw: String::new(),
         frontmatter_span: None,
-        edge_span: None,
     };
     let root = parse_file("root.md", root_text, 0, Some(root_block));
 
@@ -188,7 +186,6 @@ fn block_file_tree() -> Tree {
         props: fm.props,
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
-        edge_span: None,
     };
     let bf = parse_file("dozzod~zfs-layout.md", block_text, 1, Some(block));
     assert!(bf.diagnostics.is_empty(), "diags: {:?}", bf.diagnostics);
@@ -246,7 +243,6 @@ fn bullet_root_block_file() {
         props: fm.props,
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
-        edge_span: None,
     };
     let pf = parse_file("racfer~order-new-switch.md", text, 0, Some(block));
     assert!(pf.diagnostics.is_empty(), "diags: {:?}", pf.diagnostics);
@@ -273,7 +269,6 @@ fn tree_with_block(root_text: &str, block_text: &str, block_path: &str) -> Tree 
         props: Default::default(),
         frontmatter_raw: String::new(),
         frontmatter_span: None,
-        edge_span: None,
     };
     let root = parse_file("root.md", root_text, 0, Some(root_block));
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
@@ -284,7 +279,6 @@ fn tree_with_block(root_text: &str, block_text: &str, block_path: &str) -> Tree 
         props: fm.props,
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
-        edge_span: None,
     };
     let bf = parse_file(block_path, block_text, 1, Some(block));
     Tree {

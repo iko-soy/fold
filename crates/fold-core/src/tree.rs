@@ -117,18 +117,6 @@ impl Tree {
         segs
     }
 
-    /// The block that owns a node: nearest ancestor-or-self that is one (§5.2).
-    pub fn owning_block(&self, r: NRef) -> NRef {
-        let mut cur = Some(r);
-        while let Some(c) = cur {
-            if self.node(c).is_block() {
-                return c;
-            }
-            cur = self.node(c).parent.map(|p| (c.0, p));
-        }
-        self.root
-    }
-
     /// Resolve an embed node to the block it references (one level).
     pub fn resolved_child(&self, r: NRef) -> NRef {
         let n = self.node(r);
