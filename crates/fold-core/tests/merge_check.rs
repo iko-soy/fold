@@ -498,3 +498,51 @@ fn merge_places_inserted_sections_by_their_neighbours() {
     let p = |s: &str| out.text.find(s).unwrap();
     assert!(p("# A") < p("# B") && p("# B") < p("# C"), "{}", out.text);
 }
+
+#[test]
+fn check_reports_embed_cycles() {
+    // two blocks that embed each other: neither is reachable from root.md,
+    // and §6.2 / §15.7 say a cycle is a diagnostic
+    let a = "racfer-hattes-mislup-nodrys";
+    let b = "dozzod-binwes-talsun-worbec";
+    let c = "lacnum-walbyn-dirlyn-havtyp";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    std::fs::write(
+        dir.path().join("racfer~x.md"),
+        format!("---\nid: {}\n---\n\n- x\n  ![[{}]]\n", a, b),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~y.md"),
+        format!("---\nid: {}\n---\n\n- y\n  ![[{}]]\n  ![[{}]]\n", b, a, c),
+    )
+    .unwrap();
+    // c hangs off the cycle without being on it
+    std::fs::write(dir.path().join("lacnum~z.md"), format!("---\nid: {}\n---\n\n- z\n", c)).unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    // every block loads and every embed resolves: the only fault is the cycle
+    for id in [a, b, c] {
+        let id = fold_core::Id::parse(id).unwrap();
+        assert!(v.tree.block_by_id(&id).is_some(), "block {} not loaded", id);
+        assert!(v.tree.embed_of(&id).is_some(), "embed of {} not parsed", id);
+    }
+    let diags = fold_core::check::check(&v);
+    let msgs: Vec<&String> = diags.iter().map(|d| &d.message).collect();
+    assert_eq!(
+        diags.iter().filter(|d| d.message.contains("cycl")).count(),
+        2,
+        "one cyclic-embed diagnostic per block on the cycle: {:?}",
+        msgs
+    );
+    // the same blocks in a chain from root.md: no cycle
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", a)).unwrap();
+    std::fs::write(
+        dir.path().join("dozzod~y.md"),
+        format!("---\nid: {}\n---\n\n- y\n  ![[{}]]\n", b, c),
+    )
+    .unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let diags = fold_core::check::check(&v);
+    assert!(diags.is_empty(), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+}

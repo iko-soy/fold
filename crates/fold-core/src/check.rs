@@ -93,6 +93,28 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
             }
         }
     }
+    // cyclic embeds (§6.2): follow each block up through the embed that
+    // holds it until root.md, a block embedded nowhere, or the block itself
+    for (r, id) in &t.blocks {
+        let mut seen: Vec<&Id> = vec![id];
+        let mut cur = id;
+        while let Some(e) = t.embed_of(cur) {
+            // the block whose file holds that embed; none: root.md
+            let Some((_, holder)) = t.blocks.iter().find(|(b, _)| b.0 == e.0) else { break };
+            if holder == id {
+                out.push(Diagnostic {
+                    file: t.node(*r).block.as_ref().unwrap().path.clone(),
+                    message: format!("cyclic embed: block {} is embedded inside itself", id),
+                });
+                break;
+            }
+            if seen.contains(&holder) {
+                break; // a cycle above it, reported by the blocks on it
+            }
+            seen.push(holder);
+            cur = holder;
+        }
+    }
     // block files: exactly one root, valid unique ids (§4.9, §6.2)
     let mut seen_ids: Vec<&Id> = Vec::new();
     for (r, id) in &t.blocks {
