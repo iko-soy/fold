@@ -648,3 +648,55 @@ fn one_refused_block_does_not_block_other_saves() {
     assert!(v.tree.files[0].text.starts_with("# A renamed"), "{}", v.tree.files[0].text);
     assert!(!buf.dirty.iter().any(|o| o.file == 0));
 }
+
+#[test]
+fn a_save_goes_through_when_the_file_changed_only_outside_the_block() {
+    // §5.2 step 5 compares the block's source span, not the whole file:
+    // a sync that changed another section of root.md (and moved this one
+    // down) while the user typed does not refuse the save, and both
+    // changes are kept
+    let (d, mut v) = vault_with("# A\n\nbody\n\n# B\n\nother\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let synced = "intro\n\n# A\n\nbody\n\n# B\n\nother, from Helix\n";
+    std::fs::write(d.path().join("root.md"), synced).unwrap();
+    let i = buf.lines.iter().position(|l| l.text == "body").unwrap();
+    buf.set_line(i, "mine".into());
+    assert_eq!(buf.save_all(&mut v).unwrap(), 1);
+    let disk = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    assert_eq!(disk, "intro\n\n# A\n\nmine\n\n# B\n\nother, from Helix\n");
+    assert_eq!(v.tree.files[0].text, disk);
+    assert!(buf.dirty.is_empty());
+    // the next save starts from what this one wrote
+    buf.set_line(i, "mine again".into());
+    assert_eq!(buf.save_all(&mut v).unwrap(), 1);
+    let disk = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    assert_eq!(disk, "intro\n\n# A\n\nmine again\n\n# B\n\nother, from Helix\n");
+    // a change to the block's own text is still refused (§5.2 step 5)
+    std::fs::write(d.path().join("root.md"), disk.replace("mine again", "theirs")).unwrap();
+    buf.set_line(i, "mine, third".into());
+    let err = buf.save_all(&mut v).unwrap_err();
+    assert!(err.to_string().contains("changed on disk"), "{}", err);
+    assert!(std::fs::read_to_string(d.path().join("root.md")).unwrap().contains("theirs"));
+}
+
+#[test]
+fn a_block_save_keeps_a_property_set_on_disk_meanwhile() {
+    // a block's source span is its file after the frontmatter: a property
+    // another device set while the block was edited stays
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let task = v.tree.resolved_children(a)[0];
+    ops::make_block(&mut v, task).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let p = d.path().join(&v.tree.files[1].path);
+    let theirs = std::fs::read_to_string(&p).unwrap().replace("\n---\n", "\ndue: 2026-10-01\n---\n");
+    std::fs::write(&p, &theirs).unwrap();
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "- task (mine)".into());
+    assert_eq!(buf.save_all(&mut v).unwrap(), 1);
+    let disk = std::fs::read_to_string(&p).unwrap();
+    assert_eq!(disk, theirs.replace("- task", "- task (mine)"));
+    assert!(disk.contains("due: 2026-10-01\n---\n\n- task (mine)\n"), "{}", disk);
+}

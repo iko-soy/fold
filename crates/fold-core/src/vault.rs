@@ -206,7 +206,8 @@ impl Vault {
         Ok(())
     }
 
-    /// Re-parse one file from given text (after our own write) and re-stitch.
+    /// Re-parse one file from given text (after our own write, or as read
+    /// from disk) and re-stitch.
     pub fn reparse(&mut self, file: usize, text: &str) -> std::io::Result<()> {
         let path = self.tree.files[file].path.clone();
         let old_block = self.tree.files[file]

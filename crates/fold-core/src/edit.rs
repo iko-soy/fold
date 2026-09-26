@@ -8,7 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{parse_file, Block, Content, Kind, ParsedFile, Span};
+use crate::parse::{parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, ParsedFile, Span};
 use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -454,21 +454,48 @@ impl EditBuffer {
         while out.ends_with("\n\n") {
             out.pop();
         }
-        let (file, node) = self.locate(vault, &info).ok_or_else(|| {
+        let not_found = || {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("{}: edited node no longer found", info.path),
             )
-        })?;
+        };
+        let (mut file, mut node) = self.locate(vault, &info).ok_or_else(not_found)?;
         let path = vault.tree.files[file].path.clone();
-        // External-change check (§5.2.5): what is on disk now must be what
-        // was read (or last written) through this buffer.
+        // External-change check (§5.2.5): the block's source span on disk
+        // must be what was read (or last written) through this buffer.
         let on_disk = std::fs::read_to_string(vault.dir.join(&path)).unwrap_or_default();
-        if self.base_hashes.get(&path).map(|h| *h != hash(&on_disk)).unwrap_or(false) {
-            return Err(std::io::Error::other(format!(
-                "{} changed on disk; not overwriting",
-                path
-            )));
+        let mut region = Span {
+            start: info.start,
+            end: info.end,
+        };
+        if let Some(base) = self.base_hashes.get(&path).filter(|h| **h != hash(&on_disk)) {
+            // The file changed underneath. Unless it was reloaded since,
+            // the vault still holds it as this buffer last read or wrote
+            // it: if the block's own text is unchanged, the change was
+            // elsewhere (another section, a property), and the block is
+            // written into the file as it is now, the change kept.
+            let known = &vault.tree.files[file].text;
+            let span = (*base == hash(known))
+                .then(|| span_now(known, &on_disk, node.is_none().then_some(region)))
+                .flatten();
+            let Some(span) = span else {
+                return Err(std::io::Error::other(format!(
+                    "{} changed on disk; not overwriting",
+                    path
+                )));
+            };
+            // the file as it is now is what the buffer has read, and what
+            // the vault writes over (its write guard compares with it)
+            vault.reparse(file, &on_disk)?;
+            self.base_hashes.insert(path.clone(), hash(&on_disk));
+            if node.is_none() {
+                region = span;
+                if let Some(i) = self.owners.get_mut(&owner) {
+                    (i.start, i.end) = (span.start, span.end);
+                }
+            }
+            (file, node) = self.locate(vault, &info).ok_or_else(not_found)?;
         }
         let f = &vault.tree.files[file];
         // §4.9: a block file with text or an embed before its root is
@@ -511,13 +538,10 @@ impl EditBuffer {
         } else {
             // a region inside a file: the blank lines that separate it from
             // what follows stay
-            let region = Span {
-                start: info.start,
-                end: info.end,
-            };
             vault.write_span(file, region, &out)?;
             if let Some(i) = self.owners.get_mut(&owner) {
-                i.end = info.start + out.len();
+                i.start = region.start;
+                i.end = region.start + out.len();
             }
         }
         self.base_hashes
@@ -565,6 +589,32 @@ enum Line {
 
 fn hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+/// Where a block's source span (§5.2 step 5) is in `now`, a newer text of
+/// its file than `known`, when the block's own text there is as it was:
+/// `None` if the change touched it, or if the frontmatter names another
+/// block now. A block (or root.md's Root) is its file after the
+/// frontmatter (§4.9); another render root is `region` of `known`, found
+/// where its bytes occur in `now`, at a line start and only once.
+fn span_now(known: &str, now: &str, region: Option<Span>) -> Option<Span> {
+    let (k, n) = (parse_frontmatter(known), parse_frontmatter(now));
+    let id = |f: &Option<Frontmatter>| f.as_ref().and_then(|f| f.props.get("id").cloned());
+    if id(&k) != id(&n) {
+        return None;
+    }
+    let Some(region) = region else {
+        let body = |f: &Option<Frontmatter>| f.as_ref().map_or(0, |f| f.span.end);
+        let (kb, nb) = (body(&k), body(&n));
+        return (known[kb..] == now[nb..]).then_some(Span { start: nb, end: now.len() });
+    };
+    let own = &known[region.start.min(known.len())..region.end.min(known.len())];
+    let mut found = now
+        .match_indices(own)
+        .map(|(i, _)| i)
+        .filter(|&i| i == 0 || now.as_bytes()[i - 1] == b'\n');
+    let at = found.next()?;
+    found.next().is_none().then_some(Span { start: at, end: at + own.len() })
 }
 
 /// A block file with text or an embed before its root node, or with no
