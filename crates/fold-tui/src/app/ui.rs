@@ -191,6 +191,13 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// A title as drawn: the terminal drops a tab, so it shows as the spaces
+/// to its next stop, counted from the title's start (raw text is never
+/// hidden, §10.9).
+fn title_text(title: &str) -> String {
+    super::wrap::shown(title, 0, usize::MAX)
+}
+
 /// One screen row of the reading pane.
 struct Drawn {
     doc: Option<usize>,
@@ -425,7 +432,8 @@ impl App {
         buf.set_style(area, Style::default().bg(theme::BAR));
         let actions = [Action::Filter, Action::Capture, Action::ReadingPane, Action::Undo, Action::Redo, Action::Palette, Action::Help];
         let crumbs = self.crumbs();
-        let crumb_w: u16 = crumbs.iter().map(|&c| self.vault.tree.node(c).title.width() as u16 + 3).sum::<u16>() + 6;
+        let titles: Vec<String> = crumbs.iter().map(|&c| title_text(&self.vault.tree.node(c).title)).collect();
+        let crumb_w: u16 = titles.iter().map(|t| t.width() as u16 + 3).sum::<u16>() + 6;
         let room = area.width.saturating_sub(crumb_w.min(area.width / 2));
         let right = area.x + area.width;
         let start = self.buttons_right(buf, right, area.y, &actions, None, room);
@@ -437,7 +445,6 @@ impl App {
         self.ui.push(home, Hit::Crumb(None));
         x += 4;
         let limit = start.saturating_sub(1);
-        let titles: Vec<String> = crumbs.iter().map(|&c| self.vault.tree.node(c).title.clone()).collect();
         let total: u16 = titles.iter().map(|t| t.width() as u16 + 3).sum();
         let mut skip = 0;
         let mut need = total;
@@ -617,7 +624,7 @@ impl App {
             if dragging_from == Some(vi) {
                 style = style.add_modifier(Modifier::DIM);
             }
-            let title = if n.title.is_empty() { "(untitled)".to_string() } else { n.title.clone() };
+            let title = if n.title.is_empty() { "(untitled)".to_string() } else { title_text(&n.title) };
             let marker = if n.is_block() || n.is_embed() { " ▤" } else { "" };
             let shown = fit(&format!("{}{}", title, marker), title_room as usize);
             put(buf, title_x, y, &shown, title_room, style);
@@ -688,7 +695,7 @@ impl App {
         }
         if let Some(r) = r {
             let n = self.vault.tree.node(r);
-            let t = if n.kind == Kind::Root { "fold".into() } else { n.title.clone() };
+            let t = if n.kind == Kind::Root { "fold".into() } else { title_text(&n.title) };
             spans.push(Span::styled(t, Style::default().add_modifier(Modifier::BOLD)));
             if n.is_block() {
                 spans.push(Span::styled(" ▤", Style::default().fg(theme::DIM)));
@@ -892,7 +899,7 @@ impl App {
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
         let Some(ed) = &self.editor else { return };
         let owner = ed.buf.owner_at(ed.cursor.line);
-        let owner_title = ed.buf.owners.get(&owner).map(|o| o.title.clone()).unwrap_or_default();
+        let owner_title = ed.buf.owners.get(&owner).map(|o| title_text(&o.title)).unwrap_or_default();
         let mut title = vec![
             Span::styled(" Editing ", Style::default().fg(theme::ACCENT)),
             Span::styled(owner_title, Style::default().add_modifier(Modifier::BOLD)),
@@ -1073,7 +1080,7 @@ impl App {
         let r = Rect { x, y, width: w, height: h }.intersection(screen);
         self.ui.push(screen, Hit::Backdrop);
         f.render_widget(Clear, r);
-        let title = self.vault.tree.node(target).title.clone();
+        let title = title_text(&self.vault.tree.node(target).title);
         let block = rounded(Line::from(Span::styled(format!(" {} ", fit(&title, 20)), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
         f.render_widget(block, r);
@@ -1167,7 +1174,7 @@ impl App {
 
     /// A list row for a node: its title, then its parents dimmed.
     fn path_spans(&self, r: NRef) -> Vec<(String, Style)> {
-        let path = self.path_titles(r);
+        let path: Vec<String> = self.path_titles(r).iter().map(|t| title_text(t)).collect();
         let (last, parents) = path.split_last().map(|(l, p)| (l.clone(), p.join(" › "))).unwrap_or_default();
         let last = if last.is_empty() { "(untitled)".into() } else { last };
         vec![
@@ -1211,7 +1218,7 @@ impl App {
     }
 
     fn draw_props(&mut self, f: &mut Frame, screen: Rect) {
-        let title = self.props_target.map(|t| self.vault.tree.node(t).title.clone()).unwrap_or_default();
+        let title = self.props_target.map(|t| title_text(&self.vault.tree.node(t).title)).unwrap_or_default();
         let h = (self.props_rows.len() as u16 + 4).max(5);
         let r = Self::centered(screen, 64, h);
         let inner = self.popup(f, screen, r, &format!("Properties — {}", fit(&title, 30)), &[Action::PropAdd, Action::Close]);

@@ -327,3 +327,30 @@ fn undo_resets_the_editors_screen_row_goal_column() {
     let text = std::fs::read_to_string(app.vault_dir().join("root.md")).unwrap();
     assert!(text.contains("\nabcdef\nxQ\nabcdef\n"), "{}", text);
 }
+
+#[test]
+fn a_tab_in_a_title_is_drawn_as_whitespace() {
+    // the terminal drops a tab: a title shows it as the spaces to its next
+    // stop, counted from the title's start (raw text is never hidden, §10.9)
+    let (_d, mut app) = app_with("- x\ty\n  - c\n");
+    app.set_edit_keys(EditKeys::Normal);
+    key(&mut app, KeyCode::Enter); // zoom into it
+    let s = draw(&mut app);
+    assert!(s[0].contains("fold › x   y"), "breadcrumb: {:#?}", s);
+    assert!(s[1].contains("╭ x   y "), "reading pane: {:#?}", s);
+    assert!(s[2].contains("▾ x   y"), "outline: {:#?}", s);
+    // a node's parents in the filter's hits
+    key(&mut app, KeyCode::Tab);
+    keys(&mut app, "/c");
+    assert!(draw(&mut app).iter().any(|l| l.contains("c  x   y")), "{:#?}", draw(&mut app));
+    key(&mut app, KeyCode::Esc);
+    // the node menu, the property form and the editor name it too
+    keys(&mut app, "zpm");
+    assert!(draw(&mut app).iter().any(|l| l.contains("╭ x   y ")), "{:#?}", draw(&mut app));
+    key(&mut app, KeyCode::Esc);
+    keys(&mut app, "a");
+    assert!(draw(&mut app).iter().any(|l| l.contains("Properties — x   y")), "{:#?}", draw(&mut app));
+    key(&mut app, KeyCode::Esc);
+    keys(&mut app, "e");
+    assert!(draw(&mut app).iter().any(|l| l.contains("Editing x   y")), "{:#?}", draw(&mut app));
+}
