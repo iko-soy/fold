@@ -198,6 +198,37 @@ fn embed_level_mismatch(t: &crate::tree::Tree, e: NRef) -> Option<usize> {
         .then_some(written)
 }
 
+/// The text of `e`'s file with heading embed `e` at the level of its
+/// position and the structure unchanged (§4.7). Its later sibling sections
+/// written deeper than that level move to it too (it is their position's
+/// level as well): left alone, the shallower embed would take them as its
+/// children. `None` when `e` has no stale level, or when no level keeps it
+/// where it is (its parent section is itself written at that level or
+/// deeper), and `check` goes on reporting it.
+fn embed_level_fix(t: &crate::tree::Tree, e: NRef) -> Option<String> {
+    embed_level_mismatch(t, e)?;
+    let lvl = t.derived_level(e);
+    let f = &t.files[e.0];
+    let parent = &f.nodes[f.nodes[e.1].parent?];
+    if parent.kind == Kind::Section && parent.level.unwrap_or(1) >= lvl {
+        return None;
+    }
+    let from = parent.children.iter().position(|&c| c == e.1)?;
+    let mut text = f.text.clone();
+    // last to first, so the spans before each edit stay valid
+    for &c in parent.children[from..].iter().rev() {
+        let n = &f.nodes[c];
+        let Some(w) = n.level.filter(|&w| w > lvl || c == e.1) else { continue };
+        let line = n.title_span.text(&f.text);
+        let at = n.title_span.start + line.len() - line.trim_start_matches([' ', '\t']).len();
+        if !f.text[at..].starts_with(&"#".repeat(w)) {
+            return None; // not an ATX heading
+        }
+        text.replace_range(at..at + w, &"#".repeat(lvl));
+    }
+    Some(text)
+}
+
 /// A heading embed must embed a section, a bare one an item (§4.7).
 fn form_mismatch(embed: Kind, block: Kind) -> bool {
     (embed == Kind::Section) != (block == Kind::Section)
@@ -314,25 +345,15 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         crate::ops::respell_embed(vault, e, to_section)?;
         count += 1;
     }
-    // heading embeds at the level of their position (§4.7); only ever
-    // shallower than written, so no line changes parent
+    // heading embeds at the level of their position (§4.7), one at a time,
+    // with no line changing parent
     for _ in 0..10_000 {
         let t = &vault.tree;
-        let wrong = t.files.iter().enumerate().find_map(|(fi, f)| {
-            (0..f.nodes.len())
-                .find(|&ni| embed_level_mismatch(t, (fi, ni)).is_some())
-                .map(|ni| (fi, ni))
+        let fixed = t.files.iter().enumerate().find_map(|(fi, f)| {
+            (0..f.nodes.len()).find_map(|ni| embed_level_fix(t, (fi, ni)).map(|text| (fi, text)))
         });
-        let Some(e) = wrong else { break };
-        let n = vault.tree.node(e);
-        let line = format!(
-            "{}{} ![[{}]]",
-            " ".repeat(n.indent),
-            "#".repeat(vault.tree.derived_level(e)),
-            n.embed.as_ref().unwrap()
-        );
-        let span = n.title_span;
-        vault.write_span(e.0, span, &line)?;
+        let Some((file, text)) = fixed else { break };
+        vault.write_file_text(file, &text)?;
         count += 1;
     }
     // repair filenames (§6.4): an existing prefix that is a leading run of

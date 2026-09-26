@@ -604,3 +604,29 @@ fn promoted_section_does_not_adopt_deeper_written_next_sibling() {
     assert_eq!(others(&parents(&v), "S"), others(&before, "S"));
 }
 
+#[test]
+fn fixing_a_heading_embed_level_keeps_following_sections_in_place() {
+    // B is a sibling of the embed under A; making the embed shallower must
+    // not make B nest under it (§4.7: "the structure does not change")
+    let (_d, mut v) = vault_with_block(
+        "# A\n\n### ![[racfer-hattes-mislup-nodrys]]\n\n### B\n\n#### C\n",
+        "# S\n",
+    );
+    let before = parents(&v);
+    assert!(before.contains(&("B".to_string(), "A".to_string())), "{:?}", before);
+    assert!(check::check(&v).iter().any(|d| d.message.contains("level 3 where its position gives 2")));
+    check::fix(&mut v).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), "# A\n\n## ![[racfer-hattes-mislup-nodrys]]\n\n## B\n\n#### C\n");
+    assert!(check::check(&v).iter().all(|d| !d.message.contains("embed has children")
+        && !d.message.contains("heading embed at level")));
+    // a parent section written deeper than its own position leaves the
+    // embed no shallower level that keeps it there: it stays, reported
+    let root = "# A\n\n#### B\n\n###### ![[racfer-hattes-mislup-nodrys]]\n";
+    let (_d, mut v) = vault_with_block(root, "# S\n");
+    let before = parents(&v);
+    assert!(before.contains(&("S".to_string(), "B".to_string())), "{:?}", before);
+    check::fix(&mut v).unwrap();
+    assert_eq!(parents(&v), before, "{}", root_text(&v));
+    assert_eq!(root_text(&v), root);
+}
