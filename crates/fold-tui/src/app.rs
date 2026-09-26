@@ -312,12 +312,11 @@ impl App {
     }
 
     /// Reload after an external change (§11.2): editor saves first, then
-    /// re-parse, cursor re-attached by id, key, deepest surviving step. A new
-    /// sync-conflict file starts the merge flow (§12).
+    /// re-parse, cursor re-attached by id, key, deepest surviving step, and
+    /// the editor re-rendered. A new sync-conflict file starts the merge
+    /// flow (§12).
     pub fn reload_external(&mut self) {
-        if self.editor.is_some() {
-            self.save_editor("external change");
-        }
+        let edit = self.editor_before_write("external change");
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         let zoom_key = self.zoom_root.map(|z| self.vault.key_of(z));
         // sync-conflict files start the merge flow (§11.2)
@@ -345,6 +344,7 @@ impl App {
             }
         }
         self.clamp_cursor();
+        self.editor_after_write(edit);
     }
 
     /// Visible outline rows: the zoom subtree, flattened, honouring folds
@@ -824,30 +824,125 @@ impl App {
         self.say(format!("editor keys: {}", keys.name()));
     }
 
-    fn save_editor(&mut self, why: &str) {
-        let Some(mut ed) = self.editor.take() else { return };
+    /// Write the editor's dirty blocks; true when nothing is left unsaved.
+    /// A refused save (the file changed on disk) keeps the text in the
+    /// editor and says why.
+    fn save_editor(&mut self, why: &str) -> bool {
+        if !self.editor_dirty() {
+            return true;
+        }
+        let Some(mut ed) = self.editor.take() else { return true };
         self.settle_undo();
         let snap = ops::Snapshot::take(&self.vault, "edit");
-        match ed.buf.save_all(&mut self.vault) {
+        let res = ed.buf.save_all(&mut self.vault);
+        // blocks written before a refusal are an op too
+        self.record_undo(snap);
+        let saved = match res {
             Ok(n) => {
-                self.record_undo(snap);
                 if n > 0 {
                     self.say(format!("saved {} block(s) ({})", n, why));
                 }
+                true
             }
-            Err(e) => self.say(format!("error: {}", e)),
-        }
+            Err(e) => {
+                self.say(format!("error: {}", e));
+                false
+            }
+        };
         self.editor = Some(ed);
         self.edit_last_key = Instant::now();
+        saved
     }
 
-    fn close_editor(&mut self) {
-        self.save_editor("exit");
+    /// Leave the editor, saving it (§10.6); true when it closed. When the
+    /// save is refused the editor stays open with its text: nothing typed
+    /// is dropped except by *Revert*.
+    fn close_editor(&mut self) -> bool {
+        if !self.save_editor("exit") {
+            self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
+            return false;
+        }
         if let Some(ed) = self.editor.take() {
             self.edit_clip = ed.clip;
         }
         self.mode = Mode::Normal;
         self.focus = self.edit_return;
+        true
+    }
+
+    /// The node the editor is open on, as a key that survives the files
+    /// changing under it (§3.4): its render root, found in the tree as the
+    /// editor last read or wrote it.
+    fn editor_key(&self) -> Option<NodeKey> {
+        let ed = self.editor.as_ref()?;
+        let info = ed.buf.owners.values().find(|i| i.parent.is_none())?;
+        let r = match &info.id {
+            Some(id) => self.vault.tree.block_by_id(id)?,
+            None => {
+                let file = self.vault.file_index(&info.path)?;
+                let f = &self.vault.tree.files[file];
+                if info.is_root {
+                    (file, f.root_node)
+                } else {
+                    let i = f.nodes.iter().position(|n| n.kind != Kind::Root && n.span.start == info.start)?;
+                    (file, i)
+                }
+            }
+        };
+        Some(self.vault.key_of(r))
+    }
+
+    /// Before something writes files under an open editor, an outline verb
+    /// or a reload (§10.6, §11.2): the editor saves first. Returns what it
+    /// is open on and the files as they are, for `editor_after_write`.
+    fn editor_before_write(&mut self, why: &str) -> Option<(NodeKey, ops::Snapshot)> {
+        self.editor.as_ref()?;
+        self.save_editor(why);
+        let key = self.editor_key()?;
+        Some((key, ops::Snapshot::take(&self.vault, why)))
+    }
+
+    /// After it: if any file changed, the editor is re-rendered over the
+    /// files as they now are, so its next save is not refused.
+    fn editor_after_write(&mut self, before: Option<(NodeKey, ops::Snapshot)>) {
+        let Some((key, snap)) = before else { return };
+        if ops::Inverse::since(snap, &self.vault).is_some() {
+            self.rebuild_editor(&key);
+        }
+    }
+
+    /// Re-render a clean editor over the files as they are now (§11.2), on
+    /// the node `key` finds again (id, key, deepest surviving step), with
+    /// the cursor where it was. Text a refused save still holds is never
+    /// replaced.
+    fn rebuild_editor(&mut self, key: &NodeKey) {
+        if self.editor.is_none() || self.editor_dirty() {
+            return;
+        }
+        let Some(target) = self.vault.find_by_key(key) else {
+            // nothing unsaved, and nothing left to edit
+            self.close_editor();
+            self.say("the node being edited is gone");
+            return;
+        };
+        let buf = fold_core::edit::open_editor(&self.vault, target);
+        let Some(ed) = self.editor.as_mut() else { return };
+        let same = buf.lines.len() == ed.buf.lines.len()
+            && buf.lines.iter().zip(&ed.buf.lines).all(|(a, b)| a.text == b.text && a.owner == b.owner);
+        if same {
+            // the same text: the cursor, mode and undo history stay
+            ed.buf = buf;
+        } else {
+            // new text: the old undo steps would write the old text back
+            let mut fresh = editor::Editor::new(buf, ed.keys, ed.clip.clone());
+            if ed.mode == editor::Mode::Insert {
+                fresh.mode = editor::Mode::Insert;
+            }
+            fresh.cursor = ed.cursor;
+            fresh.search = ed.search.take();
+            fresh.clamp_cursor();
+            *ed = fresh;
+        }
     }
 
     /// Whether the editor holds changes not yet written.
@@ -2002,7 +2097,9 @@ impl App {
             }
             Action::ResolveConflicts => self.enter_conflict_view(),
             Action::EditorKeys => self.set_edit_keys(self.edit_keys.next()),
-            Action::EditDone => self.close_editor(),
+            Action::EditDone => {
+                self.close_editor();
+            }
             Action::EditRevert => self.discard_editor(),
             Action::Close => self.close_top(),
             Action::PromptOk => {
@@ -2029,7 +2126,9 @@ impl App {
             return;
         }
         match self.mode {
-            Mode::Edit => self.close_editor(),
+            Mode::Edit => {
+                self.close_editor();
+            }
             Mode::Filter => {
                 self.mode = Mode::Normal;
                 self.filter.clear();
@@ -2273,11 +2372,12 @@ fn run_loop(
             out.flush()?;
         }
         if app.quit {
-            // save any open editor on quit (§10.6)
-            if app.editor.is_some() {
-                app.close_editor();
+            // save any open editor on quit (§10.6); one whose save is
+            // refused stays open with its text
+            if app.editor.is_none() || app.close_editor() {
+                return Ok(());
             }
-            return Ok(());
+            app.quit = false;
         }
         // autosave after 750 ms without a keystroke (§10.6)
         if app.mode == Mode::Edit && app.editor_dirty() && app.edit_last_key.elapsed() > Duration::from_millis(750) {

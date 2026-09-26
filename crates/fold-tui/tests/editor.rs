@@ -773,3 +773,33 @@ fn typing_after_n_titles_the_new_node() {
     keys(&mut app, "n⎋");
     assert_eq!(root(&d), "- a\n-\n");
 }
+
+#[test]
+fn typing_after_an_external_change_to_the_edited_file_is_saved() {
+    // §11.2: an external change while editing re-renders the buffer, so a
+    // later save is not refused and the typed text is never thrown away
+    let (d, mut app) = app_with("# A\n\nbody\n\n# B\n\nother\n");
+    keys(&mut app, "e");
+    std::fs::write(d.path().join("root.md"), "# A\n\nbody\n\n# B\n\nother, from Helix\n").unwrap();
+    app.reload_external();
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    keys(&mut app, "X⎋");
+    let t = root(&d);
+    assert!(t.contains("# AX") && t.contains("other, from Helix"), "{}", t);
+    assert_eq!(app.mode_pub(), "normal");
+}
+
+#[test]
+fn a_refused_save_keeps_the_editor_open_with_its_text() {
+    // a save that fails never drops the buffer: the file changed on disk
+    // under typed text, and leaving the editor keeps it open with the text
+    let (d, mut app) = app_with("# A\n\nbody\n\n# B\n\nother\n");
+    keys(&mut app, "e");
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    keys(&mut app, "X");
+    std::fs::write(d.path().join("root.md"), "# A\n\nbody\n\n# B\n\nother, from Helix\n").unwrap();
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "edit", "the editor stays open");
+    assert!(app.editor_dirty(), "with the typed text still in it");
+    assert!(draw(&mut app).contains("# AX"));
+}
