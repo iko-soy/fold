@@ -45,12 +45,45 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.vim.record.clear();
     } else if idle(e) && !e.vim.replaying {
         let rec = std::mem::take(&mut e.vim.record);
-        let first = rec.first().map(|k| k.code);
-        let is_undo = matches!(first, Some(KeyCode::Char('u') | KeyCode::Char('.')))
-            || rec.first().is_some_and(|k| k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL));
+        // undo, redo and `.` itself (after any count) are not changes to repeat
+        let ctl = |k: &KeyEvent| k.modifiers.contains(KeyModifiers::CONTROL);
+        let is_undo = rec.get(count_end(&rec, 0)).is_some_and(|k| match k.code {
+            KeyCode::Char('u') | KeyCode::Char('.') => !ctl(k),
+            KeyCode::Char('r') => ctl(k),
+            _ => false,
+        });
         if e.changes != e.vim.record_changes && !is_undo {
             e.vim.last_change = rec;
         }
+    }
+    out
+}
+
+/// Where a count starting at `i` in recorded keys ends (`i` if there is none).
+fn count_end(keys: &[KeyEvent], i: usize) -> usize {
+    let mut j = i;
+    while keys.get(j).is_some_and(|k| {
+        !k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char(c) if c.is_ascii_digit() && (c != '0' || j > i))
+    }) {
+        j += 1;
+    }
+    j
+}
+
+/// A recorded change with its count replaced by `n`, as Vim's `.` does with
+/// a count: the count before the command and the one after an operator both
+/// go (`2d3w` becomes `{n}dw`).
+fn with_count(keys: &[KeyEvent], n: usize) -> Vec<KeyEvent> {
+    let mut out: Vec<KeyEvent> = n.to_string().chars().map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).collect();
+    let rest = &keys[count_end(keys, 0)..];
+    let op = rest.first().is_some_and(|k| {
+        !k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('d' | 'c' | 'y' | '>' | '<'))
+    });
+    if op {
+        out.push(rest[0]);
+        out.extend_from_slice(&rest[count_end(rest, 1)..]);
+    } else {
+        out.extend_from_slice(rest);
     }
     out
 }
@@ -389,13 +422,16 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
                 e.undo();
             }
         }
-        '.' => {
+        // never inside a replay: `.` would replay itself
+        '.' if !e.vim.replaying => {
+            // a count replaces the change's own, and stays for the next `.`
+            if let Some(n) = count.filter(|_| !e.vim.last_change.is_empty()) {
+                e.vim.last_change = with_count(&e.vim.last_change, n);
+            }
             let keys = e.vim.last_change.clone();
             e.vim.replaying = true;
-            for _ in 0..n {
-                for k in &keys {
-                    handle(e, *k);
-                }
+            for k in keys {
+                handle(e, k);
             }
             e.vim.replaying = false;
         }

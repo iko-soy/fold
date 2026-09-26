@@ -472,3 +472,25 @@ fn helix_x_r_above_a_block_keeps_the_block() {
     assert!(root(&d).starts_with("# A\n\n-----\n![["), "{}", root(&d));
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
 }
+
+#[test]
+fn vim_dot_after_a_counted_dot_repeats_the_change() {
+    let (d, mut app) = app_with("# A\n\na\nb\nc\nd\ne\nf\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjdd2.:w⏎");
+    assert_eq!(root(&d), "# A\n\nd\ne\nf\n");
+    // `.` repeats `dd` with the count 2 of the last `2.`; it must not replay `2.` into itself
+    keys(&mut app, ".:w⏎");
+    assert_eq!(root(&d), "# A\n\nf\n");
+}
+
+#[test]
+fn vim_counted_undo_is_not_repeated_by_dot() {
+    let (d, mut app) = app_with("# A\n\na\nb\nc\nd\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejjdddddd2u:w⏎");
+    assert_eq!(root(&d), "# A\n\nb\nc\nd\n");
+    // `.` repeats the last change (`dd`), never the undo
+    keys(&mut app, "ggjj.:w⏎");
+    assert_eq!(root(&d), "# A\n\nc\nd\n");
+}
