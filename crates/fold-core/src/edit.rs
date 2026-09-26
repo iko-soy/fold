@@ -8,7 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::Kind;
+use crate::parse::{Kind, Span};
 use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -60,11 +60,16 @@ pub struct OwnerInfo {
     /// The owner whose text holds this block's embed (None for the owner
     /// of the render root).
     pub parent: Option<Owner>,
-    /// The file the block is written to, and where its span starts (for a
-    /// render root that is not a block: found again by position after
-    /// reloads).
+    /// The file the block is written to.
     pub path: String,
+    /// For a render root that is not a block: the bytes `start..end` of its
+    /// file that the buffer owns — its span without the blank lines after
+    /// it — and each splice moves `end` to the end of what it wrote. Once
+    /// its own text changes (a line above its title, the title deleted) no
+    /// node need start where it did; the base-hash check (§5.2.5) ensures
+    /// nothing else wrote the file since.
     pub start: usize,
+    pub end: usize,
     pub is_root: bool,
 }
 
@@ -118,6 +123,7 @@ impl EditBuffer {
                     parent,
                     path: tree.files[nref.0].path.clone(),
                     start: n.span.start,
+                    end: owned_end(&tree.files[nref.0].text, n.span),
                     is_root,
                 },
             );
@@ -194,21 +200,16 @@ impl EditBuffer {
         }
     }
 
-    /// The block's node in the current tree (it may have been re-parsed
-    /// since the buffer was built).
-    fn locate(&self, vault: &Vault, info: &OwnerInfo) -> Option<NRef> {
+    /// Where the block is now: its file, and for a block or a file's Root
+    /// its node in the current tree (it may have been re-parsed since the
+    /// buffer was built). A render root that is not a block is no node but
+    /// the region `start..end` of its file.
+    fn locate(&self, vault: &Vault, info: &OwnerInfo) -> Option<(usize, Option<usize>)> {
         if let Some(id) = &info.id {
-            return vault.tree.block_by_id(id);
+            return vault.tree.block_by_id(id).map(|(f, n)| (f, Some(n)));
         }
         let file = vault.file_index(&info.path)?;
-        let f = &vault.tree.files[file];
-        if info.is_root {
-            return Some((file, f.root_node));
-        }
-        f.nodes
-            .iter()
-            .position(|n| n.kind != Kind::Root && n.span.start == info.start)
-            .map(|i| (file, i))
+        Some((file, info.is_root.then_some(vault.tree.files[file].root_node)))
     }
 
     /// The owner directly nested in `owner` that `o` belongs to, if any.
@@ -308,13 +309,12 @@ impl EditBuffer {
         while out.ends_with("\n\n") {
             out.pop();
         }
-        let nref = self.locate(vault, &info).ok_or_else(|| {
+        let (file, node) = self.locate(vault, &info).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("{}: edited node no longer found", info.path),
             )
         })?;
-        let file = nref.0;
         let path = vault.tree.files[file].path.clone();
         // External-change check (§5.2.5): what is on disk now must be what
         // was read (or last written) through this buffer.
@@ -326,10 +326,9 @@ impl EditBuffer {
             ));
         }
         let f = &vault.tree.files[file];
-        let n = &f.nodes[nref.1];
-        if n.is_block() || n.kind == Kind::Root {
+        if let Some(ni) = node {
             // the block IS the file: keep its frontmatter, replace the rest
-            let fm_end = n
+            let fm_end = f.nodes[ni]
                 .block
                 .as_ref()
                 .and_then(|b| b.frontmatter_span)
@@ -341,14 +340,16 @@ impl EditBuffer {
             new_text.push_str(&out);
             vault.write_file_text(file, &new_text)?;
         } else {
-            // a span inside a file: keep the blank lines that separate it
-            // from what follows
-            let old = n.span.text(&f.text);
-            let content_end = old.trim_end_matches([' ', '\t', '\r', '\n']).len();
-            let rest = &old[content_end..];
-            let sep = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
-            let replacement = format!("{}{}", out, sep);
-            vault.write_span(file, n.span, &replacement)?;
+            // a region inside a file: the blank lines that separate it from
+            // what follows stay
+            let region = Span {
+                start: info.start,
+                end: info.end,
+            };
+            vault.write_span(file, region, &out)?;
+            if let Some(i) = self.owners.get_mut(&owner) {
+                i.end = info.start + out.len();
+            }
         }
         self.base_hashes
             .insert(path, hash(&vault.tree.files[file].text));
@@ -379,6 +380,18 @@ enum Line {
 
 fn hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+/// Where a node's own text ends: its span without the blank lines that
+/// separate it from what follows.
+fn owned_end(text: &str, span: Span) -> usize {
+    let old = &text[span.start.min(text.len())..span.end.min(text.len())];
+    let content_end = old.trim_end_matches([' ', '\t', '\r', '\n']).len();
+    let own = old[content_end..]
+        .find('\n')
+        .map(|i| content_end + i + 1)
+        .unwrap_or(old.len());
+    span.start + own
 }
 
 fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {

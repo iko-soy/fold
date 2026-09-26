@@ -382,3 +382,35 @@ fn duplicate_embed_survives_saving_the_parent() {
     );
     assert_noop_splice(&mut v, top);
 }
+
+#[test]
+fn line_opened_above_zoomed_title_is_not_duplicated() {
+    // Editing a plain (non-block) section: a line opened above its title
+    // (vim `O` on line 0, or Enter at column 0 of line 0) is saved, then a
+    // later edit is saved from the same buffer. The second splice must
+    // rewrite the region the first one wrote, not whatever node now starts
+    // at the section's original byte offset.
+    let (_d, mut v) = vault_with("# A\n\nbody\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    // what `O` / Enter at column 0 of line 0 does: split line 0
+    buf.set_line(0, "# Intro".into());
+    buf.insert_line(0, "# A".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# Intro\n# A\n\nbody\n");
+    let i = buf.lines.iter().position(|l| l.text == "body").unwrap();
+    buf.set_line(i, "body!".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# Intro\n# A\n\nbody!\n");
+    // a plain first line: no node starts where the section did any more
+    let (_d, mut v) = vault_with("# A\n\nbody\n\n# B\n\nb\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    buf.set_line(0, "intro".into());
+    buf.insert_line(0, "# A".into());
+    buf.save_all(&mut v).unwrap();
+    let i = buf.lines.iter().position(|l| l.text == "body").unwrap();
+    buf.set_line(i, "body!".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "intro\n# A\n\nbody!\n\n# B\n\nb\n");
+}
