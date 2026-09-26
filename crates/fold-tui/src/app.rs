@@ -375,6 +375,14 @@ impl App {
         self.set_zoom(self.zoom());
     }
 
+    /// A node's parent in the outline, `None` at the top: a block root's
+    /// tree parent is its own file's root, but its outline parent is the
+    /// node that embeds it (as the breadcrumbs show).
+    fn outline_parent(&self, r: NRef) -> Option<NRef> {
+        let chain = self.chain(r);
+        chain.len().checked_sub(2).map(|i| chain[i])
+    }
+
     /// `seen` holds the blocks already shown: an embed cycle or a second
     /// embed of a block (§6.2 diagnostics) shows it once, as walk and render
     /// do. Only a block can be reached twice, so only blocks are recorded.
@@ -662,15 +670,9 @@ impl App {
         let Some(r) = self.subject() else { return };
         self.push_undo("new node");
         let res = if child {
-            // the new child must be visible to put the cursor on it
-            if self.is_folded(r) {
-                self.toggle_fold(r);
-            }
             match ops::append_child_public(&mut self.vault, r, "") {
                 Ok(nr) => {
-                    self.move_cursor_to(nr);
-                    self.act_edit();
-                    self.type_new_title();
+                    self.edit_new_node(nr);
                     return;
                 }
                 Err(e) => Err(e),
@@ -682,26 +684,28 @@ impl App {
                 _ => "- ".to_string(),
             };
             let key = self.vault.key_of(r);
-            let depth = self.rows().get(self.cursor).map(|row| row.depth).unwrap_or(0);
             match ops::paste(&mut self.vault, r, &format!("{}\n", line), true) {
                 Ok(_) => {
-                    // move to the new sibling: the first row after the
-                    // cursor node's subtree, at its depth, with an empty title
-                    if let Some(nr) = self.vault.find_by_key(&key) {
-                        self.move_cursor_to(nr);
+                    // the new sibling: the node after the cursor node among
+                    // its siblings in the outline, with an empty title
+                    let r = self.vault.find_by_key(&key).unwrap_or(r);
+                    let parent = self.outline_parent(r).unwrap_or(self.vault.tree.root);
+                    let kids = self.vault.tree.resolved_children(parent);
+                    let new = kids
+                        .iter()
+                        .position(|&c| c == r)
+                        .and_then(|i| kids.get(i + 1).copied())
+                        .filter(|&c| self.vault.tree.node(c).title.is_empty());
+                    if let Some(nr) = new {
+                        // a sibling of the zoomed node is outside the zoom:
+                        // widen it to their parent
+                        if self.zoom() == Some(r) {
+                            self.set_zoom(self.outline_parent(r));
+                        }
+                        self.edit_new_node(nr);
+                        return;
                     }
-                    let rows = self.rows();
-                    if let Some(i) = rows.iter().enumerate().skip(self.cursor + 1).position(
-                        |(_, row)| {
-                            row.depth <= depth
-                                && self.vault.tree.node(row.nref).title.is_empty()
-                        },
-                    ) {
-                        self.cursor += 1 + i;
-                    }
-                    self.act_edit();
-                    self.type_new_title();
-                    return;
+                    Ok(())
                 }
                 Err(e) => Err(e),
             }
@@ -710,6 +714,16 @@ impl App {
             Ok(()) => self.refresh_after("node created"),
             Err(e) => self.say(format!("error: {}", e)),
         }
+    }
+
+    /// Open the editor on a node `n` / `N` just made, with the outline
+    /// cursor on it (§10.6): the new node, not whatever `subject()` is.
+    fn edit_new_node(&mut self, nr: NRef) {
+        let focus = self.focus;
+        self.reveal(nr);
+        self.focus = focus;
+        self.open_editor_on(nr);
+        self.type_new_title();
     }
 
     /// After `n` / `N` the editor types the new node's title (§10.6): the

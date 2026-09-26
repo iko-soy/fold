@@ -328,3 +328,37 @@ fn a_dismissed_reading_pane_menu_does_not_retarget_outline_verbs() {
     press(&mut app, "d");
     assert_eq!(root(&d), "# A\n\n## B\n");
 }
+
+#[test]
+fn new_sibling_of_the_zoomed_node_opens_the_new_node() {
+    let (d, mut app) = app_with("# A\n\n# B\n\n- b1\n");
+    press(&mut app, "j");
+    app.handle_key(key(KeyCode::Enter)); // zoom into B, the cursor on B (row 0)
+    assert_eq!(current_title(&app), "B");
+    press(&mut app, "n");
+    // the empty sibling is written after B's subtree...
+    assert_eq!(root(&d), "# A\n\n# B\n\n- b1\n\n#\n");
+    // ...and it, not B, is what the editor opens on (§10.3 `n`), with the
+    // zoom widened so that it is on screen
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(current_title(&app), "");
+    press(&mut app, "C");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# A\n\n# B\n\n- b1\n\n# C\n");
+    assert_eq!(current_title(&app), "C");
+    // a sibling of an embedded block lands after its embed
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(
+        d.path().join("racfer~zfs.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- ZFS\n",
+    )
+    .unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "j");
+    assert_eq!(current_title(&app), "ZFS");
+    press(&mut app, "nX");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "- Homelab\n  ![[racfer-hattes-mislup-nodrys]]\n  - X\n");
+    assert_eq!(current_title(&app), "X");
+}
