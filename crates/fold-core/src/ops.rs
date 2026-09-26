@@ -579,7 +579,7 @@ pub fn delete_subtree(vault: &mut Vault, r: NRef) -> std::io::Result<String> {
         let target = if n.is_embed() { vault.tree.resolved_child(r) } else { r };
         if target == r && n.is_embed() {
             // broken embed: just the line
-            let span = n.span;
+            let span = embed_line_span(&vault.tree, r);
             remove_span_with_separator(vault, r.0, span)?;
             return Ok("broken embed removed".into());
         }
@@ -631,13 +631,31 @@ fn trash_block(vault: &mut Vault, id: &Id) -> std::io::Result<()> {
             .map(|ni| (fi, ni))
     });
     if let Some(e) = embed {
-        let span = vault.tree.node(e).span;
+        let span = embed_line_span(&vault.tree, e);
         remove_span_with_separator(vault, e.0, span)?;
     }
     if let Some(b) = vault.tree.block_by_id(id) {
         vault.trash_file(b.0)?;
     }
     Ok(())
+}
+
+/// The part of an embed's span that is the embed itself: its line and the
+/// blank lines after it. Lines nested under an embed are a diagnostic
+/// (§4.7) that the reading pane shows in the parent, so they stay there
+/// when the embed goes: nothing else holds a copy of them (§11.5).
+fn embed_line_span(tree: &crate::tree::Tree, e: NRef) -> Span {
+    let n = tree.node(e);
+    let text = tree.text_of(e);
+    let end = n.span.end.min(text.len());
+    let mut at = text[n.title_span.end..end].find('\n').map_or(end, |i| n.title_span.end + i + 1);
+    for l in text[at..end].split_inclusive('\n') {
+        if !l.trim().is_empty() {
+            break;
+        }
+        at += l.len();
+    }
+    Span { start: n.span.start, end: at }
 }
 
 /// The byte range to cut when removing `span`: the node plus whatever blank

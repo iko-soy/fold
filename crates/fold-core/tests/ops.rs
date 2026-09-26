@@ -750,3 +750,40 @@ fn capture_to_a_four_space_nested_item_nests_under_it() {
     let body = v.tree.node(r).text_lines(&text).join("\n");
     assert!(body.contains("more"), "{:?}", text);
 }
+
+#[test]
+fn deleting_a_section_block_keeps_lines_nested_under_its_embed() {
+    // text appended under a heading embed by another editor parses as the
+    // embed's content; the reading pane shows it in the parent, so deleting
+    // the block must not take it along (§4.7, §11.5)
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n## ![[{}]]\n\nnote under the embed\n", ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n# S\n\nbody\n", ID_A))],
+    );
+    let s = at(&v, &["A", "S"]);
+    ops::delete_subtree(&mut v, s).unwrap();
+    assert!(!d.path().join("racfer~s.md").exists());
+    assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n");
+}
+
+#[test]
+fn clearing_a_done_section_block_keeps_lines_nested_under_its_embed() {
+    let (d, mut v) = vault_files(
+        &format!("# A\n\n## ![[{}]]\n\nnote under the embed\n\n## B\n", ID_A),
+        &[("racfer~s.md", &format!("---\nid: {}\n---\n\n# [x] S\n\nbody\n", ID_A))],
+    );
+    let a = at(&v, &["A"]);
+    assert_eq!(ops::clear_done(&mut v, a).unwrap(), 1);
+    assert!(!d.path().join("racfer~s.md").exists());
+    assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n\n## B\n");
+}
+
+#[test]
+fn deleting_a_broken_embed_keeps_lines_nested_under_it() {
+    let (d, mut v) = vault_with(&format!("# A\n\n## ![[{}]]\n\nnote under the embed\n", ID_A));
+    let a = at(&v, &["A"]);
+    let e = v.tree.resolved_children(a)[0];
+    assert!(v.tree.node(e).is_embed());
+    ops::delete_subtree(&mut v, e).unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\nnote under the embed\n");
+}
