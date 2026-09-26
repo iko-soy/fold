@@ -618,3 +618,16 @@ fn capture_before_a_setext_sibling_keeps_it() {
     assert_eq!(kids.len(), 1, "{}", text);
     assert_eq!(v.tree.node(kids[0]).title, "action", "{}", text);
 }
+
+#[test]
+fn archiving_keeps_hashtag_body_lines() {
+    // `#done` has no space after the hash: it is body text, not a heading
+    // (§4.2), so re-levelling the moved node must leave it as written
+    let (_d, mut v) = vault_with("# Old project\n\n#done wrap-up notes\n");
+    let r = at(&v, &["Old project"]);
+    ops::archive(&mut v, r).unwrap();
+    let t = &v.tree.files[0].text;
+    assert!(t.contains("## Old project\n"), "{}", t);
+    assert!(t.contains("\n#done wrap-up notes\n"), "{}", t);
+    assert!(!t.contains("##done"), "{}", t);
+}

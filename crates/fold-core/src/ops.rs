@@ -720,11 +720,9 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
         let t = first.trim_start();
         // render(_, 1) writes a section root at level 1 and an item root in
         // a section of level 1 (its nested sections at 2)
-        let ld = if t.starts_with('#') {
-            let cur_level = t.chars().take_while(|&c| c == '#').count();
-            parent_level as isize + 1 - cur_level as isize
-        } else {
-            parent_level as isize - 1
+        let ld = match atx_hashes(t) {
+            Some(cur_level) => parent_level as isize + 1 - cur_level as isize,
+            None => parent_level as isize - 1,
         };
         let cur_indent = first.len() - t.len();
         let id = indent as isize - cur_indent as isize;
@@ -758,8 +756,7 @@ fn shift_lines(raw: &str, level_delta: isize, indent_delta: isize) -> String {
         }
         let cur_indent = l.len() - trimmed.len();
         let new_indent = (cur_indent as isize + indent_delta).max(0) as usize;
-        if trimmed.starts_with('#') {
-            let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if let Some(hashes) = atx_hashes(trimmed) {
             let new_level = (hashes as isize + level_delta).max(1) as usize;
             out.push_str(&" ".repeat(new_indent));
             out.push_str(&"#".repeat(new_level));
@@ -772,6 +769,14 @@ fn shift_lines(raw: &str, level_delta: isize, indent_delta: isize) -> String {
         }
     }
     out
+}
+
+/// The level of an ATX heading line, given without its indent: `#`+ then a
+/// space or the end of the line (§4.2). `#tag` is text, as the parser reads it.
+fn atx_hashes(trimmed: &str) -> Option<usize> {
+    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+    let after = &trimmed[hashes..];
+    (hashes > 0 && (after.is_empty() || after.starts_with(' '))).then_some(hashes)
 }
 
 fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
