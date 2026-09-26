@@ -318,8 +318,9 @@ impl App {
     /// flow (§12).
     pub fn reload_external(&mut self) {
         // what popups show is held by key: the editor's save and the reload
-        // re-parse files, renumbering their nodes
-        let props_key = self.props_target.map(|t| self.vault.key_of(t));
+        // re-parse files, renumbering their nodes. A closed property form's
+        // node is stale after any verb since, and is let go
+        let props_key = self.props_target.filter(|_| self.mode == Mode::Props).map(|t| self.vault.key_of(t));
         let filter_key = self.filter_rows.get(self.filter_sel).filter(|_| self.mode == Mode::Filter).map(|&r| self.vault.key_of(r));
         let edit = self.editor_before_write("external change");
         let cursor_key = self.current().map(|r| self.vault.key_of(r));

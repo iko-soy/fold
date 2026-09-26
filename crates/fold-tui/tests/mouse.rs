@@ -687,3 +687,23 @@ fn an_open_filter_survives_an_external_rewrite_that_shrinks_the_file() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(title(&app), "three");
 }
+
+#[test]
+fn a_reload_after_the_property_form_closed_does_not_crash() {
+    // blocks B (file 1) and T (file 2); T's properties are looked at and
+    // closed, then deleting B trashes its file, renumbering T's
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n![[dozzod-binwes-talsun-worbec]]\n![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    std::fs::write(d.path().join("dozzod~b.md"), "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- B\n").unwrap();
+    std::fs::write(d.path().join("racfer~t.md"), "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- T\n").unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    typing(&mut app, "jja");
+    assert_eq!(app.mode_pub(), "props");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    typing(&mut app, "kd");
+    assert!(!d.path().join("dozzod~b.md").exists());
+    // then another program changes a file (§11.2)
+    std::fs::write(d.path().join("root.md"), "# A\n\n![[racfer-hattes-mislup-nodrys]]\n- new\n").unwrap();
+    app.reload_external();
+    assert!(draw(&mut app).contains("new"));
+}
