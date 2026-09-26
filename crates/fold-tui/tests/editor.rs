@@ -684,3 +684,17 @@ fn vim_brace_in_last_paragraph_takes_the_last_line() {
     keys(&mut app, "ejjd}:w⏎");
     assert_eq!(root(&d), "# A\n\n\nc\n");
 }
+
+#[test]
+fn vim_count_before_operator_applies_to_find() {
+    // `2df-` is `d2f-`: a count typed before the operator multiplies into f/t/F/T
+    let (d, mut app) = app_with("# A\n\na-b-c-d\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "ejj2df-:w⏎");
+    assert_eq!(root(&d), "# A\n\nc-d\n");
+    // and into `gg`, whose count is a line: `3dgg` from the last line deletes lines 3 to 5
+    let (d, mut app) = app_with("# A\n\na\nb\nc\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, "eG3dgg:w⏎");
+    assert_eq!(root(&d), "# A\n");
+}

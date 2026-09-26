@@ -341,17 +341,18 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             apply(e, op, from, Pos::new(l2, 0), Kind::Line);
             return out;
         }
+        // the count before the operator multiplies the motion's (`2d3w` is `d6w`)
+        let n = count.map(|c| c * e.vim.op_count.max(1)).or(Some(e.vim.op_count).filter(|c| *c > 0));
+        e.vim.op_count = 0;
         match c {
             'i' | 'a' | 'f' | 'F' | 't' | 'T' | 'g' => {
                 e.vim.prefix = Some(c);
-                e.vim.count = count.map(|c| c.to_string()).unwrap_or_default();
+                e.vim.count = n.map(|c| c.to_string()).unwrap_or_default();
                 return out;
             }
             _ => {}
         }
-        let n = count.map(|c| c * e.vim.op_count.max(1)).or(Some(e.vim.op_count).filter(|c| *c > 0));
         e.vim.op = None;
-        e.vim.op_count = 0;
         // cw on a word is ce; dw stops at the end of the line
         let cw = op == 'c' && (c == 'w' || c == 'W') && e.char_at(e.cursor).is_some_and(|ch| !ch.is_whitespace());
         let c = if cw {
