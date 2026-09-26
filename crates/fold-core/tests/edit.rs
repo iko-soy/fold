@@ -326,3 +326,59 @@ fn setext_heading_can_be_a_block_files_root() {
         .collect();
     assert!(!diags.iter().any(|m| m.contains("before the block")), "{diags:?}");
 }
+
+/// Two embeds of one block (§6.2: a diagnostic; the second renders as
+/// broken). Returns the vault dir, the vault and the block file's path.
+fn vault_with_duplicate_embed() -> (tempfile::TempDir, Vault, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "# Top\n\n## A\n\n![[racfer-hattes-mislup-nodrys]]\n\n## B\n\n![[racfer-hattes-mislup-nodrys]]\n",
+    )
+    .unwrap();
+    let bf = dir.path().join("racfer~task.md");
+    std::fs::write(&bf, "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- task\n").unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    (dir, v, bf)
+}
+
+#[test]
+fn duplicate_embed_does_not_duplicate_block_text() {
+    let (_d, mut v, bf) = vault_with_duplicate_embed();
+    let top = v.tree.resolved_children(v.tree.root)[0];
+    // the block is inlined at its first embed only; the second stays an
+    // embed line, as a broken one would
+    let r = fold_core::render::render(&v.tree, top, 1, true);
+    assert_eq!(r.matches("- task").count(), 1, "{r}");
+    assert_eq!(r.matches("![[racfer-hattes-mislup-nodrys]]").count(), 1, "{r}");
+    let mut buf = open_editor(&v, top);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "- task!".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&bf).unwrap(),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- task!\n"
+    );
+}
+
+#[test]
+fn duplicate_embed_survives_saving_the_parent() {
+    let (d, mut v, _bf) = vault_with_duplicate_embed();
+    let top = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, top);
+    let i = buf.lines.iter().position(|l| l.text == "# Top").unwrap();
+    buf.set_line(i, "# Top!".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("root.md")).unwrap(),
+        "# Top!\n\n## A\n\n![[racfer-hattes-mislup-nodrys]]\n\n## B\n\n![[racfer-hattes-mislup-nodrys]]\n"
+    );
+    // zoomed into B, the second embed is still the broken one
+    let top = v.tree.resolved_children(v.tree.root)[0];
+    let b = v.tree.resolved_children(top)[1];
+    assert_eq!(
+        fold_core::render::render(&v.tree, b, 1, true),
+        "# B\n\n![[racfer-hattes-mislup-nodrys]]\n"
+    );
+    assert_noop_splice(&mut v, top);
+}

@@ -2,6 +2,7 @@
 
 use crate::ident::Id;
 use crate::parse::{Kind, Node, ParsedFile, TaskState};
+use std::collections::HashMap;
 
 /// The logical tree formed by all parsed files stitched together.
 pub struct Tree {
@@ -136,6 +137,21 @@ impl Tree {
                 .position(|nd| nd.embed.as_ref() == Some(id))
                 .map(|ni| (fi, ni))
         })
+    }
+
+    /// `embed_of` for every id at once: each id's first embed, the one its
+    /// block is stitched in at. Any later embed of the id is a duplicate
+    /// and renders as broken (§6.2).
+    pub fn embeds(&self) -> HashMap<&Id, NRef> {
+        let mut out = HashMap::new();
+        for (fi, f) in self.files.iter().enumerate() {
+            for (ni, nd) in f.nodes.iter().enumerate() {
+                if let Some(id) = &nd.embed {
+                    out.entry(id).or_insert((fi, ni));
+                }
+            }
+        }
+        out
     }
 
     pub fn block_by_id(&self, id: &Id) -> Option<NRef> {
