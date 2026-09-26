@@ -851,3 +851,32 @@ fn a_cut_block_title_not_pasted_back_deletes_the_block() {
     keys(&mut app, "⎋");
     assert_eq!(root(&d), "# A\n\n- one\n  body\n  body\n- two\n");
 }
+
+#[test]
+fn a_line_cut_before_a_reload_and_pasted_after_it_is_saved() {
+    // another program changes the file while a nested block's title line is
+    // cut: the editor is re-rendered over the files as they are (§11.2), and
+    // the pasted line is text of the block it lands in, not a line of a
+    // block the new buffer does not have, written nowhere
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- task\n- two\n\n# B\n\nb\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    fold_core::ops::make_block(&mut v, t).unwrap();
+    drop(v);
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    keys(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    ctrl(&mut app, 'k');
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n\n# B\n\nb\n");
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- two\n\n# B\n\nb, from Helix\n").unwrap();
+    app.reload_external();
+    ctrl(&mut app, 'v');
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\n- one\n- task\n- two\n\n# B\n\nb, from Helix\n");
+}

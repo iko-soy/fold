@@ -576,7 +576,9 @@ impl Editor {
     /// Put the clipboard's whole lines above or below line `l`; returns the
     /// first new line. They take the tag of the line above (§5.2), except the
     /// lines of a nested block cut with its title line and no longer in the
-    /// buffer: those go back with their own tag, so the block moves.
+    /// buffer: those go back with their own tag, so the block moves. A tag
+    /// the buffer does not know (it was re-rendered since the cut, §11.2)
+    /// names no block to write the line to, and is not put back.
     pub fn put_clip_lines(&mut self, l: usize, below: bool) -> usize {
         let clip = self.clip.clone();
         let titles = self.titles();
@@ -589,7 +591,7 @@ impl Editor {
             self.buf.lines.iter().enumerate().filter(|(i, _)| *i < first || *i >= first + n).map(|(_, x)| x.owner).collect();
         let mut back: BTreeMap<Owner, Option<usize>> = BTreeMap::new();
         for (i, tag) in clip.tags.iter().enumerate() {
-            let Some(o) = tag.filter(|o| !present.contains(o)) else { continue };
+            let Some(o) = tag.filter(|o| !present.contains(o) && self.buf.owners.contains_key(o)) else { continue };
             let was = std::mem::replace(&mut self.buf.lines[first + i].owner, o);
             self.buf.mark_dirty(was);
             self.touch(o);
