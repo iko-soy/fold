@@ -464,6 +464,27 @@ impl Vault {
         Some(cur)
     }
 
+    /// Every node at a case-insensitive title path from the root (§3.4):
+    /// each step keeps every child whose title matches, so a path is
+    /// ambiguous only when it names two nodes, whatever titles repeat on
+    /// the way.
+    fn find_all_by_path(&self, segs: &[String]) -> Vec<NRef> {
+        let mut found = vec![self.tree.root];
+        for seg in segs {
+            let mut next = Vec::new();
+            for &p in &found {
+                for c in self.tree.resolved_children(p) {
+                    // a block embedded twice is still one node
+                    if title_eq(&self.tree.node(c).title, seg) && !next.contains(&c) {
+                        next.push(c);
+                    }
+                }
+            }
+            found = next;
+        }
+        found
+    }
+
     /// Resolve a command target: id (or unique leading run), then path, then
     /// unique title (§3.4).
     pub fn resolve_target(&self, text: &str) -> Result<NRef, String> {
@@ -494,10 +515,13 @@ impl Vault {
                 None => self.tree.root,
             };
             let _ = base;
-            if let Some(r) = self.find_by_path(&segs) {
-                return Ok(r);
-            }
-            return Err(format!("no node at path {:?}", text));
+            // a path that matches twice is an ambiguity, never a guess
+            let found = self.find_all_by_path(&segs);
+            return match found.len() {
+                1 => Ok(found[0]),
+                0 => Err(format!("no node at path {:?}", text)),
+                _ => Err(format!("path {:?} is ambiguous", text)),
+            };
         }
         // 3. unique title
         let mut found: Vec<NRef> = Vec::new();

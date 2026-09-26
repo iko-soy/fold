@@ -809,3 +809,24 @@ fn capture_with_an_item_spelled_inbox_does_not_leave_a_stray_day_heading() {
     assert_eq!(days.len(), 1, "{}", v.tree.files[0].text);
     assert_eq!(v.tree.resolved_children(days[0]).len(), 2, "{}", v.tree.files[0].text);
 }
+
+#[test]
+fn path_target_with_duplicate_titles_is_ambiguous_not_guessed() {
+    // §3.4: a title that matches twice is an ambiguity error, never a guess.
+    let (_d, v) = vault_with("# Homelab\n\n## Notes\n\n- a\n\n## Notes\n\n- b\n");
+    let r = v.resolve_target("Homelab/Notes");
+    assert!(r.is_err(), "guessed {:?}", r.map(|r| v.tree.node(r).title.clone()));
+    assert!(r.unwrap_err().contains("ambiguous"));
+    // one path through the duplicates is still unique
+    let r = v.resolve_target("Homelab/Notes/b").unwrap();
+    assert_eq!(v.tree.node(r).title, "b");
+}
+
+#[test]
+fn path_target_resolves_through_duplicate_ancestor_titles() {
+    // exactly one node matches the full path P/Y, though the first P has no Y
+    let (_d, v) = vault_with("# P\n\n## X\n\n# P\n\n## Y\n");
+    let r = v.resolve_target("P/Y");
+    assert!(r.is_ok(), "{:?}", r);
+    assert_eq!(v.tree.node(r.unwrap()).title, "Y");
+}
