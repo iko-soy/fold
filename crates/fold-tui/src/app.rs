@@ -917,16 +917,9 @@ impl App {
 
     /// Open the built-in editor over a node's subtree (§10.6).
     fn open_editor_on(&mut self, target: NRef) {
-        // an editor already open saves first; one whose save is refused
-        // stays, with its text and its clipboard. Once saved, a block cut
-        // and not pasted back is deleted, as on leaving it (§5.2)
-        if !self.save_editor("switch") {
-            return;
-        }
-        if let Some(ed) = self.editor.as_mut() {
-            ed.release_clip();
-        }
-        if !self.save_editor("switch") {
+        // an editor already open saves first, as on leaving it; one whose
+        // save is refused stays, with its text and its clipboard
+        if !self.save_editor_releasing("switch") {
             return;
         }
         if let Some(ed) = self.editor.take() {
@@ -955,6 +948,28 @@ impl App {
     /// A refused save (the file changed on disk) keeps the text in the
     /// editor and says why.
     fn save_editor(&mut self, why: &str) -> bool {
+        self.write_editor(why, false)
+    }
+
+    /// Save the editor to leave it, or before it is re-rendered (§10.6): a
+    /// block cut and not pasted back cannot be pasted as itself any more,
+    /// so once the save went through it is let go, and deleted (§5.2). It
+    /// is saved first still in transit, so a refused save leaves the editor
+    /// as it was, its clipboard too; and the save and the deletion are one
+    /// op-log entry (§10.10), so one undo puts back the block's file and
+    /// its embed together.
+    fn save_editor_releasing(&mut self, why: &str) -> bool {
+        self.write_editor(why, true)
+    }
+
+    /// `save_editor`; with `release`, `save_editor_releasing`.
+    fn write_editor(&mut self, why: &str, release: bool) -> bool {
+        if release && !self.editor_dirty() {
+            // nothing to save first, so nothing a refusal keeps in transit
+            if let Some(ed) = self.editor.as_mut() {
+                ed.release_clip();
+            }
+        }
         if !self.editor_dirty() {
             return true;
         }
@@ -966,7 +981,12 @@ impl App {
         // before the snapshot, so undoing this save leaves it be
         ed.buf.rebase_dirty(&mut self.vault);
         let snap = ops::Snapshot::take(&self.vault, "edit");
-        let res = ed.buf.save_all(&mut self.vault);
+        let mut res = ed.buf.save_all(&mut self.vault);
+        if let Some(n) = res.as_ref().ok().copied().filter(|_| release) {
+            ed.release_clip();
+            // the block that held the embed is written again: counted once
+            res = ed.buf.save_all(&mut self.vault).map(|m| m.max(n));
+        }
         self.editor = Some(ed);
         self.settle_zoom_after_save(on_editor);
         // blocks written before a refusal are an op too
@@ -1015,16 +1035,8 @@ impl App {
     /// save is refused the editor stays open with its text: nothing typed
     /// is dropped except by *Revert*.
     fn close_editor(&mut self) -> bool {
-        // saved with a block cut and not pasted back still in transit, so a
-        // refused save leaves the editor as it was, its clipboard too; once
-        // saved, that block is deleted (§5.2)
-        let saved = self.save_editor("exit") && {
-            if let Some(ed) = self.editor.as_mut() {
-                ed.release_clip();
-            }
-            self.save_editor("exit")
-        };
-        if !saved {
+        // a block cut and not pasted back is deleted once saved (§5.2)
+        if !self.save_editor_releasing("exit") {
             self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
             return false;
         }
@@ -1073,12 +1085,7 @@ impl App {
         // saved, it is deleted (§5.2). A refused save keeps it in transit,
         // as the editor keeps its text (it is not re-rendered)
         self.editor.as_ref()?;
-        if self.save_editor(why) {
-            if let Some(ed) = self.editor.as_mut() {
-                ed.release_clip();
-            }
-            self.save_editor(why);
-        }
+        self.save_editor_releasing(why);
         let key = self.editor_key()?;
         Some((key, ops::Snapshot::take(&self.vault, why)))
     }

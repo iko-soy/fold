@@ -580,3 +580,37 @@ fn indenting_or_outdenting_a_node_keeps_the_cursor_on_it() {
     press(&mut app, "j");
     assert_eq!(current_title(&app), "mine");
 }
+
+#[test]
+fn one_undo_after_leaving_with_a_cut_block_title_leaves_no_block_file_embedded_nowhere() {
+    // Ctrl-K on the block's title line, then Esc: leaving deletes the block
+    // (§5.2), A written without its embed and the file trashed. Leaving is
+    // one save, one op-log entry (§10.10): one `u` puts the block back
+    // embedded, or leaves it trashed, never a file that nothing embeds
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- task\n  body\n- two\n").unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let embed = format!("![[{}]]", id.as_str());
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", embed));
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(fold_tui::app::EditKeys::Normal);
+    press(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n");
+    assert!(!block.exists());
+    press(&mut app, "u");
+    let r = root(&d);
+    assert!(!block.exists() || r.contains(&embed), "one undo left {} embedded nowhere; root.md is {:?}", block.display(), r);
+    // the whole of leaving is undone: the block is back where it was
+    assert_eq!(r, format!("# A\n\n- one\n{}\n- two\n", embed));
+    assert!(block.exists());
+}
