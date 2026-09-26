@@ -1260,3 +1260,23 @@ fn moving_a_block_under_another_blocks_title_moves_its_embed_into_that_block() {
     assert!(std::fs::read_to_string(&b_file).unwrap().ends_with(&format!("\n- b\n  {}\n", c)));
     assert!(std::fs::read_to_string(&e_file).unwrap().ends_with("\n- e\n"));
 }
+
+#[test]
+fn ctrl_x_of_a_selected_block_title_line_then_ctrl_v_moves_the_block() {
+    // normal keymap: Shift-Down selects the whole "- task" line; Ctrl-X then
+    // Ctrl-V below "  body" moves the line, as Ctrl-K then Ctrl-V does
+    // (§5.2: cut and paste moves its embed)
+    let (d, mut app, embed, block) = editing_task_block_with_body();
+    for k in [
+        KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+    ] {
+        app.handle_key(k);
+    }
+    keys(&mut app, "⎋");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n- one\n  body\n{}\n- two\n", embed));
+    assert!(std::fs::read_to_string(&block).unwrap().ends_with("\n- task\n"));
+}

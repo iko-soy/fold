@@ -179,9 +179,17 @@ fn selection_or_line(e: &Editor) -> (String, bool) {
     }
 }
 
+/// Ctrl-X / Ctrl-K: the selection, or the current line. Whole lines are
+/// cut with their tags, so a nested block's title line pasted back moves
+/// the block (§5.2).
 fn cut(e: &mut Editor) {
     e.checkpoint();
     match e.selection() {
+        Some((s, en)) if s.col == 0 && en.col == 0 && en.line > s.line => {
+            e.anchor = None;
+            e.cut_lines(s.line, en.line - 1);
+            e.set_cursor(s);
+        }
         Some((s, en)) => {
             let t = e.delete(s, en);
             e.copy(t, false);
