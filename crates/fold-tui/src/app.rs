@@ -161,8 +161,9 @@ struct Prompt {
     picks: Vec<NRef>,
     sel: usize,
     /// The node *Move to…* moves, fixed when the prompt opens: a menu's
-    /// target is dropped once its item has run, long before the pick.
-    moving: Option<NRef>,
+    /// target is dropped once its item has run, long before the pick. A
+    /// key, so a reload while the prompt is open cannot leave it stale.
+    moving: Option<NodeKey>,
 }
 
 #[derive(Clone)]
@@ -1158,8 +1159,9 @@ impl App {
         match p.action {
             PromptAction::Refile => match picked.map(Ok).unwrap_or_else(|| self.vault.resolve_target(&p.text)) {
                 Ok(dest) => {
-                    if let Some(r) = p.moving {
-                        self.refile_to(r, dest);
+                    match p.moving.as_ref().and_then(|k| self.find_exact(k)) {
+                        Some(r) => self.refile_to(r, dest),
+                        None => self.say("that node is gone"),
                     }
                 }
                 Err(e) => self.say(e),
@@ -1223,15 +1225,25 @@ impl App {
 
     /// Accept a prompt as an outline verb: the editor saves first and is
     /// re-rendered after (§10.6).
-    fn accept_prompt_saving_editor(&mut self, p: Prompt) {
+    fn accept_prompt_saving_editor(&mut self, mut p: Prompt) {
+        // the save re-parses what it wrote: the pick is found again by key
+        let picked = p.picks.get(p.sel).map(|&r| self.vault.key_of(r));
         let edit = self.editor_before_write("outline verb");
-        self.accept_prompt(p);
+        match picked.map(|k| self.find_exact(&k)) {
+            Some(None) => self.say("that node is gone"),
+            Some(Some(r)) => {
+                p.picks = vec![r];
+                p.sel = 0;
+                self.accept_prompt(p);
+            }
+            None => self.accept_prompt(p),
+        }
         self.editor_after_write(edit);
     }
 
     fn open_prompt(&mut self, label: &str, action: PromptAction, text: String) {
         let moving = match action {
-            PromptAction::Refile => self.subject(),
+            PromptAction::Refile => self.subject().map(|r| self.vault.key_of(r)),
             _ => None,
         };
         self.prompt = Some(Prompt {
@@ -1254,7 +1266,7 @@ impl App {
         }
         let q = p.text.to_lowercase();
         // a node cannot move into its own subtree
-        let moving = p.moving.map(|r| self.vault.tree.resolved_child(r));
+        let moving = p.moving.as_ref().and_then(|k| self.find_exact(k)).map(|r| self.vault.tree.resolved_child(r));
         let mut nodes: Vec<NRef> = Vec::new();
         self.vault.tree.walk(self.vault.tree.root, &mut |t, r| {
             if t.node(r).kind != Kind::Root && !t.node(r).is_embed() {
