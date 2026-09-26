@@ -498,11 +498,11 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
             }
         }
         'r' => {
+            // each character where it is: line ends stay, and so does every
+            // line's tag (§5.2)
             let (s, en) = range(e);
             e.checkpoint();
-            let t: String = e.text(s, en).chars().map(|ch| if ch == '\n' { ch } else { c }).collect();
-            e.delete(s, en);
-            e.insert(s, &t);
+            e.map_chars(s, en, |_| c);
         }
         'm' => {
             // mi( / ma" …: select inside / around a pair

@@ -942,3 +942,19 @@ fn deleting_a_block_title_line_in_vim_or_helix_and_putting_it_back_moves_the_blo
         assert_eq!(std::fs::read_to_string(&block).unwrap(), before.replace("  body\n", "  body\n- task\n"));
     }
 }
+
+#[test]
+fn replacing_characters_from_mid_line_into_a_block_title_keeps_line_owners() {
+    // helix `r` and vim visual `r` over "one" and the "-" of the block's
+    // title line below: each character is replaced where it is, and the
+    // title line stays the block's (§5.2)
+    for (keymap, seq) in [(fold_tui::app::EditKeys::Helix, "ejjllvjhhr-:w⏎"), (fold_tui::app::EditKeys::Vim, "ejjllvjhhr-:w⏎")] {
+        let (d, block) = vault_with_bullet_block();
+        let before = std::fs::read_to_string(&block).unwrap();
+        let mut app = App::new(d.path()).unwrap();
+        app.set_edit_keys(keymap);
+        keys(&mut app, seq);
+        assert!(root(&d).starts_with("# A\n\n- ---\n![["), "{:?}: {}", keymap, root(&d));
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), before, "{:?}", keymap);
+    }
+}

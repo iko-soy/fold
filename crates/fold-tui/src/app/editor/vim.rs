@@ -576,10 +576,9 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
         'r' => {
             if matches!(e.mode, Mode::Visual { .. }) {
                 if let Some((s, en)) = e.selection() {
+                    // each character where it is: line ends and tags stay (§5.2)
                     e.checkpoint();
-                    let t: String = e.text(s, en).chars().map(|ch| if ch == '\n' { ch } else { c }).collect();
-                    e.delete(s, en);
-                    e.insert(s, &t);
+                    e.map_chars(s, en, |_| c);
                     e.cursor = s;
                     e.anchor = None;
                     e.mode = Mode::Normal;
