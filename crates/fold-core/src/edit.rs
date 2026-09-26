@@ -650,8 +650,11 @@ fn hash(text: &str) -> String {
 /// its file than `known`, when the block's own text there is as it was:
 /// `None` if the change touched it, or if the frontmatter names another
 /// block now. A block (or root.md's Root) is its file after the
-/// frontmatter (§4.9); another render root is `region` of `known`, found
-/// where its bytes occur in `now`, at a line start and only once.
+/// frontmatter (§4.9); another render root is `region` of `known`, whole
+/// lines, followed through a line diff of `known` against `now`: its lines
+/// must all be lines the diff keeps, in one unchanged run. Never where its
+/// bytes merely occur in `now`: an identical node elsewhere is another
+/// node.
 fn span_now(known: &str, now: &str, region: Option<Span>) -> Option<Span> {
     let (k, n) = (parse_frontmatter(known), parse_frontmatter(now));
     let id = |f: &Option<Frontmatter>| f.as_ref().and_then(|f| f.props.get("id").cloned());
@@ -663,13 +666,27 @@ fn span_now(known: &str, now: &str, region: Option<Span>) -> Option<Span> {
         let (kb, nb) = (body(&k), body(&n));
         return (known[kb..] == now[nb..]).then_some(Span { start: nb, end: now.len() });
     };
-    let own = &known[region.start.min(known.len())..region.end.min(known.len())];
-    let mut found = now
-        .match_indices(own)
-        .map(|(i, _)| i)
-        .filter(|&i| i == 0 || now.as_bytes()[i - 1] == b'\n');
-    let at = found.next()?;
-    found.next().is_none().then_some(Span { start: at, end: at + own.len() })
+    let diff = similar::TextDiff::from_lines(known, now);
+    // the byte offset where each line starts, and the text's end
+    let starts = |lines: &[&str]| {
+        let mut at = vec![0];
+        for l in lines {
+            at.push(at[at.len() - 1] + l.len());
+        }
+        at
+    };
+    let (old, new) = (starts(diff.old_slices()), starts(diff.new_slices()));
+    let line = |b: usize| old.binary_search(&b.min(known.len())).ok();
+    let (first, end) = (line(region.start)?, line(region.end)?);
+    diff.ops().iter().find_map(|op| match *op {
+        similar::DiffOp::Equal { old_index, new_index, len } if old_index <= first && end <= old_index + len => {
+            Some(Span {
+                start: new[new_index + first - old_index],
+                end: new[new_index + end - old_index],
+            })
+        }
+        _ => None,
+    })
 }
 
 /// A block file with text or an embed before its root node, or with no

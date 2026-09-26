@@ -775,3 +775,39 @@ fn a_held_block_still_in_the_buffer_is_not_in_transit() {
     assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n  ![[{}]]\n- two\n", c.as_str()));
     assert!(!d.path().join(&b_path).exists());
 }
+
+#[test]
+fn review_external_edit_of_the_zoomed_node_never_lands_on_an_identical_one() {
+    // §5.2 step 5: the zoomed item's own text changed on disk (another
+    // device edited it) while it was edited here. Its old bytes still occur
+    // once in the file — as an identical item under another section — but
+    // that is another node: the save must be refused, not written over it.
+    let (d, mut v) = vault_with("# X\n\n- call mom\n\n# Y\n\n- call mom\n");
+    let x_item = v.find_by_path(&["X".into(), "call mom".into()]).unwrap();
+    let mut buf = open_editor(&v, x_item);
+    assert_eq!(buf.lines[0].text, "- call mom");
+    let theirs = "# X\n\n- call mom (phone)\n\n# Y\n\n- call mom\n";
+    std::fs::write(d.path().join("root.md"), theirs).unwrap();
+    buf.set_line(0, "- call mom tomorrow".into());
+    let res = buf.save_all(&mut v);
+    let disk = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    assert!(
+        res.is_err() && disk == theirs,
+        "save {:?}; Y's item overwritten:\n{}",
+        res.map_err(|e| e.to_string()),
+        disk
+    );
+    // changes elsewhere, one of them an identical item added above, still
+    // let the save through, onto the zoomed node
+    let (d, mut v) = vault_with("# X\n\n- call mom\n\n# Y\n\n- call mom\n");
+    let x_item = v.find_by_path(&["X".into(), "call mom".into()]).unwrap();
+    let mut buf = open_editor(&v, x_item);
+    let theirs = "# W\n\n- call mom\n\n# X\n\n- call mom\n\n# Y\n\n- call mom, from phone\n";
+    std::fs::write(d.path().join("root.md"), theirs).unwrap();
+    buf.set_line(0, "- call mom tomorrow".into());
+    assert_eq!(buf.save_all(&mut v).unwrap(), 1);
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("root.md")).unwrap(),
+        "# W\n\n- call mom\n\n# X\n\n- call mom tomorrow\n\n# Y\n\n- call mom, from phone\n"
+    );
+}
