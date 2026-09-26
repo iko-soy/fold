@@ -910,3 +910,88 @@ fn discarding_the_buffer_deletes_a_block_a_save_left_embedded_nowhere() {
     assert_eq!(v.tree.files.len(), 1);
     assert_eq!(std::fs::read_to_string(d.path().join("root.md")).unwrap(), "# A\n\n- one\n- two\n");
 }
+
+#[test]
+fn review_indenting_a_nested_block_title_line_does_not_delete_the_block() {
+    // §5.2: only deleting a nested block's title line deletes the block.
+    // Indenting "- task" under "- one" (Tab, vim `>>`) keeps the title line:
+    // the block must survive, embedded where its title line now sits
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block = d.path().join(&v.tree.files[1].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "  - task".into());
+    buf.save_all(&mut v).unwrap();
+    let root = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    assert!(
+        block.exists() && root.contains(&format!("![[{}]]", id.as_str())),
+        "block file exists: {}; root.md:\n{}",
+        block.exists(),
+        root
+    );
+}
+
+#[test]
+fn a_re_indented_or_re_spelled_block_title_line_moves_the_block() {
+    // §5.2: the embed goes where the title line sits, in its form (a
+    // heading embed for a heading); the block's file keeps its root at
+    // column 0, a heading at level 1 (§4.9)
+    let (_d, mut v) = vault_with("# A\n\n- one\n- task\n  body\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let fm = format!("---\nid: {}\n---\n\n", id.as_str());
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "  - task".into());
+    buf.set_line(i + 1, "    body".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n  ![[{}]]\n", id.as_str()));
+    assert_eq!(v.tree.files[1].text, format!("{}- task\n  body\n", fm));
+    // renamed after: still the block's title line
+    buf.set_line(i, "  - task, renamed".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[1].text, format!("{}- task, renamed\n  body\n", fm));
+    // re-spelled as a heading: a heading embed, a level-1 root
+    buf.set_line(i, "## task".into());
+    buf.set_line(i + 1, "body".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n## ![[{}]]\n", id.as_str()));
+    assert_eq!(v.tree.files[1].text, format!("{}# task\nbody\n", fm));
+    // and back
+    buf.set_line(i, "- task".into());
+    buf.set_line(i + 1, "  body".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n![[{}]]\n", id.as_str()));
+    assert_eq!(v.tree.files[1].text, format!("{}- task\n  body\n", fm));
+    assert!(buf.dirty.is_empty(), "{:?}", buf.dirty);
+
+    // a block nested in an item, dedented out of it
+    let (_d, mut v) = vault_with("# A\n\n- one\n  - c\n");
+    let c = v.find_by_path(&["A".into(), "one".into(), "c".into()]).unwrap();
+    let id = ops::make_block(&mut v, c).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "  - c").unwrap();
+    buf.set_line(i, "- c".into());
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n![[{}]]\n", id.as_str()));
+    assert!(v.tree.files[1].text.ends_with("---\n\n- c\n"), "{}", v.tree.files[1].text);
+
+    // deleting the title line still deletes the block when it leaves a
+    // child of the block first, whatever its indent (§5.2)
+    let (d, mut v) = vault_with("# A\n\n- b\n  - x\n");
+    let b = v.find_by_path(&["A".into(), "b".into()]).unwrap();
+    ops::make_block(&mut v, b).unwrap();
+    let b_path = d.path().join(&v.tree.files[1].path);
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- b").unwrap();
+    buf.delete_line(i);
+    buf.save_all(&mut v).unwrap();
+    assert_eq!(v.tree.files[0].text, "# A\n\n  - x\n");
+    assert!(!b_path.exists());
+}

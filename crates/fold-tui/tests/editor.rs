@@ -1110,3 +1110,28 @@ fn review_reverting_after_a_saved_cut_leaves_no_block_file_embedded_nowhere() {
     let r = root(&d);
     assert!(!block.exists() || r.contains(&embed), "{} exists, root.md is {:?}", block.display(), r);
 }
+
+#[test]
+fn indenting_a_block_title_line_nests_the_block_where_the_line_sits() {
+    // §5.2: Tab at the start of a nested block's title line, or Vim `>>`,
+    // nests the block under "- one" — its embed goes where the line sits,
+    // the block and its file stay — and Shift-Tab takes it back out
+    let task_file = |d: &tempfile::TempDir| {
+        std::fs::read_dir(d.path()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().ends_with("~task.md"))
+    };
+    let (d, mut app, embed) = editing_task_block();
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    ctrl(&mut app, 's');
+    assert_eq!(root(&d), format!("# A\n\n- one\n  {}\n- two\n", embed));
+    assert!(task_file(&d));
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    keys(&mut app, "⎋");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- two\n", embed));
+    assert!(task_file(&d));
+    let (d, mut app, embed) = editing_task_block();
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    keys(&mut app, ">>:w⏎");
+    assert_eq!(root(&d), format!("# A\n\n- one\n  {}\n- two\n", embed));
+    assert!(task_file(&d));
+}

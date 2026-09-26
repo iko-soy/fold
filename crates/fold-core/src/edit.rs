@@ -8,7 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, ParsedFile, Span};
+use crate::parse::{parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, Node, ParsedFile, Span};
 use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -49,6 +49,10 @@ pub struct EditBuffer {
     /// Nested blocks whose title line is in the editor's clipboard, cut
     /// and not put back: in transit, not deleted (`hold`).
     held: Vec<Owner>,
+    /// Where each nested block's title line sat when its embed was last
+    /// written (`title_form`), for those written since the buffer was
+    /// built: one re-indented or re-spelled since moves the embed (§5.2).
+    placed: BTreeMap<Owner, (usize, Option<usize>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +61,9 @@ pub struct OwnerInfo {
     pub id: Option<Id>,
     /// The block-root node in the tree at buffer-build time.
     pub nref: NRef,
-    /// Display level/indent of the block's top node in the buffer.
+    /// Display level/indent of the block's top node in the buffer, as
+    /// built: a nested block's title line may be re-indented or re-spelled
+    /// since, and splice shifts from where it sits then.
     pub level: usize,
     pub indent: usize,
     /// Whether that node is a section (its title line a heading), not an
@@ -168,6 +174,7 @@ impl EditBuffer {
             base_hashes,
             dropped: Vec::new(),
             held: Vec::new(),
+            placed: BTreeMap::new(),
         }
     }
 
@@ -254,34 +261,57 @@ impl EditBuffer {
 
     /// The line where nested block `o`'s text starts (§5.2): its first line
     /// if that is a title line of its kind at its display indent — a heading
-    /// for a section, a bullet for an item — else the first such line below
-    /// it, a heading no deeper than the block's level (deeper ones are its
-    /// children). None: its title line was deleted.
-    fn title_line(&self, o: Owner) -> Option<usize> {
+    /// for a section, a bullet for an item — or, re-indented or re-spelled,
+    /// a title line of either kind at any indent that is not one of the
+    /// block's children (`left_first`); else the first title line of its
+    /// kind at its display indent below it, a heading no deeper than the
+    /// block's level (deeper ones are its children). None: its title line
+    /// was deleted.
+    fn title_line(&self, vault: &Vault, o: Owner) -> Option<usize> {
         let info = self.owners.get(&o)?;
         let mut fence = None;
         let mut first = true;
         for (i, l) in self.lines.iter().enumerate().filter(|(_, l)| l.owner == o) {
             let in_code = fence_transition(&l.text, &mut fence) || fence.is_some();
-            let trimmed = l.text.trim_start_matches(' ');
-            if !in_code && l.text.len() - trimmed.len() == info.indent {
-                let title = if info.section {
-                    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-                    let after = &trimmed[hashes..];
-                    hashes > 0
-                        && (after.is_empty() || after.starts_with(' '))
-                        && (first || hashes <= info.level.max(1))
-                } else {
-                    ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m))
-                        || ["-", "*", "+"].contains(&trimmed)
-                };
-                if title {
+            if let Some((indent, heading)) = title_form(&l.text).filter(|_| !in_code) {
+                let own = indent == info.indent && heading.is_some() == info.section;
+                if first && (own || !self.left_first(vault, o, &l.text)) {
+                    return Some(i);
+                }
+                if own && heading.is_none_or(|h| h <= info.level.max(1)) {
                     return Some(i);
                 }
             }
             first = false;
         }
         None
+    }
+
+    /// Whether `line`, first of block `o`'s lines, is the title line of one
+    /// of its children, not its own: a node below its title in its file as
+    /// last read or written, not named as the block is. So deleting a
+    /// block's title line, which may leave a child's first, deletes it
+    /// (§5.2), while its title line re-indented stays its title.
+    fn left_first(&self, vault: &Vault, o: Owner, line: &str) -> bool {
+        let Some((file, Some(root))) = self.owners.get(&o).and_then(|i| self.locate(vault, i)) else {
+            return false;
+        };
+        let f = &vault.tree.files[file];
+        let title = |n: &Node| after_marker(&f.text[n.title_span.start..n.title_span.end.min(f.text.len())]);
+        let t = after_marker(line);
+        t != title(&f.nodes[root])
+            && f.nodes.iter().enumerate().any(|(i, n)| {
+                i != root && n.kind != Kind::Root && !n.is_embed() && title(n) == t
+            })
+    }
+
+    /// Where nested block `o`'s embed was last written: its title line's
+    /// indent and heading level (`title_form`), as built or since saved.
+    fn placed(&self, o: Owner) -> Option<(usize, Option<usize>)> {
+        self.placed.get(&o).copied().or_else(|| {
+            let i = self.owners.get(&o)?;
+            Some((i.indent, i.section.then_some(i.level)))
+        })
     }
 
     /// §5.2's edge cases, applied from the tags before a splice. A nested
@@ -291,7 +321,9 @@ impl EditBuffer {
     /// the enclosing block, the blocks nested in it are nested in that
     /// block, and its file goes to trash once that block is written without
     /// its embed — unless it is in transit, its title line cut (`hold`).
-    fn settle(&mut self) {
+    /// Re-indenting or re-spelling the title line moves the block: the
+    /// enclosing block is dirty, its embed written where the line now sits.
+    fn settle(&mut self, vault: &Vault) {
         // lines of a deleted block put back (by the editor's own undo) are
         // the enclosing block's text like the rest of them
         let dropped = self.dropped.clone();
@@ -324,7 +356,12 @@ impl EditBuffer {
                 let Some(parent) = self.owners.get(&o).and_then(|i| i.parent) else {
                     continue;
                 };
-                let title = self.title_line(o);
+                let title = self.title_line(vault, o);
+                let form = title.and_then(|t| title_form(&self.lines[t].text));
+                if form.is_some() && form != self.placed(o) && !self.dirty.contains(&parent) {
+                    self.mark_dirty(parent);
+                    changed = true;
+                }
                 // a title line emptied to be typed again (vim `cc`) is not
                 // a deleted one; splice refuses to write the block meanwhile
                 let first = self.lines.iter().find(|l| l.owner == o);
@@ -403,7 +440,7 @@ impl EditBuffer {
     /// deleted it, the block its lines went to — then trash the files of
     /// deleted blocks no longer embedded.
     pub fn splice(&mut self, vault: &mut Vault, owner: Owner) -> std::io::Result<()> {
-        self.settle();
+        self.settle(vault);
         let owner = self.surviving(owner);
         self.write(vault, owner)?;
         self.trash_dropped(vault)
@@ -425,6 +462,7 @@ impl EditBuffer {
         // (§5.2.1).
         let mut text_lines: Vec<Line> = Vec::new();
         let mut emitted: Vec<Owner> = Vec::new();
+        let mut forms = Vec::new();
         for l in &self.lines {
             if l.owner == owner {
                 text_lines.push(Line::Text(l.text.clone()));
@@ -436,18 +474,26 @@ impl EditBuffer {
                         // a heading embed for a heading (§4.7)
                         let trimmed = l.text.trim_start_matches(' ');
                         let indent = l.text.len() - trimmed.len();
-                        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-                        let is_heading = hashes > 0 && trimmed[hashes..].starts_with(' ');
+                        let form = title_form(&l.text);
+                        let hashes = form.and_then(|f| f.1);
+                        let respelled = form.is_some_and(|f| {
+                            Some(f.1.is_some()) != self.placed(nested).map(|p| p.1.is_some())
+                        });
                         // an existing embed keeps its form, so an unchanged
-                        // splice writes it back byte for byte
+                        // splice writes it back byte for byte; a title line
+                        // re-spelled since it was written changes it
                         let heading = match vault.tree.embed_of(&id) {
+                            _ if respelled => hashes,
                             Some(e) if vault.tree.node(e).kind == Kind::Section => {
-                                Some(if is_heading { hashes } else { info.level + 1 })
+                                Some(hashes.unwrap_or(info.level + 1))
                             }
                             Some(_) => None,
-                            None => is_heading.then_some(hashes),
+                            None => hashes,
                         };
                         text_lines.push(Line::Embed(indent, heading, id));
+                        if let Some(f) = form {
+                            forms.push((nested, f));
+                        }
                     }
                 }
             }
@@ -459,9 +505,19 @@ impl EditBuffer {
             return Ok(false);
         }
         // Shift back from the display position to the block's position in
-        // its file (§5.2.3).
-        let level_delta = info.target_level as isize - info.level as isize;
-        let indent_delta = info.target_indent as isize - info.indent as isize;
+        // its file (§5.2.3). A nested block's display position is where its
+        // title line sits now, re-indented or re-spelled or not: its root
+        // goes to column 0, a heading to its file's level (§4.9)
+        let title = info.parent.and_then(|_| self.title_line(vault, owner));
+        let (level, indent, target_level) = match title.and_then(|t| title_form(&self.lines[t].text)) {
+            Some((indent, Some(h))) => (h, indent, if info.section { info.target_level } else { 1 }),
+            // an item shows at its section's level, one above a section's
+            Some((indent, None)) if info.section => (info.level.saturating_sub(1).max(1), indent, 1),
+            Some((indent, None)) => (info.level, indent, info.target_level),
+            None => (info.level, info.indent, info.target_level),
+        };
+        let level_delta = target_level as isize - level as isize;
+        let indent_delta = info.target_indent as isize - indent as isize;
         let shift = |cols: usize| (cols as isize + indent_delta).max(0) as usize;
         let mut out = String::new();
         let mut fence: Option<(char, usize)> = None;
@@ -560,6 +616,7 @@ impl EditBuffer {
         self.base_hashes
             .insert(path, hash(&vault.tree.files[file].text));
         self.dirty.retain(|o| *o != owner);
+        self.placed.extend(forms);
         Ok(true)
     }
 
@@ -613,7 +670,7 @@ impl EditBuffer {
     /// undoing the save then does not revert it. A block whose own span
     /// changed is left for its save to refuse.
     pub fn rebase_dirty(&mut self, vault: &mut Vault) {
-        self.settle();
+        self.settle(vault);
         for owner in self.dirty.clone() {
             let _ = self.rebase(vault, owner);
         }
@@ -648,7 +705,7 @@ impl EditBuffer {
     /// (§5.2): one that is refused stays dirty, the others are still
     /// written, and the error names every refusal.
     pub fn save_all(&mut self, vault: &mut Vault) -> std::io::Result<usize> {
-        self.settle();
+        self.settle(vault);
         let dirty = self.dirty.clone();
         let mut n = 0;
         let mut errs = Vec::new();
@@ -678,6 +735,32 @@ impl EditBuffer {
 enum Line {
     Text(String),
     Embed(usize, Option<usize>, Id),
+}
+
+/// A title line's form (§4.3): its indent, and its level if it is a
+/// heading rather than a bullet. None: not a title line.
+fn title_form(line: &str) -> Option<(usize, Option<usize>)> {
+    let trimmed = line.trim_start_matches(' ');
+    let indent = line.len() - trimmed.len();
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    let after = &trimmed[hashes..];
+    if hashes > 0 && (after.is_empty() || after.starts_with(' ')) {
+        return Some((indent, Some(hashes)));
+    }
+    let bullet = ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m))
+        || ["-", "*", "+"].contains(&trimmed);
+    bullet.then_some((indent, None))
+}
+
+/// A title line's text after its indent and its heading or bullet marker,
+/// whichever form and level it is written in.
+fn after_marker(line: &str) -> &str {
+    let t = line.trim_start_matches([' ', '\t']);
+    let t = match t.strip_prefix(['-', '*', '+']) {
+        Some(rest) => rest,
+        None => t.trim_start_matches('#'),
+    };
+    t.trim()
 }
 
 fn not_found(info: &OwnerInfo) -> std::io::Error {
