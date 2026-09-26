@@ -484,7 +484,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         // Setext underline?
         if let Some(level) = setext_level(&raw) {
             if let Some((title_li, title_indent)) = pending_setext.take() {
-                make_setext_section(
+                let idx = make_setext_section(
                     &mut nodes,
                     &mut stack,
                     &lines,
@@ -492,7 +492,20 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     title_indent,
                     i,
                     level,
+                    block_root,
                 );
+                // like any title line, a setext heading can be a block
+                // file's root (§4.9); its title line was then reported as
+                // text before the root, which it is not
+                if nodes[idx].parent == Some(root_idx) {
+                    root_level_nodes += 1;
+                    if is_block_file && !root_title_seen {
+                        root_title_seen = true;
+                        block_root = Some(idx);
+                        let at = nodes[idx].title_span.start;
+                        diagnostics.retain(|d: &Diag| d.span.start != at);
+                    }
+                }
                 i += 1;
                 continue;
             }
@@ -790,6 +803,9 @@ fn push_body(
     extend_spans(nodes, top, line.next);
 }
 
+/// Turn the pending title line and its underline into a section; returns
+/// its index.
+#[allow(clippy::too_many_arguments)]
 fn make_setext_section(
     nodes: &mut Vec<Node>,
     stack: &mut Vec<Frame>,
@@ -798,14 +814,26 @@ fn make_setext_section(
     title_indent: usize,
     underline_li: usize,
     level: usize,
-) {
-    // The title line is the last text line pushed, so it ends the top
-    // frame's last text child; take it back out.
+    block_root: Option<usize>,
+) -> usize {
+    // The title line is the last text line pushed, so it ends the last text
+    // child of the node push_body gave it to: the top frame's, or a block
+    // file's root when that is the Root (§4.9). Take it back out, with the
+    // adoption note that came with it.
     let title = lines[title_li].raw.trim().to_string();
     let underline = &lines[underline_li];
     let tl = &lines[title_li];
     {
-        let owner = stack.last().unwrap().node;
+        let mut owner = stack.last().unwrap().node;
+        if owner == 0 {
+            if let Some(br) = block_root {
+                owner = br;
+                let note = "column-0 text in a block file, adopted by its root";
+                if nodes[br].noncanonical.last().is_some_and(|n| n == note) {
+                    nodes[br].noncanonical.pop();
+                }
+            }
+        }
         let nd = &mut nodes[owner];
         if let Some(Content::Text(sp)) = nd.content.last_mut() {
             if sp.end == tl.next {
@@ -841,7 +869,15 @@ fn make_setext_section(
         }
         stack.pop();
     }
-    let parent = stack.last().unwrap().node;
+    // a column-0 section after a block file's root is adopted by it (§4.9)
+    let mut parent = stack.last().unwrap().node;
+    let mut noncanonical = vec!["setext heading".to_string()];
+    if parent == 0 {
+        if let Some(br) = block_root {
+            parent = br;
+            noncanonical.push("column-0 node in a block file, adopted by its root".into());
+        }
+    }
     let idx = nodes.len();
     nodes.push(Node {
         kind: Kind::Section,
@@ -863,7 +899,7 @@ fn make_setext_section(
         embed: None,
         indent: title_indent,
         level: Some(level),
-        noncanonical: vec!["setext heading".into()],
+        noncanonical,
     });
     nodes[parent].children.push(idx);
     nodes[parent].content.push(Content::Node(idx));
@@ -874,6 +910,7 @@ fn make_setext_section(
         level: Some(level),
         is_embed: false,
     });
+    idx
 }
 
 fn extend_spans(nodes: &mut Vec<Node>, idx: usize, end: usize) {

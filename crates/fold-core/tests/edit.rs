@@ -253,3 +253,76 @@ fn noop_splice_of_spec_example_vault() {
     let homelab = v.tree.resolved_children(v.tree.root)[0];
     assert_noop_splice(&mut v, homelab);
 }
+
+/// A vault whose root.md embeds one block file with the given body.
+fn vault_with_block(body: &str) -> (tempfile::TempDir, Vault, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let id = "racfer-hattes-mislup-nodrys";
+    std::fs::write(dir.path().join("root.md"), format!("# ![[{id}]]\n")).unwrap();
+    let bf = dir.path().join("racfer~inbox.md");
+    std::fs::write(&bf, format!("---\nid: {id}\n---\n\n{body}")).unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    (dir, v, bf)
+}
+
+#[test]
+fn setext_heading_in_block_file_survives_noop_splice() {
+    // §4.9: a column-0 node after a block file's root — here a setext
+    // heading a phone editor appended — is adopted by the root, so it shows
+    // under the block and a no-op splice keeps it on disk (§15.6), written
+    // in place under the root.
+    let (_d, mut v, bf) = vault_with_block("# Inbox\n\nNotes\n=====\n\nprecious\n");
+    let inbox = v.tree.resolved_children(v.tree.root)[0];
+    assert_eq!(v.tree.node(inbox).title, "Inbox");
+    let kids = v.tree.resolved_children(inbox);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(v.tree.node(kids[0]).title, "Notes");
+    let mut buf = open_editor(&v, inbox);
+    let owner = buf.lines[0].owner;
+    buf.mark_dirty(owner);
+    buf.splice(&mut v, owner).unwrap();
+    let disk = std::fs::read_to_string(&bf).unwrap();
+    assert_eq!(
+        disk,
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n# Inbox\n\n## Notes\n\nprecious\n"
+    );
+}
+
+#[test]
+fn setext_heading_after_a_bullet_block_root_is_adopted_once() {
+    // the title line was adopted into the bullet root's text before its
+    // underline showed up; it must become the node, not stay behind as text
+    let (_d, mut v, bf) = vault_with_block("- Order switch\nTitle\n=====\nmore\n");
+    let order = v.tree.resolved_children(v.tree.root)[0];
+    let kids = v.tree.resolved_children(order);
+    assert_eq!(kids.len(), 1);
+    assert_eq!(v.tree.node(kids[0]).title, "Title");
+    let diags: Vec<String> = fold_core::check::check(&v)
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert!(!diags.iter().any(|m| m.contains("column-0 text")), "{diags:?}");
+    assert!(diags.iter().any(|m| m.contains("column-0 node")), "{diags:?}");
+    let mut buf = open_editor(&v, order);
+    let owner = buf.lines[0].owner;
+    buf.mark_dirty(owner);
+    buf.splice(&mut v, owner).unwrap();
+    let disk = std::fs::read_to_string(&bf).unwrap();
+    assert_eq!(
+        disk,
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- Order switch\n  # Title\n  more\n"
+    );
+}
+
+#[test]
+fn setext_heading_can_be_a_block_files_root() {
+    // its title line is the root's, not text before the root (§4.9)
+    let (_d, v, _bf) = vault_with_block("Inbox\n=====\n\nbody\n");
+    let inbox = v.tree.resolved_children(v.tree.root)[0];
+    assert_eq!(v.tree.node(inbox).title, "Inbox");
+    let diags: Vec<String> = fold_core::check::check(&v)
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert!(!diags.iter().any(|m| m.contains("before the block")), "{diags:?}");
+}
