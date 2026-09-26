@@ -78,6 +78,8 @@ fn check_reports_and_fix_canonicalizes() {
 #[test]
 fn merge_processes_conflict_files() {
     let dir = tempfile::tempdir().unwrap();
+    // the merged conflict file goes to a trash of the test's own (§11.5)
+    let state = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.md"), "# A\n\n- ours\n").unwrap();
     std::fs::write(
         dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
@@ -85,6 +87,7 @@ fn merge_processes_conflict_files() {
     )
     .unwrap();
     notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
         .args(["merge"])
         .assert()
         .success()
@@ -96,21 +99,23 @@ fn merge_processes_conflict_files() {
 #[test]
 fn trash_list_and_restore() {
     let dir = tempfile::tempdir().unwrap();
-    // put something in the trash via a delete through the core
-    std::fs::write(dir.path().join("root.md"), "# A\n\n- doomed\n").unwrap();
-    {
-        let mut v = fold_core::vault::Vault::open(dir.path()).unwrap();
-        let a = v.tree.resolved_children(v.tree.root)[0];
-        let node = v.tree.resolved_children(a)[0];
-        fold_core::ops::delete_subtree(&mut v, node).unwrap();
-    }
+    // a trash of the test's own (§11.5), not the machine's, where an entry
+    // left by an earlier run would make "doomed" match twice
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    // a deleted subtree, as a delete leaves it in the trash
+    let trash = state.path().join("fold").join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    std::fs::write(trash.join("20260926-101010-doomed.md"), "- doomed\n").unwrap();
     notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
         .args(["trash", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("doomed"));
     // restore by a unique substring of the trash file name
     notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
         .args(["trash", "restore", "doomed"])
         .assert()
         .success();
