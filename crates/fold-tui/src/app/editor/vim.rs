@@ -160,9 +160,29 @@ fn leave_insert(e: &mut Editor) {
     e.cursor.col = e.cursor.col.saturating_sub(1);
 }
 
+/// The largest count, as in Vim: more digits than that are this.
+const MAX_COUNT: usize = 999_999_999;
+
+/// The most text a count may make one command put in (Vim's "text too long").
+const MAX_TEXT: usize = 4 << 20;
+
 fn take_count(st: &mut State) -> Option<usize> {
-    let c = std::mem::take(&mut st.count).parse().ok();
-    c
+    let s = std::mem::take(&mut st.count);
+    (!s.is_empty()).then(|| s.parse().map_or(MAX_COUNT, |c: usize| c.min(MAX_COUNT)))
+}
+
+/// `f` applied `n` times from `x`, stopping once it no longer moves: a count
+/// past the end of the text stops there.
+fn repeat<T: PartialEq + Copy>(n: usize, x: T, f: impl Fn(T) -> T) -> T {
+    let mut x = x;
+    for _ in 0..n {
+        let y = f(x);
+        if y == x {
+            break;
+        }
+        x = y;
+    }
+    x
 }
 
 fn reset(e: &mut Editor) {
@@ -176,11 +196,11 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
     let n = count.unwrap_or(1).max(1);
     let p = e.cursor;
     let last = e.lines() - 1;
-    let rep = |e: &Editor, f: &dyn Fn(&Editor, Pos) -> Pos| (0..n).fold(p, |q, _| f(e, q));
+    let rep = |e: &Editor, f: &dyn Fn(&Editor, Pos) -> Pos| repeat(n, p, |q| f(e, q));
     Some(match c {
         'h' => (Pos::new(p.line, p.col.saturating_sub(n)), Kind::Excl),
-        'l' | ' ' => (Pos::new(p.line, (p.col + n).min(e.len(p.line))), Kind::Excl),
-        'j' => (Pos::new((p.line + n).min(last), p.col), Kind::Line),
+        'l' | ' ' => (Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line))), Kind::Excl),
+        'j' => (Pos::new(p.line.saturating_add(n).min(last), p.col), Kind::Line),
         'k' => (Pos::new(p.line.saturating_sub(n), p.col), Kind::Line),
         'w' => (rep(e, &|e, q| e.word_fwd(q, false)), Kind::Excl),
         'W' => (rep(e, &|e, q| e.word_fwd(q, true)), Kind::Excl),
@@ -191,7 +211,7 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
         '0' => (Pos::new(p.line, 0), Kind::Excl),
         '^' => (Pos::new(p.line, e.first_non_blank(p.line)), Kind::Excl),
         '$' => {
-            let l = (p.line + n - 1).min(last);
+            let l = p.line.saturating_add(n - 1).min(last);
             (Pos::new(l, e.len(l)), Kind::Excl)
         }
         'G' => {
@@ -199,7 +219,7 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
             (Pos::new(l, e.first_non_blank(l)), Kind::Line)
         }
         '}' => {
-            let l = (0..n).fold(p.line, |l, _| e.paragraph(l, true));
+            let l = repeat(n, p.line, |l| e.paragraph(l, true));
             if l == last && e.len(l) > 0 {
                 // no blank line below: on the last character, inclusive (Vim's findpar)
                 (Pos::new(l, e.len(l) - 1), Kind::Incl)
@@ -207,7 +227,7 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
                 (Pos::new(l, 0), Kind::Excl)
             }
         }
-        '{' => (Pos::new((0..n).fold(p.line, |l, _| e.paragraph(l, false)), 0), Kind::Excl),
+        '{' => (Pos::new(repeat(n, p.line, |l| e.paragraph(l, false)), 0), Kind::Excl),
         '%' => (e.match_bracket(p)?, Kind::Incl),
         // `n` the way the last search went, `N` the other way
         'n' | 'N' => {
@@ -334,15 +354,15 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
     if let Some(op) = e.vim.op {
         if c == op || (op == 'c' && c == 'c') {
             // dd, cc, yy, >>, <<: whole lines
-            let n = count.unwrap_or(1) * e.vim.op_count.max(1);
-            let l2 = (e.cursor.line + n - 1).min(e.lines() - 1);
+            let n = count.unwrap_or(1).saturating_mul(e.vim.op_count.max(1)).min(MAX_COUNT);
+            let l2 = e.cursor.line.saturating_add(n - 1).min(e.lines() - 1);
             let from = Pos::new(e.cursor.line, 0);
             e.vim.op = None;
             apply(e, op, from, Pos::new(l2, 0), Kind::Line);
             return out;
         }
         // the count before the operator multiplies the motion's (`2d3w` is `d6w`)
-        let n = count.map(|c| c * e.vim.op_count.max(1)).or(Some(e.vim.op_count).filter(|c| *c > 0));
+        let n = count.map(|c| c.saturating_mul(e.vim.op_count.max(1)).min(MAX_COUNT)).or(Some(e.vim.op_count).filter(|c| *c > 0));
         e.vim.op_count = 0;
         match c {
             'i' | 'a' | 'f' | 'F' | 't' | 'T' | 'g' => {
@@ -429,7 +449,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         'x' | 'X' => {
             let p = e.cursor;
             let (a, b) = if c == 'x' {
-                (p, Pos::new(p.line, (p.col + n).min(e.len(p.line))))
+                (p, Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line))))
             } else {
                 (Pos::new(p.line, p.col.saturating_sub(n)), p)
             };
@@ -442,14 +462,14 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         's' => {
             let p = e.cursor;
-            let b = Pos::new(p.line, (p.col + n).min(e.len(p.line)));
+            let b = Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)));
             to_insert(e);
             let t = e.delete(p, b);
             e.copy(t, false);
         }
         'S' => {
             let l = e.cursor.line;
-            apply(e, 'c', Pos::new(l, 0), Pos::new((l + n - 1).min(e.lines() - 1), 0), Kind::Line);
+            apply(e, 'c', Pos::new(l, 0), Pos::new(l.saturating_add(n - 1).min(e.lines() - 1), 0), Kind::Line);
         }
         'D' | 'C' | 'Y' => {
             let op = match c {
@@ -459,9 +479,9 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             };
             if c == 'Y' {
                 let l = e.cursor.line;
-                apply(e, 'y', Pos::new(l, 0), Pos::new((l + n - 1).min(e.lines() - 1), 0), Kind::Line);
+                apply(e, 'y', Pos::new(l, 0), Pos::new(l.saturating_add(n - 1).min(e.lines() - 1), 0), Kind::Line);
             } else {
-                let l = (e.cursor.line + n - 1).min(e.lines() - 1);
+                let l = e.cursor.line.saturating_add(n - 1).min(e.lines() - 1);
                 let from = e.cursor;
                 apply(e, op, from, Pos::new(l, e.len(l)), Kind::Excl);
             }
@@ -477,7 +497,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         '~' => {
             let p = e.cursor;
-            let b = Pos::new(p.line, (p.col + n).min(e.len(p.line)));
+            let b = Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)));
             e.checkpoint();
             e.change_case(p, b, '~');
             e.cursor = Pos::new(p.line, b.col);
@@ -488,7 +508,9 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         'u' => {
             for _ in 0..n {
-                e.undo();
+                if !e.undo() {
+                    break;
+                }
             }
         }
         // never inside a replay: `.` would replay itself
@@ -563,7 +585,7 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
             } else {
                 let n = count.unwrap_or(1);
                 let pos = e.cursor;
-                if pos.col + n <= e.len(pos.line) {
+                if pos.col.checked_add(n).is_some_and(|end| end <= e.len(pos.line)) {
                     e.checkpoint();
                     e.delete(pos, Pos::new(pos.line, pos.col + n));
                     e.insert(pos, &c.to_string().repeat(n));
@@ -708,6 +730,10 @@ fn apply(e: &mut Editor, op: char, from: Pos, to: Pos, kind: Kind) {
 fn put(e: &mut Editor, after: bool, n: usize) {
     let clip = e.clip.clone();
     if clip.text.is_empty() {
+        return;
+    }
+    if n > 1 && clip.text.len().saturating_mul(n) > MAX_TEXT {
+        e.message = Some("text too long".into());
         return;
     }
     e.checkpoint();

@@ -10,6 +10,18 @@ pub struct State {
     prefix: Option<char>,
 }
 
+/// The largest count: more digits than that are this.
+const MAX_COUNT: usize = 999_999_999;
+
+/// The most text a count may make `>` add.
+const MAX_TEXT: usize = 4 << 20;
+
+/// The count typed before a key, 1 if none.
+fn take_count(st: &mut State) -> usize {
+    let s = std::mem::take(&mut st.count);
+    if s.is_empty() { 1 } else { s.parse().map_or(MAX_COUNT, |n: usize| n.clamp(1, MAX_COUNT)) }
+}
+
 /// The selection as `[start, end)`: the anchor to the cursor, both included;
 /// with no anchor, the character under the cursor.
 fn range(e: &Editor) -> (Pos, Pos) {
@@ -208,11 +220,11 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.helix.count.push(c);
         return out;
     }
-    let n: usize = std::mem::take(&mut e.helix.count).parse().unwrap_or(1).max(1);
+    let n = take_count(&mut e.helix);
     let p = e.cursor;
     match (c, alt) {
         ('h', _) => move_to(e, Pos::new(p.line, p.col.saturating_sub(n))),
-        ('l', _) => move_to(e, Pos::new(p.line, (p.col + n).min(e.len(p.line)))),
+        ('l', _) => move_to(e, Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)))),
         ('j' | 'k', _) => {
             if e.mode == Mode::Select {
                 if e.anchor.is_none() {
@@ -234,6 +246,10 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             let mut from = p;
             let mut to = p;
             for _ in 0..n {
+                // a count past the end of the text stops there
+                if e.word_end(to, big) == to {
+                    break;
+                }
                 // from here if the word goes on, else from the next character
                 let at_end = e.word_end(to, big) != to && e.next(to).map(|q| e.word_at(q, big).0 != e.word_at(to, big).0).unwrap_or(true);
                 from = if at_end { e.next(to).unwrap_or(to) } else { to };
@@ -249,7 +265,11 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         ('x', false) => {
             // select the line; again, extend by a line
             let whole = e.anchor.is_some_and(|a| a.col == 0 && a <= e.cursor) && e.cursor.col >= e.len(e.cursor.line);
-            let (l1, l2) = if whole { (e.anchor.unwrap().line, (e.cursor.line + n).min(e.lines() - 1)) } else { (p.line, (p.line + n - 1).min(e.lines() - 1)) };
+            let (l1, l2) = if whole {
+                (e.anchor.unwrap().line, e.cursor.line.saturating_add(n).min(e.lines() - 1))
+            } else {
+                (p.line, p.line.saturating_add(n - 1).min(e.lines() - 1))
+            };
             e.anchor = Some(Pos::new(l1, 0));
             e.cursor = Pos::new(l2, e.len(l2));
         }
@@ -349,12 +369,27 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             e.change_case(s, en, how);
         }
         ('>' | '<', false) => {
+            // a count of levels (two spaces each) in one change, as Helix does
             let (s, en) = range(e);
             let l2 = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
-            let a = e.anchor;
-            for _ in 0..n {
-                e.indent(s.line, l2, if c == '>' { 1 } else { -1 });
+            let width = n.saturating_mul(2);
+            if c == '>' && n > 1 && width.saturating_mul(l2 - s.line + 1) > MAX_TEXT {
+                e.message = Some("text too long".into());
+                return out;
             }
+            let a = e.anchor;
+            e.checkpoint();
+            for l in s.line..=l2 {
+                if c == '>' {
+                    if !e.line(l).is_empty() {
+                        e.insert(Pos::new(l, 0), &" ".repeat(width));
+                    }
+                } else {
+                    let k = e.line(l).chars().take(width).take_while(|ch| *ch == ' ').count();
+                    e.delete(Pos::new(l, 0), Pos::new(l, k));
+                }
+            }
+            e.cursor.col = if c == '>' { e.cursor.col + width } else { e.cursor.col.saturating_sub(width) };
             e.anchor = a;
         }
         ('J', false) => {
@@ -368,12 +403,16 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         }
         ('u', false) => {
             for _ in 0..n {
-                e.undo();
+                if !e.undo() {
+                    break;
+                }
             }
         }
         ('U', false) => {
             for _ in 0..n {
-                e.redo();
+                if !e.redo() {
+                    break;
+                }
             }
         }
         ('i', false) => {
@@ -431,7 +470,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 /// The key after `g`, `f`/`t`/`F`/`T`, `r` or `m`.
 fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
-    let n: usize = std::mem::take(&mut e.helix.count).parse().unwrap_or(1).max(1);
+    let n = take_count(&mut e.helix);
     let cur = e.cursor;
     match p {
         'g' => {

@@ -698,3 +698,50 @@ fn vim_count_before_operator_applies_to_find() {
     keys(&mut app, "eG3dgg:w⏎");
     assert_eq!(root(&d), "# A\n");
 }
+
+#[test]
+fn vim_huge_count_put_does_not_panic() {
+    let (d, mut app) = app_with("# A\n\nx\n");
+    app.set_edit_keys(fold_tui::app::EditKeys::Vim);
+    // usize::MAX copies of the yanked "x": today `str::repeat` panics with
+    // "capacity overflow" instead of the count being clamped
+    keys(&mut app, "ejjyl18446744073709551615p");
+    draw(&mut app);
+    keys(&mut app, "⎋:q!⏎");
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# A\n\nx\n");
+}
+
+/// A count far past the end of the text acts like one that just reaches it:
+/// the motion or command stops there, rather than looping on (or
+/// overflowing) for billions of steps.
+#[test]
+fn huge_counts_stop_at_the_end_of_the_text() {
+    let huge = "18446744073709551615";
+    let text = "# A\n\none two\n    three four\n\nfive\n";
+    let run = |keymap: fold_tui::app::EditKeys, seq: &str| {
+        let (d, mut app) = app_with(text);
+        app.set_edit_keys(keymap);
+        keys(&mut app, "ejj");
+        keys(&mut app, seq);
+        keys(&mut app, "⎋:w⏎");
+        root(&d)
+    };
+    // (`#` stands for the count; nothing here edits the title line)
+    let vim = [
+        "#wx", "#bjjx", "#ex", "#}x", "G#{jjx", "x#.", "xx#u", "#lx", "#$x", "2d#w", "#d#w", "#dd", "#J", "#~", "#rz",
+        "#x", "#s-", "#S-", "#D", "#C-", "#Yp", "#>>", "#jx", "#Gx", "G#ggjjx",
+    ];
+    for s in vim {
+        let small = run(fold_tui::app::EditKeys::Vim, &s.replace('#', "20"));
+        assert_eq!(run(fold_tui::app::EditKeys::Vim, &s.replace('#', huge)), small, "vim {}", s);
+    }
+    let helix = ["#ed", "#wd", "#b;jjd", "#ld", "#xd", "xd#u", "xdu#U", "x>>#<"];
+    for s in helix {
+        let small = run(fold_tui::app::EditKeys::Helix, &s.replace('#', "20"));
+        assert_eq!(run(fold_tui::app::EditKeys::Helix, &s.replace('#', huge)), small, "helix {}", s);
+    }
+    // indenting by a count is one step, however deep; too deep is refused
+    assert_eq!(run(fold_tui::app::EditKeys::Helix, "3>u"), text);
+    assert_eq!(run(fold_tui::app::EditKeys::Helix, &format!("{}>", huge)), text);
+}
