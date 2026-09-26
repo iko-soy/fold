@@ -731,3 +731,53 @@ fn capture_after_a_shallower_written_day_starts_a_day_beside_it() {
     assert_ne!(path[1], "2000-01-01", "{}", root_text(&v));
     assert!(v.find_by_path(&["Inbox".into(), "2000-01-01".into(), "old".into()]).is_some());
 }
+
+#[test]
+fn drop_before_the_next_sibling_in_a_four_space_list_keeps_it_a_sibling() {
+    // §4.2: 4-space nesting is accepted on read. Dropping a before b, its
+    // next sibling, leaves it where it was (a no-op); b must not become a's
+    // child because a was rewritten at two spaces in front of it
+    let (_d, mut v) = vault_with("# T\n\n- P\n    - a\n    - b\n");
+    let (a, b) = (at(&v, "T/P/a"), at(&v, "T/P/b"));
+    ops::move_node(&mut v, a, b, ops::Drop::Before).unwrap();
+    assert!(v.find_by_path(&["T".into(), "P".into(), "b".into()]).is_some(), "{}", root_text(&v));
+    assert!(v.find_by_path(&["T".into(), "P".into(), "a".into(), "b".into()]).is_none(), "{}", root_text(&v));
+    assert_eq!(root_text(&v), "# T\n\n- P\n    - a\n    - b\n");
+}
+
+#[test]
+fn a_node_placed_before_a_sibling_written_deeper_keeps_it_a_sibling() {
+    // siblings nested with a tab or 4 spaces (§4.2), and items indented
+    // under a section: a node pasted or dragged in front of one goes at
+    // its indent, not at the canonical one, where the sibling would parse
+    // as its child
+    for src in [
+        "# T\n\n- P\n    - a\n    - b\n",
+        "# T\n\n- P\n\t- a\n\t- b\n",
+        "# T\n\n- P\n    # a\n    # b\n",
+        "# T\n\n## P\n\n  - a\n  - b\n",
+    ] {
+        let (_d, mut v) = vault_with(src);
+        let before = parents(&v);
+        let b = at(&v, "T/P/b");
+        let item = v.tree.node(b).kind == Kind::Item;
+        ops::paste(&mut v, b, if item { "- c\n" } else { "# c\n" }, false).unwrap();
+        assert_eq!(others(&parents(&v), "c"), before, "paste in {:?}:\n{}", src, root_text(&v));
+        assert!(parents(&v).contains(&("c".into(), "P".into())), "{}", root_text(&v));
+        let (_d, mut v) = vault_with(src);
+        let (a, b) = (at(&v, "T/P/a"), at(&v, "T/P/b"));
+        ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
+        assert_eq!(parents(&v), before, "drag in {:?}:\n{}", src, root_text(&v));
+        let p = at(&v, "T/P");
+        let kids: Vec<String> =
+            v.tree.resolved_children(p).iter().map(|&k| v.tree.node(k).title.clone()).collect();
+        assert_eq!(kids, ["b", "a"], "{}", root_text(&v));
+    }
+    // an item before a section child written deeper
+    let (_d, mut v) = vault_with("# T\n\n- P\n    # a\n");
+    let before = parents(&v);
+    let a = at(&v, "T/P/a");
+    ops::paste(&mut v, a, "- c\n", false).unwrap();
+    assert_eq!(others(&parents(&v), "c"), before, "{}", root_text(&v));
+    assert!(parents(&v).contains(&("c".into(), "P".into())), "{}", root_text(&v));
+}

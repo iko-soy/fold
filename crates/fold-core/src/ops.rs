@@ -971,6 +971,12 @@ fn top_kinds(doc: &str) -> Vec<Kind> {
         .collect()
 }
 
+/// The indent a document's first top-level node is written at.
+fn top_indent(doc: &str) -> Option<usize> {
+    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    pf.nodes[pf.root_node].children.first().map(|&c| pf.nodes[c].indent)
+}
+
 /// Clamp a wanted child index by the ordering rule `(text | item)*
 /// section*` (§3.1): items no later than the first section child, sections
 /// no earlier. `kids` are the parent's child nodes without the one moving.
@@ -1106,6 +1112,13 @@ fn place(
     }
     let prev = idx.checked_sub(1).map(|i| kids[i]);
     let doc = level_among(tree, prev, next, doc);
+    // before a sibling written deeper than the node (tab or 4-space
+    // nesting is read, §4.2), the node goes at that sibling's indent: any
+    // shallower, the sibling would parse as its child
+    let doc = match (next.map(|k| tree.node(k).indent), top_indent(&doc)) {
+        (Some(want), Some(have)) if want > have => shift_lines(&doc, 0, (want - have) as isize),
+        _ => doc,
+    };
     let body = doc.trim_end_matches('\n');
     let insertion = match next_kind {
         Some(nk) => {
