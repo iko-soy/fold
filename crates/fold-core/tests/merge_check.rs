@@ -311,3 +311,22 @@ fn retitled_block_root_conflicts_and_keep_theirs_keeps_the_filename() {
     assert!(text.contains(&format!("id: {}", BID)) && text.contains("- new"), "{}", text);
     assert!(merge::conflict_pairs(&v).is_empty());
 }
+
+#[test]
+fn deep_headings_are_canonical() {
+    // §3.1 / §4.2: no upper bound on heading level; levels beyond six are ours
+    // (§4.2 "What is ours"), not non-canonical syntax for `notes check` to report.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "# 1\n\n## 2\n\n### 3\n\n#### 4\n\n##### 5\n\n###### 6\n\n####### 7\n",
+    )
+    .unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let diags = fold_core::check::check(&v);
+    assert!(
+        diags.is_empty(),
+        "{:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}

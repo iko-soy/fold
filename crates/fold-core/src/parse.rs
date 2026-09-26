@@ -280,13 +280,11 @@ fn classify_title(raw: &str) -> Option<(usize, TitleInfo)> {
         });
     }
     let (kind, after_marker) = if rest.starts_with('#') {
+        // any number: levels are unbounded, beyond six too (§3.1, §4.2)
         let hashes = rest.chars().take_while(|&c| c == '#').count();
         let after = &rest[hashes..];
         if !after.is_empty() && !after.starts_with(' ') {
             return None; // `#tag` is text
-        }
-        if hashes > 6 {
-            noncanonical.push("heading level beyond six".into());
         }
         // a heading embed: the heading holds nothing but `![[id]]`
         if let Some(inner) = after
