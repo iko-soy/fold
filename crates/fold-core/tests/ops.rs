@@ -631,3 +631,30 @@ fn archiving_keeps_hashtag_body_lines() {
     assert!(t.contains("\n#done wrap-up notes\n"), "{}", t);
     assert!(!t.contains("##done"), "{}", t);
 }
+
+#[test]
+fn respelling_a_setext_heading_keeps_its_title() {
+    // §4.2: setext headings are read, and converted on write
+    let (_d, mut v) = vault_with("Title\n=====\n\nbody\n");
+    let r = at(&v, &["Title"]);
+    ops::toggle_spelling(&mut v, r).unwrap();
+    let text = &v.tree.files[0].text;
+    assert_eq!(text, "- Title\n\n  body\n");
+    assert!(v.find_by_path(&["Title".into()]).is_some(), "{}", text);
+}
+
+#[test]
+fn toggle_taskness_on_a_setext_heading_makes_it_a_task() {
+    // §4.2, §10.3 `t`: the checkbox goes between the marker and the title
+    let (_d, mut v) = vault_with("Title\n=====\n\nbody\n");
+    let r = at(&v, &["Title"]);
+    ops::toggle_taskness(&mut v, r).unwrap();
+    let text = v.tree.files[0].text.clone();
+    assert_eq!(text, "# [ ] Title\n\nbody\n");
+    let r = v.find_by_path(&["Title".into()]);
+    assert!(r.is_some(), "title changed: {}", text);
+    assert_eq!(v.tree.node(r.unwrap()).task, Some(TaskState::Open), "{}", text);
+    // and back: the checkbox goes, the ATX heading stays
+    ops::toggle_taskness(&mut v, r.unwrap()).unwrap();
+    assert_eq!(v.tree.files[0].text, "# Title\n\nbody\n");
+}

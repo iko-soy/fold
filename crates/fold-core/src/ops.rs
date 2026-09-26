@@ -387,8 +387,11 @@ pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io
     let n = vault.tree.node(r);
     let is_block = n.is_block();
     let file = r.0;
-    let ts = n.title_span;
-    let line = ts.text(&vault.tree.files[file].text).to_string();
+    // a setext title has no marker to put the checkbox after: it is
+    // rewritten as an ATX heading, underline and all (§4.2)
+    let (ts, line) = setext_as_atx(&vault.tree, r).unwrap_or_else(|| {
+        (n.title_span, n.title_span.text(&vault.tree.files[file].text).to_string())
+    });
     let mark = |st: TaskState| match st {
         TaskState::Open => "[ ]",
         TaskState::Done => "[x]", // also rewrites `[X]` / `[-]`
@@ -407,7 +410,7 @@ pub fn set_task(vault: &mut Vault, r: NRef, state: Option<TaskState>) -> std::io
         },
         (None, None) => line.clone(),
     };
-    if new_line != line {
+    if new_line != ts.text(&vault.tree.files[file].text) {
         vault.write_span(file, ts, &new_line)?;
     }
     if is_block {
@@ -438,6 +441,26 @@ fn marker_end(line: &str) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// A setext section's title (§4.2: read, converted on write) as an ATX
+/// heading at its written level and indent, with the span it replaces: the
+/// title line and its underline, the line after it. `None` for any other
+/// node. The written level keeps what nests under the heading unchanged.
+fn setext_as_atx(tree: &crate::tree::Tree, r: NRef) -> Option<(Span, String)> {
+    let n = tree.node(r);
+    let text = tree.text_of(r);
+    let line = n.title_span.text(text);
+    let t = line.trim_start();
+    // every other section's title line is an ATX heading (or a heading embed)
+    if n.kind != Kind::Section || atx_hashes(t).is_some() {
+        return None;
+    }
+    let under = text[n.title_span.end..].find('\n').map_or(text.len(), |i| n.title_span.end + i + 1);
+    let end = text[under..].find('\n').map_or(text.len(), |i| under + i);
+    let indent = &line[..line.len() - t.len()];
+    let atx = format!("{}{} {}", indent, "#".repeat(n.level.unwrap_or(1)), n.title);
+    Some((Span { start: n.title_span.start, end }, atx))
 }
 
 /// Byte range of the checkbox right after the marker (`[ ]`, `[x]`, `[X]`,
@@ -1268,9 +1291,15 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
     let file = r.0;
     let text = vault.tree.files[file].text.clone();
     let span = Span { start: n.span.start, end: n.span.end.min(text.len()) };
+    // a setext title is respelled from its ATX form, so its text is kept and
+    // its underline goes (§4.2)
+    let src = match setext_as_atx(&vault.tree, r) {
+        Some((ts, atx)) => format!("{}{}", atx, &text[ts.end..span.end]),
+        None => span.text(&text).to_string(),
+    };
     if stand != r {
         // a block: respell its file's root at level 1, then its embed
-        let respelled = respell(span.text(&text), to_section, 1);
+        let respelled = respell(&src, to_section, 1);
         let id = n.block.as_ref().and_then(|b| b.id.clone());
         vault.write_span(file, span, &respelled)?;
         let Some(e) = id.and_then(|id| vault.tree.embed_of(&id)) else {
@@ -1280,7 +1309,7 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
         return respell_embed(vault, e, to_section);
     }
     let Some(parent) = n.parent.map(|p| (file, p)) else { return Ok(false) };
-    let respelled = respell(span.text(&text), to_section, vault.tree.level(parent) + 1);
+    let respelled = respell(&src, to_section, vault.tree.level(parent) + 1);
     reposition(vault, r, parent, respelled, to_section)
 }
 
