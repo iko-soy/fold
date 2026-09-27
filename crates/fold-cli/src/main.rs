@@ -184,6 +184,17 @@ fn main() -> anyhow::Result<()> {
                         } else {
                             restored
                         };
+                        // text the editor could not save (§10.6) has no id:
+                        // moved in, it would be a file fold ignores, so it
+                        // is given back and stays where it is
+                        if restored.starts_with("unsaved-") {
+                            print!("{}", std::fs::read_to_string(e.path())?);
+                            eprintln!(
+                                "{} stays in the trash: it is text the editor could not save, not a file fold reads; paste what you need into the editor",
+                                e.path().display()
+                            );
+                            return Ok(());
+                        }
                         if !dir.is_dir() {
                             anyhow::bail!("no vault at {}", dir.display());
                         }

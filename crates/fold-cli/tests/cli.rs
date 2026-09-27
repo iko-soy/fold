@@ -162,6 +162,37 @@ fn trash_restore_never_overwrites_root_md() {
     assert!(dir.path().join("root-restored-2.md").exists());
 }
 
+/// Text the editor could not save (§10.6) is kept in the trash as
+/// `unsaved-<title>.md`: no file the vault reads, as it has no id. Restore
+/// gives the text back and leaves the entry where it is, where moving it
+/// in would leave a file fold ignores and Syncthing spreads.
+#[test]
+fn trash_restore_prints_unsaved_text_and_leaves_it_in_the_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# NAS\n\nMirrored pairs.\n").unwrap();
+    let trash = state.path().join("fold").join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    let entry = trash.join("20260927-055310-unsaved-nas.md");
+    let text = "# NAS TYPED-A\n\nMirrored pairs.\n";
+    std::fs::write(&entry, text).unwrap();
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .args(["trash", "restore", "20260927-055310-unsaved-nas"])
+        .assert()
+        .success()
+        .stdout(text)
+        .stderr(predicate::str::contains(entry.display().to_string()));
+    assert_eq!(std::fs::read_to_string(&entry).unwrap(), text);
+    let files: Vec<_> = dir.path().read_dir().unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(files, ["root.md"]);
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .arg("check")
+        .assert()
+        .success();
+}
+
 /// The trash lives outside the vault (§11.5), often on another filesystem
 /// (a Syncthing folder on an external disk vs `$XDG_STATE_HOME`). Merging
 /// must still move the conflict file to trash (copy + remove across

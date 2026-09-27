@@ -1268,8 +1268,9 @@ engine.
 Deleted subtrees and resolved `conflict:` blocks are written to
 `$XDG_STATE_HOME/notes/trash/<timestamp>-<id-or-name>.md` (device-local, never synced) before
 removal; editor text no save could take, to `<timestamp>-unsaved-<title>.md` (§10.6).
-`notes trash list|restore` manages it. The app never deletes user content without
-a trash copy.
+`notes trash list|restore` manages it. `restore` moves an entry back into the vault, but an
+`unsaved-` entry has no id, so the vault would ignore it as a file (§6.4): it is printed
+instead, and stays in the trash. The app never deletes user content without a trash copy.
 
 ---
 
