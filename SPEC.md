@@ -796,7 +796,8 @@ Dates are ISO, `YYYY-MM-DD`. The property editor refuses anything else for `due`
 
 Done items stay where they are: one line each, in the context that gave them
 meaning, which is the cheapest history there is. The panes dim them, and `zd` toggles
-hiding them (remembered with the view, §10.1).
+hiding them (remembered with the view, §10.1). The selection stays on its node; one
+hidden with them gives way to its next shown sibling, else the row above it.
 
 When a list is genuinely finished, *clear done* (palette) trashes every done item with no
 open descendants under `target` (default: current zoom root); task blocks'

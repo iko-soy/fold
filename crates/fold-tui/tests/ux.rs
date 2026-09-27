@@ -1,8 +1,9 @@
 //! What the app does over time, as `fold` runs it: the watcher, the
-//! autosave and the status line (§10.6, §11.2).
+//! autosave and the status line (§10.6, §11.2), and where the selection
+//! goes when rows come and go (§8.5).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use fold_tui::app::{App, EditKeys};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use fold_tui::app::{Action, App, EditKeys};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use std::time::{Duration, Instant};
@@ -201,4 +202,117 @@ fn a_change_from_outside_while_editing_saves_the_editor_first_and_says_both() {
     // the typing is not what came from outside
     let s = status_line(&mut app);
     assert!(s.contains("↻ changed outside fold: Inbox (+1 item) · saved 1 block(s) (external change)"), "{}", s);
+}
+
+// ------------------------------------------------------------ hiding done
+
+/// Two lists with done tasks above the cursor's rows, as in the sample
+/// vault.
+const TASKS: &str = "# NAS\n\n- [x] Replace fan\n- [ ] Snapshot policy\n\n# Networking\n\n- [ ] Label the cables\n  - [x] patch panel\n  - [ ] rack\n\n# Atlas\n\nQuarterly planning notes.\nDeadline is end of month.\n\n- [ ] Draft the RFC\n- [ ] Review PR\n- [x] Kickoff meeting\n\n# Reading list\n\n- The Rust Book\n";
+
+fn press(app: &mut App, keys: &str) {
+    for c in keys.chars() {
+        app.handle_key(key(KeyCode::Char(c)));
+    }
+}
+
+/// The selected node's title.
+fn selected(app: &App) -> String {
+    app.current().map(|r| app.title_of(r)).unwrap_or_default()
+}
+
+/// Put the cursor on the row titled `title`.
+fn select(app: &mut App, title: &str) {
+    app.cursor = app.rows().iter().position(|r| app.title_of(r.nref) == title).unwrap();
+}
+
+fn draw(app: &mut App) {
+    let mut t = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+}
+
+/// Draw, then click the button the frame drew for `a`.
+fn click_button(app: &mut App, a: Action) {
+    draw(app);
+    let (x, y) = app.button_pos(a).unwrap_or_else(|| panic!("no button {:?}", a));
+    app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+}
+
+#[test]
+fn hiding_and_showing_done_keeps_the_selected_node() {
+    let d = vault(TASKS);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Draft the RFC");
+    // two done tasks above it go: the row number changes, the node does not
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "Draft the RFC");
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "Draft the RFC");
+    // the next verb acts on it
+    press(&mut app, "x");
+    assert!(root(&d).contains("- [x] Draft the RFC"), "{}", root(&d));
+}
+
+#[test]
+fn hiding_the_selected_done_task_selects_its_next_shown_sibling() {
+    let d = vault(TASKS);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "patch panel");
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "rack");
+    press(&mut app, "zd");
+    select(&mut app, "Replace fan");
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "Snapshot policy");
+    // the last one of its list: the row above
+    press(&mut app, "zd");
+    select(&mut app, "Kickoff meeting");
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "Review PR");
+}
+
+#[test]
+fn hiding_done_skips_done_siblings_and_leaves_a_done_task_s_children() {
+    let d = vault("# A\n\n- [x] Order parts\n  - [ ] check fan model\n- [x] Call shop\n- [ ] Fit it\n- [ ] Test it\n");
+    let mut app = App::new(d.path()).unwrap();
+    // under a done task, it goes with it: the task's next shown sibling
+    select(&mut app, "check fan model");
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "Fit it");
+    press(&mut app, "zd");
+    select(&mut app, "Order parts");
+    press(&mut app, "zd");
+    assert_eq!(selected(&app), "Fit it");
+}
+
+#[test]
+fn hiding_done_from_the_palette_or_the_status_bar_keeps_the_selected_node() {
+    let d = vault(TASKS);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Draft the RFC");
+    press(&mut app, ":hide");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.action_on(Action::HideDone).unwrap());
+    assert_eq!(selected(&app), "Draft the RFC");
+    // *done hidden* in the status bar shows them again
+    click_button(&mut app, Action::HideDone);
+    assert!(!app.action_on(Action::HideDone).unwrap());
+    assert_eq!(selected(&app), "Draft the RFC");
+}
+
+#[test]
+fn hiding_done_keeps_the_reading_pane_on_its_node() {
+    let d = vault(TASKS);
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    select(&mut app, "Atlas");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jj");
+    draw(&mut app);
+    let at = app.read_cursor_pub();
+    assert!(at > 0);
+    press(&mut app, "zd");
+    draw(&mut app);
+    assert_eq!(selected(&app), "Atlas");
+    assert_eq!(app.read_cursor_pub(), at, "the reading cursor went back to the top");
 }

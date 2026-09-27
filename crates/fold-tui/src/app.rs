@@ -546,6 +546,45 @@ impl App {
         }
     }
 
+    /// `zd` (§8.5): hide or show done tasks. The selection, and with it the
+    /// reading pane, stays on its node, not its row number: the next verb
+    /// must not act on whatever took its row. A node hidden gives way to
+    /// the next shown sibling of the outermost done task it is in, else to
+    /// the row above that task.
+    fn toggle_hide_done(&mut self) {
+        let before = self.rows();
+        let at = self.cursor.min(before.len().saturating_sub(1));
+        self.hide_done = !self.hide_done;
+        let after = self.rows();
+        let shown: std::collections::HashSet<NRef> = after.iter().map(|r| r.nref).collect();
+        let mut target = before.get(at).map(|r| r.nref).filter(|r| shown.contains(r));
+        if target.is_none() && at < before.len() {
+            // the outermost hidden row it is under: its ancestors are the
+            // rows above it, each shallower than the last
+            let (mut top, mut depth) = (at, before[at].depth);
+            for i in (0..at).rev() {
+                if before[i].depth < depth {
+                    depth = before[i].depth;
+                    if !shown.contains(&before[i].nref) {
+                        top = i;
+                    }
+                }
+            }
+            let d = before[top].depth;
+            target = before[top + 1..]
+                .iter()
+                .take_while(|r| r.depth >= d)
+                .find(|r| r.depth == d && shown.contains(&r.nref))
+                .or_else(|| before[..top].iter().rev().find(|r| shown.contains(&r.nref)))
+                .map(|r| r.nref);
+        }
+        if let Some(i) = target.and_then(|t| after.iter().position(|r| r.nref == t)) {
+            self.cursor = i;
+        }
+        self.clamp_cursor();
+        self.say(if self.hide_done { "done hidden" } else { "done shown" });
+    }
+
     /// The node a key names, only if it is that very node: no falling back
     /// to the deepest step that still exists.
     fn find_exact(&self, key: &NodeKey) -> Option<NRef> {
@@ -1634,11 +1673,7 @@ impl App {
         }
         if let Some(p) = self.pending.take() {
             match (p, key.code) {
-                ('z', KeyCode::Char('d')) => {
-                    self.hide_done = !self.hide_done;
-                    self.clamp_cursor();
-                    self.say(if self.hide_done { "done hidden" } else { "done shown" });
-                }
+                ('z', KeyCode::Char('d')) => self.toggle_hide_done(),
                 ('z', KeyCode::Char('r')) => {
                     self.raw_mode = !self.raw_mode;
                     self.say(if self.raw_mode { "raw" } else { "styled" });
@@ -2391,11 +2426,7 @@ impl App {
             Action::CaptureTask => {
                 self.open_prompt("capture task", PromptAction::CaptureText(true), String::new())
             }
-            Action::HideDone => {
-                self.hide_done = !self.hide_done;
-                self.clamp_cursor();
-                self.say(if self.hide_done { "done hidden" } else { "done shown" });
-            }
+            Action::HideDone => self.toggle_hide_done(),
             Action::ReadingPane => {
                 self.show_reading = !self.show_reading;
                 if !self.show_reading && self.focus == Focus::Reading {
