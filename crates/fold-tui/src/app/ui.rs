@@ -205,6 +205,19 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// Cut a message to `w` columns: the node it names, quoted, gives way
+/// where that is enough, so the words around it stay whole; else its end.
+fn fit_named(s: &str, w: usize) -> String {
+    let over = s.width().saturating_sub(w);
+    let name = s.find('“').map(|i| i + '“'.len_utf8()).and_then(|a| s[a..].find('”').map(|n| (a, a + n)));
+    match name {
+        Some((a, b)) if over > 0 && over < s[a..b].width() => {
+            format!("{}{}{}", &s[..a], fit(&s[a..b], s[a..b].width() - over), &s[b..])
+        }
+        _ => fit(s, w),
+    }
+}
+
 /// Shorten a hint of `·`-separated parts to `w` columns by whole parts:
 /// the first and the last (the way on, as *? help* or *Esc close*) stay,
 /// those before the last go first.
@@ -570,7 +583,7 @@ impl App {
         } else if msg == super::HINT && super::HINT.width() > msg_room as usize {
             super::HINT_SHORT.to_string()
         } else {
-            msg
+            fit_named(&msg, msg_room as usize)
         };
         put(buf, x, area.y, &fit(&msg, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
         for (t, style, a) in right {

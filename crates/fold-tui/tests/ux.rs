@@ -450,7 +450,7 @@ fn a_key_that_changes_a_selection_out_of_view_shows_it_and_waits_for_a_second_pr
     assert!(has_line(&d, "- [ ] task number 2"), "checked out of view");
     let s = status(&mut app);
     assert!(shown(&app, 2), "not brought into view");
-    assert!(s.contains("“task number 2” is selected, press x again to mark it done"), "{}", s);
+    assert!(s.contains("press x again to mark “task number 2” done"), "{}", s);
     press(&mut app, "x");
     assert!(has_line(&d, "- [x] task number 2"));
     // d likewise: nothing trashed until it is in view
@@ -458,7 +458,7 @@ fn a_key_that_changes_a_selection_out_of_view_shows_it_and_waits_for_a_second_pr
     press(&mut app, "d");
     assert!(has_line(&d, "- [x] task number 2"), "deleted out of view");
     let s = status(&mut app);
-    assert!(s.contains("“task number 2” is selected, press d again to delete it"), "{}", s);
+    assert!(s.contains("press d again to delete “task number 2”"), "{}", s);
     press(&mut app, "d");
     assert!(!root(&d).contains("task number 2\n"), "{}", root(&d));
 }
@@ -488,7 +488,7 @@ fn a_selection_brought_into_view_sits_a_third_of_the_way_down_until_the_wheel_mo
     press(&mut app, "za");
     assert!(has_line(&d, "- task number 40"), "archived out of view");
     let s = status(&mut app);
-    assert!(s.contains("“task number 40” is selected, press za again to archive it"), "{}", s);
+    assert!(s.contains("press za again to archive “task number 40”"), "{}", s);
     press(&mut app, "za");
     assert!(root(&d).contains("# Archive"), "{}", root(&d));
 }
@@ -528,7 +528,7 @@ fn the_reading_pane_shows_its_cursor_line_before_changing_it() {
     assert!(has_line(&d, "- [ ] buried task"), "checked out of view");
     let s = status(&mut app);
     assert!(app.hit_pos(Hit::DocLine(task)).is_some(), "not brought into view");
-    assert!(s.contains("“buried task” is selected, press x again to mark it done"), "{}", s);
+    assert!(s.contains("press x again to mark “buried task” done"), "{}", s);
     press(&mut app, "x");
     assert!(has_line(&d, "- [x] buried task"));
     // Enter on a task toggles it: the same
@@ -536,7 +536,7 @@ fn the_reading_pane_shows_its_cursor_line_before_changing_it() {
     app.handle_key(key(KeyCode::Enter));
     assert!(has_line(&d, "- [x] buried task"), "reopened out of view");
     let s = status(&mut app);
-    assert!(s.contains("“buried task” is selected, press Enter again to reopen it"), "{}", s);
+    assert!(s.contains("press Enter again to reopen “buried task”"), "{}", s);
     app.handle_key(key(KeyCode::Enter));
     assert!(has_line(&d, "- [ ] buried task"));
     assert!(!status(&mut app).contains("again"), "the words outlived the verb");
@@ -551,7 +551,7 @@ fn a_held_verb_s_words_go_once_it_acts_or_the_selection_moves() {
     // J says nothing when it moves a node: the words must not stay
     press(&mut app, "J");
     let s = status(&mut app);
-    assert!(s.contains("“task number 2” is selected, press J again to move it down"), "{}", s);
+    assert!(s.contains("press J again to move “task number 2” down"), "{}", s);
     press(&mut app, "J");
     assert!(root(&d).contains("- [ ] task number 3\n- [ ] task number 2\n"), "{}", root(&d));
     let s = status(&mut app);
@@ -582,6 +582,57 @@ fn the_pointer_acts_on_a_selection_out_of_view_at_once() {
     let (x, y) = app.hit_pos(Hit::MenuItem(node_menu_index(Action::Delete))).unwrap();
     app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
     assert!(!root(&d).contains("task number 2\n"), "{}", root(&d));
+}
+
+/// The status bar at 80×24, as the next frame draws it.
+fn status80(app: &mut App) -> String {
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    (0..80).map(|x| b[(x, 23)].symbol()).collect()
+}
+
+/// Turn the wheel down over the outline at 80×24, `notches` times.
+fn wheel80(app: &mut App, notches: usize) {
+    for _ in 0..notches {
+        status80(app);
+        let (x, y) = app.hit_pos(Hit::OutlinePane).unwrap();
+        app.handle_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+    status80(app);
+}
+
+#[test]
+fn a_held_verb_s_words_keep_the_key_and_what_it_does_at_80_columns() {
+    // a title too long for the bar gives way, not the words after it
+    let title = "Replace the flaky switch in the closet before Friday";
+    let d = vault(&long_list().replace("task number 2\n", &format!("{}\n", title)));
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, title);
+    wheel80(&mut app, 10);
+    press(&mut app, "x");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" press x again to mark “Replace the flaky"), "{}", s);
+    assert!(s.contains("…” done "), "{}", s);
+    press(&mut app, "x");
+    assert!(has_line(&d, &format!("- [x] {}", title)), "{}", root(&d));
+    // with the ⚠ count and done hidden on the right, a short title still fits
+    let text = format!("# Networking\n\n- [ ] Label the cables\n  - [x] patch panel\n  - [ ] rack\n\n{}", long_list());
+    let d = vault(&text);
+    std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE.md"), text.replace("[ ] task number 80", "[x] task number 80")).unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    drop(v);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "rack");
+    press(&mut app, "zd");
+    wheel80(&mut app, 10);
+    press(&mut app, "d");
+    let s = status80(&mut app);
+    assert!(s.contains(" ⚠ 1 conflict  done hidden "), "{}", s);
+    assert!(s.starts_with(" press d again to delete “rack” "), "{}", s);
+    press(&mut app, "d");
+    assert!(!root(&d).contains("rack"), "{}", root(&d));
 }
 
 // ------------------------------------------------------------ unsaved text

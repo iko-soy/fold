@@ -2219,45 +2219,47 @@ impl App {
     }
 
     /// Whether a verb just brought into view waits for a second press: one
-    /// that would change `r` does, and says so.
+    /// that would change `r` does, and says so, the key first: the name is
+    /// what gives way where the bar is short.
     fn held(&mut self, key: &str, r: Option<NRef>) -> bool {
         let Some(r) = r else { return false };
         let Some(what) = self.change_words(key, r) else { return false };
-        let words = format!("{} is selected, press {} again to {}", self.named(r), key, what);
+        let words = format!("press {} again to {}", key, what);
         self.say(words.clone());
         self.held_words = Some(words);
         true
     }
 
-    /// What a key would do to `r`, in the status bar's words; `None` when
-    /// it changes nothing: `e a m y`, the folds, `o`, `x` on a node that is
-    /// no task, a paste with nothing copied.
-    fn change_words(&self, key: &str, r: NRef) -> Option<&'static str> {
+    /// What a key would do to `r`, in the status bar's words, naming it;
+    /// `None` when it changes nothing: `e a m y`, the folds, `o`, `x` on a
+    /// node that is no task, a paste with nothing copied.
+    fn change_words(&self, key: &str, r: NRef) -> Option<String> {
         let n = self.vault.tree.node(self.vault.tree.resolved_child(r));
-        Some(match key {
+        let what = match key {
             // Enter zooms into a heading, and toggles a task item (§10.4)
             "Enter" if n.kind == Kind::Section => return None,
             "x" | "Enter" => match n.task? {
-                TaskState::Open => "mark it done",
-                TaskState::Done => "reopen it",
+                TaskState::Open => "mark {} done",
+                TaskState::Done => "reopen {}",
             },
-            "t" if n.task.is_some() => "remove its checkbox",
-            "t" => "make it a task",
-            "d" => "delete it",
-            "s" => "make it a block",
-            "J" => "move it down",
-            "K" => "move it up",
-            ">" => "indent it",
-            "<" => "outdent it",
-            "~" if n.kind == Kind::Section => "make it a bullet",
-            "~" => "make it a heading",
-            "r" => "move it elsewhere",
-            "za" => "archive it",
+            "t" if n.task.is_some() => "remove the checkbox from {}",
+            "t" => "make {} a task",
+            "d" => "delete {}",
+            "s" => "make {} a block",
+            "J" => "move {} down",
+            "K" => "move {} up",
+            ">" => "indent {}",
+            "<" => "outdent {}",
+            "~" if n.kind == Kind::Section => "make {} a bullet",
+            "~" => "make {} a heading",
+            "r" => "move {} elsewhere",
+            "za" => "archive {}",
             "p" | "P" if self.register.is_empty() => return None,
-            "p" => "paste after it",
-            "P" => "paste before it",
+            "p" => "paste after {}",
+            "P" => "paste before {}",
             _ => return None,
-        })
+        };
+        Some(what.replacen("{}", &self.named(r), 1))
     }
 
     pub fn key_normal(&mut self, key: KeyEvent) {

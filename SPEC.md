@@ -865,7 +865,8 @@ Four regions, each of them live under the pointer:
   names the node it acted on, in the menus' words, with the next key where one helps —
   *deleted “Homelab” (12 nodes) · u undoes*, *moved “rack” to “NAS” — placed before the
   sections* when the ordering rule chose the place (§3.1) — and names no file or id (§1,
-  3b), but for undo or redo refusing (§10.10). Once a message is some 5 s old and a key
+  3b), but for undo or redo refusing (§10.10); where the bar is short, the name is cut
+  down before the words around it. Once a message is some 5 s old and a key
   or click has come since, the next step takes its place: the keys of what is on screen —
   *n new · e edit · x done · m menu · / find · ? help* in the outline, *e edit · Enter
   zoom/follow · Tab outline* in the reading pane, *Esc done · Ctrl-S save · Ctrl-Z undo* in
@@ -929,7 +930,7 @@ where they are, even out of view. A key that acts on one — in the outline
 `x t d s J K > < ~ za r p P`, `e a m y` and the folds; in the reading pane `x`, `Enter` and
 `e a m o` — first scrolls it back into view, a third of the way down. A key that changes
 nothing then acts; one that changes something stops there, and until the next key or click
-the status bar names the node: *“Replace fan” is selected, press d again to delete it*.
+the status bar says what a second press does: *press d again to delete “Replace fan”*.
 Pressed again, with the node in view, it acts. The pointer acts where it points and is
 never held back.
 
