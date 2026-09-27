@@ -5,8 +5,9 @@
 //! reverts (§10.6), sync conflicts that come in while you work (§10.7),
 //! the conflict copies they leave in the outline (§10.1, §12.5), what
 //! the status line says a verb did (§10.1), the next step it shows once
-//! that is old, or a key is half typed or does nothing (§10.1), and the
-//! pointer inside a popup, which never reaches the panes behind (§10.1).
+//! that is old, or a key is half typed or does nothing (§10.1), the
+//! pointer inside a popup, which never reaches the panes behind (§10.1),
+//! and the help, which scrolls where the screen is short (§10.8).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -3743,5 +3744,77 @@ fn a_right_click_in_any_popup_opens_no_menu_on_the_node_behind_it() {
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.mode_pub(), "normal", "{}", title);
     }
+    assert_eq!(root(&d), SAMPLE);
+}
+
+/// The help's lines as its popup starts them: 60 characters, room for
+/// which there is at 80 columns.
+fn help_lines() -> Vec<String> {
+    fold_tui::app::help_text()
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .map(|l| l.chars().take(60).collect::<String>().trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+#[test]
+fn the_help_scrolls_where_the_terminal_is_too_short_for_it() {
+    // every popup is a list you can scroll (§10.1). From the Vim editor at
+    // 120×32 the help ended at the normal keymap's ^K line, the vim/helix
+    // and mouse lines out of reach, and at 80×24 so was the whole EDITOR
+    // section: j, ↓ and the wheel did nothing
+    let lines = help_lines();
+    let (first, last) = (&lines[0], &lines[lines.len() - 1]);
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    // its keys say so
+    press(&mut app, "?");
+    assert_eq!(said(&mut app), "↑↓ scroll · Esc close");
+    app.handle_key(key(KeyCode::Esc));
+    app.set_edit_keys(EditKeys::Vim);
+    press(&mut app, "je");
+    for (w, h) in [(120, 32), (80, 24)] {
+        for (down, up) in [(key(KeyCode::Char('j')), key(KeyCode::Char('k'))), (key(KeyCode::Down), key(KeyCode::Up))] {
+            app.handle_key(key(KeyCode::F(1)));
+            let mut seen = text(&frame_at(&mut app, w, h));
+            assert!(seen.contains(first.as_str()) && !seen.contains(last.as_str()), "{}×{}:\n{}", w, h, seen);
+            // down to its last line, every line on the way
+            for _ in 0..lines.len() {
+                app.handle_key(down);
+                seen += &text(&frame_at(&mut app, w, h));
+            }
+            let b = text(&frame_at(&mut app, w, h));
+            assert!(b.contains(last.as_str()) && !b.contains(first.as_str()), "{}×{} {:?}:\n{}", w, h, down.code, b);
+            for l in &lines {
+                assert!(seen.contains(l.as_str()), "{}×{} {:?}: never shown: {}", w, h, down.code, l);
+            }
+            // and back up to its first
+            for _ in 0..lines.len() {
+                app.handle_key(up);
+            }
+            let b = text(&frame_at(&mut app, w, h));
+            assert!(b.contains(first.as_str()) && !b.contains(last.as_str()), "{}×{} {:?}:\n{}", w, h, up.code, b);
+            app.handle_key(key(KeyCode::Esc));
+            assert_eq!(app.mode_pub(), "edit");
+        }
+    }
+    // the wheel over it scrolls it too, where it reached nothing
+    app.handle_key(key(KeyCode::F(1)));
+    wheel(&mut app, Hit::Popup, 10);
+    let s = screen(&mut app);
+    assert!(s.contains("vim/helix    the usual modes") && s.contains(last.as_str()), "{}", s);
+    wheel(&mut app, Hit::Popup, -10);
+    let s = screen(&mut app);
+    assert!(s.contains(first.as_str()) && !s.contains(last.as_str()), "{}", s);
+    // opened again, it starts at the top
+    wheel(&mut app, Hit::Popup, 10);
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::F(1)));
+    assert!(screen(&mut app).contains(first.as_str()));
+    app.handle_key(key(KeyCode::Esc));
+    // none of it reached the editor behind
+    assert_eq!(app.mode_pub(), "edit");
+    app.run_action(Action::EditDone);
     assert_eq!(root(&d), SAMPLE);
 }

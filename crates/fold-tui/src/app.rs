@@ -183,6 +183,9 @@ pub struct App {
     pane_outline: Rect,
     pane_reading: Rect,
     outline_scroll: usize,
+    /// The help's first line shown: taller than the screen, it scrolls
+    /// (§10.8), and opens at its top.
+    help_scroll: usize,
     ui: ui::Ui,
     // the node a menu or button acts on, when it is not the cursor's
     action_target: Option<NRef>,
@@ -288,6 +291,7 @@ impl App {
             pane_outline: Rect::default(),
             pane_reading: Rect::default(),
             outline_scroll: 0,
+            help_scroll: 0,
             ui: ui::Ui::default(),
             action_target: None,
             palette_sel: 0,
@@ -400,7 +404,7 @@ impl App {
             Mode::Picker => "↑↓ pick · Enter run · Esc close",
             Mode::Conflict if fold_core::merge::conflict_pairs(&self.vault).is_empty() => "Esc close",
             Mode::Conflict => "o ours · t theirs · b both · n next · Esc close",
-            Mode::Help => "Esc close",
+            Mode::Help => "↑↓ scroll · Esc close",
         }
     }
 
@@ -2325,14 +2329,15 @@ impl App {
             // the keymap decides what Ctrl-c means (copy, or Vim's escape)
             Mode::Edit => self.key_edit(key),
             Mode::Props => self.key_props(key),
-            Mode::Help => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::F(1)
-                ) {
-                    self.mode = self.base_mode();
+            Mode::Help => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::F(1) => {
+                    self.mode = self.base_mode()
                 }
-            }
+                // a line at a time; drawing stops it at the last line
+                KeyCode::Char('j') | KeyCode::Down => self.help_scroll += 1,
+                KeyCode::Char('k') | KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                _ => {}
+            },
             Mode::Conflict => self.key_conflict(key),
         }
     }
@@ -3336,7 +3341,10 @@ impl App {
                 self.palette.clear();
                 self.palette_sel = 0;
             }
-            Action::Help => self.mode = Mode::Help,
+            Action::Help => {
+                self.mode = Mode::Help;
+                self.help_scroll = 0;
+            }
             Action::Quit => self.quit = true,
             Action::Undo if self.mode == Mode::Conflict => self.key_conflict(key_of('u')),
             Action::Redo if self.mode == Mode::Conflict => self.key_conflict(key_of('U')),

@@ -1172,7 +1172,8 @@ follows (§10.1). `Esc` or a click outside closes.
 There is no command syntax: nothing is typed except the search and the argument. Every
 action is in the palette under a readable name, and the four that have no key or button
 live only there: *Clear done*, *Canonicalize*, *Merge sync conflicts*, *Resolve
-conflicts*. `?` is help: the pointer gestures first, then the keys.
+conflicts*. `?` is help: the pointer gestures first, then the keys. Where it is taller
+than the screen it scrolls, a bar on its right border: `j`/`k`, `↑`/`↓` or the wheel.
 
 ### 10.9 Markdown styling in the reading pane
 

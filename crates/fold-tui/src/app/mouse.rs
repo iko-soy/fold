@@ -401,6 +401,7 @@ impl App {
         }
         match self.mode {
             Mode::Picker => self.palette_sel = step(self.palette_sel),
+            Mode::Help => self.help_scroll = step(self.help_scroll),
             Mode::Filter => {
                 self.filter_sel = step(self.filter_sel).min(self.filter_rows.len().saturating_sub(1))
             }

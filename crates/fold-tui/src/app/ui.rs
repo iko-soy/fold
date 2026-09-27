@@ -1475,7 +1475,18 @@ impl App {
         let lines = super::help_text();
         let r = Self::centered(screen, 78, lines.len() as u16 + 2);
         let inner = self.popup(f, screen, r, "Help", &[Action::Close]);
-        f.render_widget(Paragraph::new(lines), inner);
+        // where the screen is short it scrolls, a bar on its right border
+        let (view, len) = (inner.height as usize, lines.len());
+        follow(&mut self.help_scroll, 0, false, view, len);
+        f.render_widget(Paragraph::new(lines).scroll((self.help_scroll as u16, 0)), inner);
+        if len > view {
+            let mut st = ScrollbarState::new(len - view).position(self.help_scroll);
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None),
+                Rect { y: r.y + 1, height: r.height.saturating_sub(2), ..r },
+                &mut st,
+            );
+        }
     }
 
     fn draw_conflict(&mut self, f: &mut Frame, area: Rect) {
