@@ -2834,6 +2834,52 @@ fn a_verb_from_the_reading_pane_s_menu_names_the_next_step_in_that_menu() {
     assert!(said(&mut app).ends_with(" · p pastes"), "{}", said(&mut app));
 }
 
+/// Right-click the outline row that starts `title`, then click `a` in the
+/// menu it opens.
+fn right_click(app: &mut App, title: &str, a: Action) {
+    let b = frame(app);
+    let (x, y) = find(&b, title).unwrap_or_else(|| panic!("no “{}” on screen:\n{}", title, text(&b)));
+    click_at(app, x, y, MouseButton::Right);
+    draw(app);
+    let (x, y) = app.hit_pos(Hit::MenuItem(node_menu_index(a))).unwrap();
+    click_at(app, x, y, MouseButton::Left);
+}
+
+#[test]
+fn a_verb_run_while_editing_names_the_pointer_s_next_step_not_a_key_the_editor_types() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    // every key is text here (§10.6): the step is a row's menu, or ↶ Undo
+    right_click(&mut app, "Networking", Action::PasteAfter);
+    assert_eq!(said(&mut app), "nothing copied yet · right-click a row, then choose Copy");
+    right_click(&mut app, "Networking", Action::ToggleDone);
+    assert_eq!(said(&mut app), "“Networking” isn't a task · right-click a row, then choose Task on / off");
+    right_click(&mut app, "Networking", Action::Copy);
+    assert_eq!(said(&mut app), "copied “Networking” · right-click a row, then choose Paste after");
+    right_click(&mut app, "VLANs: 10 home", Action::Delete);
+    assert_eq!(said(&mut app), "deleted “VLANs: 10 home, 20 iot, 30 guest” · click ↶ Undo");
+    assert_eq!(app.mode_pub(), "edit");
+    // done as it says, it undoes, and the editor stays
+    click_button(&mut app, Action::Undo);
+    assert_eq!(root(&d), SAMPLE);
+    assert_eq!(app.mode_pub(), "edit");
+    // the palette's verbs, run while editing, say the same
+    click_button(&mut app, Action::Palette);
+    press(&mut app, "Copy");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(said(&mut app).ends_with(" · right-click a row, then choose Paste after"), "{}", said(&mut app));
+    // the editor done, the keys are the outline's again
+    app.handle_key(key(KeyCode::Esc));
+    select(&mut app, "Networking");
+    press(&mut app, "y");
+    assert_eq!(said(&mut app), "copied “Networking” · p pastes");
+    select(&mut app, "rack");
+    press(&mut app, "d");
+    assert_eq!(said(&mut app), "deleted “rack” · u undoes");
+}
+
 #[test]
 fn undo_and_redo_say_in_words_what_they_undid() {
     let d = vault(SAMPLE);

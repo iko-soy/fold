@@ -1041,11 +1041,20 @@ impl App {
 
     /// The next step a verb's message names (§10.1): `a`'s key and what it
     /// does. The reading pane's keys are its own (§10.4), and Tab, then
-    /// the key, would act on the outline's selection: there, the step is
-    /// the menu of the line's node.
+    /// the key, would act on the outline's selection: there, a node's
+    /// verb is in the menu of the line's node. In the editor every key is
+    /// text (§10.6): the step is the pointer's, a row's menu or the top
+    /// bar's button.
     fn next_step(&self, a: Action, does: &str) -> String {
+        let on_node = action::NODE_MENU.contains(&Some(a));
+        if self.mode == Mode::Edit {
+            return match a.icon() {
+                Some(icon) if !on_node => format!("click {} {}", icon, a.label()),
+                _ => format!("right-click a row, then choose {}", a.label()),
+            };
+        }
         match a.key() {
-            Some(k) if self.focus != Focus::Reading => format!("{} {}", k, does),
+            Some(k) if self.focus != Focus::Reading || !on_node => format!("{} {}", k, does),
             _ => format!("m, then choose {}", a.label()),
         }
     }
@@ -1128,9 +1137,10 @@ impl App {
             1 => format!("{} and its conflict copy", name),
             n => format!("{} and its {} conflict copies", name, n),
         };
+        let undo = self.next_step(Action::Undo, "undoes");
         match ops::delete_subtree(&mut self.vault, r) {
-            Ok(1) => self.refresh_after(&format!("deleted {} · u undoes", what)),
-            Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · u undoes", what, n)),
+            Ok(1) => self.refresh_after(&format!("deleted {} · {}", what, undo)),
+            Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · {}", what, n, undo)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }

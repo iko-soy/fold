@@ -867,7 +867,9 @@ Four regions, each of them live under the pointer:
   *deleted “Homelab” (12 nodes) · u undoes*, *moved “rack” to “NAS” — placed before the
   sections* when the ordering rule chose the place (§3.1); in the reading pane, whose keys
   are its own (§10.4), the step is the menu of the line's node: *copied “NAS” · m, then
-  choose Paste after* — and names no file or id (§1, 3b), but for undo or redo refusing
+  choose Paste after*; in the editor, where every key is text (§10.6), it is the
+  pointer's: *copied “NAS” · right-click a row, then choose Paste after*, *deleted “rack”
+  · click ↶ Undo* — and names no file or id (§1, 3b), but for undo or redo refusing
   (§10.10); where the bar is short, the name is cut
   down before the words around it. Once a message is some 5 s old and a key
   or click has come since, the next step takes its place: the keys of what is on screen —
