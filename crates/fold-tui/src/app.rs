@@ -134,6 +134,15 @@ pub struct App {
     read_match_idx: usize,
     // conflict view (§10.7)
     conflict_idx: usize,
+    /// When the view last opened on its own: for a moment it takes no side,
+    /// a key on its way being meant for what was there before.
+    conflict_opened: Option<Instant>,
+    /// Pairs a merge raised while the user was busy, by conflict block:
+    /// the view opens on them once the outline is at rest, and the ⚠ count
+    /// is lit until it does.
+    conflicts_waiting: Vec<NodeKey>,
+    /// The last key, paste or click.
+    last_input: Option<Instant>,
     // watcher (§11.2)
     watcher: Option<notify::RecommendedWatcher>,
     watch_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
@@ -235,6 +244,9 @@ impl App {
             read_matches: Vec::new(),
             read_match_idx: 0,
             conflict_idx: 0,
+            conflict_opened: None,
+            conflicts_waiting: Vec::new(),
+            last_input: None,
             watcher: None,
             watch_rx: None,
             last_watch_event: Instant::now(),
@@ -310,6 +322,8 @@ impl App {
         if due {
             self.reload_external();
         }
+        // pairs that came in while the user was busy, once at rest (§10.7)
+        self.open_waiting_conflicts();
         due
     }
 
@@ -426,24 +440,110 @@ impl App {
         self.editor_after_write(edit);
     }
 
-    /// The merge flow (§12.2): merge the sync-conflict copies, then open
-    /// the conflict view on the pairs the merge raised. A copy the merge
-    /// leaves alone (an ignored file's, one with nothing to merge against)
-    /// raises none and stays, so it must not reopen the view, closing the
-    /// editor, on every reload; nor must pairs lived with (§12.5).
+    /// The merge flow (§12.2): merge the sync-conflict copies, then show
+    /// the pairs the merge raised. A copy the merge leaves alone (an
+    /// ignored file's, one with nothing to merge against) raises none and
+    /// stays, so it must not reopen the view on every reload; nor must
+    /// pairs lived with (§12.5). New pairs never take the screen from a
+    /// busy user (§10.7): the view opens on them once the outline is at
+    /// rest, at once if it is, and an open view stays on its pair.
     fn merge_conflict_files(&mut self, what: &str) {
         let before = self.conflict_blocks();
+        let shown = before.get(self.conflict_idx).cloned().filter(|_| self.mode == Mode::Conflict);
         match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
             Ok(outcomes) => {
                 self.say(format!("{}: {}", what, outcomes.join("; ")));
-                let raised = self.conflict_blocks().iter().any(|b| !before.contains(b));
-                if raised && (self.editor.is_none() || self.close_editor()) {
-                    self.mode = Mode::Conflict;
-                    self.conflict_idx = 0;
+                let blocks = self.conflict_blocks();
+                let raised: Vec<NodeKey> = blocks.iter().filter(|b| !before.contains(b)).cloned().collect();
+                if raised.is_empty() {
+                    return;
+                }
+                if self.mode == Mode::Conflict {
+                    // the pair on screen stays there; a view that showed
+                    // none takes no side for a moment, as on opening
+                    match shown.and_then(|k| blocks.iter().position(|b| *b == k)) {
+                        Some(i) => self.conflict_idx = i,
+                        None => self.conflict_opened = Some(Instant::now()),
+                    }
+                    self.say(self.conflict_news(&self.pairs_among(&raised)));
+                    return;
+                }
+                self.conflicts_waiting.extend(raised);
+                if !self.open_waiting_conflicts() {
+                    let news = self.conflict_news(&self.pairs_among(&self.conflicts_waiting));
+                    self.say(format!("{}: click {} to resolve", news, conflict_count(blocks.len())));
                 }
             }
             Err(e) => self.say(format!("merge error: {}", e)),
         }
+    }
+
+    /// Open the conflict view on its own (§10.7), on the pairs that came in
+    /// while the user was busy, once the outline is at rest; true when it
+    /// opened. For its first half second it takes no side (`key_conflict`).
+    fn open_waiting_conflicts(&mut self) -> bool {
+        if self.conflicts_waiting.is_empty() || !self.at_rest() {
+            return false;
+        }
+        // pairs resolved meanwhile, elsewhere, are not waited on
+        let keys = std::mem::take(&mut self.conflicts_waiting);
+        let waiting = self.pairs_among(&keys);
+        let Some(&(i, _)) = waiting.first() else { return false };
+        self.say(self.conflict_news(&waiting));
+        self.mode = Mode::Conflict;
+        self.conflict_idx = i;
+        self.conflict_opened = Some(Instant::now());
+        true
+    }
+
+    /// The outline at rest (§10.7): normal mode with nothing open over it,
+    /// no key sequence or drag begun, and no key, paste or click for 2 s.
+    fn at_rest(&self) -> bool {
+        self.mode == Mode::Normal
+            && self.editor.is_none()
+            && self.prompt.is_none()
+            && self.ui.menu.is_none()
+            && self.pending.is_none()
+            && !self.ui.press.is_some_and(|p| p.dragging)
+            && !self.ui.resizing
+            && self.last_input.is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+    }
+
+    /// The pairs whose conflict blocks are `keys` (§12.5), first in the
+    /// outline first: each one's place in the view's list, and its node.
+    fn pairs_among(&self, keys: &[NodeKey]) -> Vec<(usize, NRef)> {
+        let mut out: Vec<(usize, NRef)> = fold_core::merge::conflict_pairs(&self.vault)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (_, theirs))| keys.contains(&self.vault.key_of(*theirs)))
+            .map(|(i, (ours, _))| (i, ours))
+            .collect();
+        if out.len() > 1 {
+            // the view lists pairs by their blocks' files; the outline is
+            // walked for their order only when there is one to find
+            let tree = &self.vault.tree;
+            let mut order = Vec::new();
+            tree.walk(tree.root, &mut |_, r| order.push(r));
+            out.sort_by_key(|&(_, ours)| order.iter().position(|&r| r == ours));
+        }
+        out
+    }
+
+    /// What came in, by the node of the first of those pairs in the
+    /// outline: *sync conflict in “NAS”*, *sync conflicts in “NAS” and 2
+    /// more*.
+    fn conflict_news(&self, pairs: &[(usize, NRef)]) -> String {
+        match pairs {
+            [] => "sync conflict".into(),
+            [(_, ours)] => format!("sync conflict in {}", self.named(*ours)),
+            [(_, ours), rest @ ..] => format!("sync conflicts in {} and {} more", self.named(*ours), rest.len()),
+        }
+    }
+
+    /// A node as the status bar names it: its title, quoted.
+    fn named(&self, r: NRef) -> String {
+        let title = &self.vault.tree.node(self.vault.tree.resolved_child(r)).title;
+        format!("“{}”", if title.is_empty() { "(untitled)" } else { title.as_str() })
     }
 
     /// The conflict blocks of the unresolved pairs, by id (§12.5).
@@ -1301,6 +1401,7 @@ impl App {
     /// Text pasted into the terminal (bracketed paste): into the editor or
     /// the open prompt.
     pub fn handle_paste(&mut self, text: &str) {
+        self.last_input = Some(Instant::now());
         if let Some(p) = self.prompt.as_mut() {
             p.text.push_str(text.lines().next().unwrap_or(""));
             self.refresh_picks();
@@ -1609,12 +1710,21 @@ impl App {
         if self.editor.is_some() && !self.close_editor() {
             return;
         }
+        // on the first of the pairs that came in unseen, if any (§10.7)
+        let waiting = std::mem::take(&mut self.conflicts_waiting);
+        self.conflict_idx = self.pairs_among(&waiting).first().map_or(0, |&(i, _)| i);
+        self.conflict_opened = None;
         self.mode = Mode::Conflict;
-        self.conflict_idx = 0;
     }
 
     pub fn key_conflict_pub(&mut self, key: KeyEvent) { self.key_conflict(key) }
     fn key_conflict(&mut self, key: KeyEvent) {
+        // a view that just opened on its own takes no side, nor edits: a
+        // key on its way was meant for what was there before (§10.7)
+        let fresh = self.conflict_opened.is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+        if fresh && matches!(key.code, KeyCode::Char('o' | 't' | 'b' | 'e')) {
+            return;
+        }
         let pairs = fold_core::merge::conflict_pairs(&self.vault);
         match key.code {
             KeyCode::Esc => {
@@ -1633,29 +1743,22 @@ impl App {
             KeyCode::Char('N') => {
                 self.conflict_idx = self.conflict_idx.saturating_sub(1);
             }
-            KeyCode::Char('o') => {
-                if let Some(&(_, theirs)) = pairs.get(self.conflict_idx) {
-                    self.push_undo("keep ours");
-                    match fold_core::merge::resolve_keep_ours(&mut self.vault, theirs) {
-                        Ok(()) => self.say("kept ours"),
-                        Err(e) => self.say(format!("error: {}", e)),
-                    }
-                }
-            }
-            KeyCode::Char('t') => {
+            KeyCode::Char(c @ ('o' | 't' | 'b')) => {
                 if let Some(&(ours, theirs)) = pairs.get(self.conflict_idx) {
-                    self.push_undo("keep theirs");
-                    match fold_core::merge::resolve_keep_theirs(&mut self.vault, ours, theirs) {
-                        Ok(()) => self.say("kept theirs"),
-                        Err(e) => self.say(format!("error: {}", e)),
-                    }
-                }
-            }
-            KeyCode::Char('b') => {
-                if let Some(&(_, theirs)) = pairs.get(self.conflict_idx) {
-                    self.push_undo("keep both");
-                    match fold_core::merge::resolve_keep_both(&mut self.vault, theirs) {
-                        Ok(()) => self.say("kept both"),
+                    let side = match c {
+                        'o' => "ours",
+                        't' => "theirs",
+                        _ => "both",
+                    };
+                    let name = self.named(ours);
+                    self.push_undo(&format!("keep {} for {}", side, name));
+                    let res = match c {
+                        'o' => fold_core::merge::resolve_keep_ours(&mut self.vault, theirs),
+                        't' => fold_core::merge::resolve_keep_theirs(&mut self.vault, ours, theirs),
+                        _ => fold_core::merge::resolve_keep_both(&mut self.vault, theirs),
+                    };
+                    match res {
+                        Ok(()) => self.say(format!("kept {} for {} · u undoes", side, name)),
                         Err(e) => self.say(format!("error: {}", e)),
                     }
                 }
@@ -1663,6 +1766,19 @@ impl App {
             KeyCode::Char('e') => {
                 if let Some(&(ours, _)) = pairs.get(self.conflict_idx) {
                     self.open_editor_on(ours);
+                }
+            }
+            // undo and redo as in the outline (§10.10); a pair put back is
+            // the one shown
+            KeyCode::Char(c @ ('u' | 'U')) => {
+                let before = self.conflict_blocks();
+                if c == 'u' {
+                    self.act_undo();
+                } else {
+                    self.act_redo();
+                }
+                if let Some(i) = self.conflict_blocks().iter().position(|b| !before.contains(b)) {
+                    self.conflict_idx = i;
                 }
             }
             _ => {}
@@ -1673,6 +1789,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        self.last_input = Some(Instant::now());
         let held = self.held_words.take();
         self.handle_key_inner(key);
         self.drop_held_words(held);
@@ -1869,9 +1986,7 @@ impl App {
     fn held(&mut self, key: &str, r: Option<NRef>) -> bool {
         let Some(r) = r else { return false };
         let Some(what) = self.change_words(key, r) else { return false };
-        let title = &self.vault.tree.node(self.vault.tree.resolved_child(r)).title;
-        let title = if title.is_empty() { "(untitled)" } else { title.as_str() };
-        let words = format!("“{}” is selected, press {} again to {}", title, key, what);
+        let words = format!("{} is selected, press {} again to {}", self.named(r), key, what);
         self.say(words.clone());
         self.held_words = Some(words);
         true
@@ -2587,6 +2702,8 @@ impl App {
             }
             Action::Help => self.mode = Mode::Help,
             Action::Quit => self.quit = true,
+            Action::Undo if self.mode == Mode::Conflict => self.key_conflict(key_of('u')),
+            Action::Redo if self.mode == Mode::Conflict => self.key_conflict(key_of('U')),
             Action::Undo => self.act_undo(),
             Action::Redo => self.act_redo(),
             Action::Capture => self.open_prompt("capture", PromptAction::CaptureText(false), String::new()),
@@ -2790,6 +2907,11 @@ pub fn help_text() -> Vec<Line<'static>> {
             }
         })
         .collect()
+}
+
+/// The status bar's count of unresolved pairs (§10.1), as its ⚠ reads.
+fn conflict_count(n: usize) -> String {
+    format!("⚠ {} conflict{}", n, if n == 1 { "" } else { "s" })
 }
 
 fn key_of(c: char) -> KeyEvent {

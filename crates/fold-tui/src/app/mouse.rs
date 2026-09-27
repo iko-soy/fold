@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 
 impl App {
     pub fn handle_mouse(&mut self, m: MouseEvent) {
+        // a pointer only passing over is no use of it (§10.7)
+        if m.kind != MouseEventKind::Moved {
+            self.last_input = Some(Instant::now());
+        }
         let held = match m.kind {
             MouseEventKind::Down(_) => self.held_words.take(),
             _ => None,

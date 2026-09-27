@@ -509,7 +509,13 @@ impl App {
         let conflicts = fold_core::merge::conflict_pairs(&self.vault).len();
         let mut right: Vec<(String, Style, Option<Action>)> = Vec::new();
         if conflicts > 0 {
-            right.push((format!(" ⚠ {} conflict{} ", conflicts, if conflicts == 1 { "" } else { "s" }), Style::default().fg(theme::WARN).bg(theme::BAR), Some(Action::ResolveConflicts)));
+            // lit while pairs that came in as the user worked wait (§10.7)
+            let style = if self.conflicts_waiting.is_empty() {
+                Style::default().fg(theme::WARN).bg(theme::BAR)
+            } else {
+                Style::default().fg(ratatui::style::Color::Black).bg(theme::WARN).add_modifier(Modifier::BOLD)
+            };
+            right.push((format!(" {} ", super::conflict_count(conflicts)), style, Some(Action::ResolveConflicts)));
         }
         if self.hide_done {
             right.push((" done hidden ".into(), Style::default().fg(theme::DIM).bg(theme::BAR), Some(Action::HideDone)));

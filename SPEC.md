@@ -855,8 +855,8 @@ Four regions, each of them live under the pointer:
   its buttons are *Done* and *Revert*.
 - The **status bar**: the last message on the left (at start, a hint at the gestures and
   `?`, cut down to *right-click for actions · ? help* where it doesn't fit); on the right
-  the unresolved conflicts (click to resolve), *done hidden* when `zd` is on (click to
-  show), the file, and the save state.
+  the unresolved conflicts (click to resolve; lit while new ones wait, §10.7), *done
+  hidden* when `zd` is on (click to show), the file, and the save state.
 
 The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
 bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor
@@ -1074,9 +1074,20 @@ and each saves the editor first.
 
 ### 10.7 Conflict view
 
-Entered when a `.sync-conflict-*` file is detected or a splice hits a changed span. Shows
-each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
-`t` keeps theirs, `b` keeps both, `e` edits, `n` / `N` next / previous, `Enter` finishes.
+Opened by the status bar's ⚠ count or *Resolve conflicts*, and on its own when a
+`.sync-conflict-*` file is detected or a splice hits a changed span — on the first new pair
+in the outline, and only from an outline at rest: normal mode, nothing open over it, no
+key, paste or click for 2 s. A busy user is not interrupted: the mode stays, the editor
+keeps its text, the status line names the node — *sync conflict in “NAS”: click ⚠ 1
+conflict to resolve* — and the ⚠ count is lit until the view opens, from a click or on its
+own once the outline is at rest. Opened on its own, for its first half second it ignores
+`o t b e`, meant for what was there before. Pairs that come in while it is open leave it
+on the pair it shows.
+
+It shows each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
+`t` keeps theirs, `b` keeps both, `e` edits, `n` / `N` next / previous, `u` / `U` undo / redo,
+`Enter` finishes. Each choice names its node — *kept theirs for “NAS” · u undoes* — and is
+one undo step.
 The view's top bar carries the same as buttons — *Previous*, *Next*, *Keep ours*, *Keep
 theirs*, *Keep both*, *Edit ours*, *Close* — and the two versions sit side by side, this
 device's on the left.

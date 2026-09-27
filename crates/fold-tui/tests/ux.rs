@@ -1,8 +1,9 @@
 //! What the app does over time, as `fold` runs it: the watcher, the
 //! autosave and the status line (§10.6, §11.2), where the selection goes
 //! when rows come and go (§8.5), keys on a selection the wheel left out
-//! of view (§10.1), and editor text no save can take when fold ends or
-//! reverts (§10.6).
+//! of view (§10.1), editor text no save can take when fold ends or
+//! reverts (§10.6), and sync conflicts that come in while you work
+//! (§10.7).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -605,4 +606,192 @@ fn ending_fold_with_text_a_save_was_refused_for_keeps_it_in_the_trash() {
     assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "# Scrub cadence weekly\n\n- monthly\n- [ ] scrub now\n");
     // and the other program's change stays
     assert_eq!(root(&d), "# Scrub cadence\n\n- monthly, from the phone\n- [ ] scrub now\n");
+}
+
+// ------------------------------------------------------------ sync conflicts
+
+/// Conflict block ids that list first and last: the view lists pairs in
+/// the order of their blocks' files (§12.5), and a merge names its blocks
+/// by fresh ids.
+const FIRST: &str = "bacbec-bacbec-bacbec-bacbec";
+const LAST: &str = "worzod-worzod-worzod-worzod";
+
+/// A small homelab vault. With `old`, a pair left from an earlier sync
+/// conflict (§12.5) on the flaky switch, its conflict block under that id.
+fn homelab(old: Option<&str>) -> tempfile::TempDir {
+    let embed = old.map(|id| format!("![[{}]]\n", id)).unwrap_or_default();
+    let d = vault(&format!(
+        "# Homelab\n\n## NAS\n\nMirrored pairs.\n\n## Networking\n\n- [ ] Replace the flaky switch\n{}- [ ] Label the cables\n",
+        embed
+    ));
+    if let Some(id) = old {
+        let prefix = id.split('-').next().unwrap();
+        std::fs::write(
+            d.path().join(format!("{}~replace-the-flaky-switch.md", prefix)),
+            format!("---\nid: {}\nconflict: \"PHONE 20260926-090000\"\n---\n\n- [x] Replace the flaky switch\n", id),
+        )
+        .unwrap();
+    }
+    d
+}
+
+/// Syncthing's copy of root.md from a phone that changed NAS's text and
+/// checked the cables: two pairs once merged.
+fn phone_copy(d: &tempfile::TempDir) {
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260927-100000-PHONE.md"),
+        "# Homelab\n\n## NAS\n\nMirrored pairs, no raidz.\n\n## Networking\n\n- [ ] Replace the flaky switch\n- [x] Label the cables\n",
+    )
+    .unwrap();
+}
+
+fn pairs(app: &mut App) -> usize {
+    fold_core::merge::conflict_pairs(app.vault_mut()).len()
+}
+
+/// Whether the status bar's ⚠ count is lit, as it is while pairs that came
+/// in as you worked wait to be seen.
+fn lit(app: &mut App) -> bool {
+    let (w, h) = (120, 32);
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer();
+    // the count is on the right; the message on the left may name it too
+    let badge = (0..w).rev().map(|x| &b[(x, h - 1)]).find(|c| c.symbol() == "⚠").expect("no ⚠ in the status bar");
+    badge.bg != b[(0, h - 1)].bg
+}
+
+#[test]
+fn a_sync_conflict_while_typing_leaves_the_editor_open_and_the_keys_in_it() {
+    let d = homelab(None);
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    // a key every 120 ms, the main loop running between them; the phone's
+    // copy lands mid-word
+    let type_slowly = |app: &mut App, text: &str| {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+            std::thread::sleep(Duration::from_millis(120));
+            app.tick();
+        }
+    };
+    type_slowly(&mut app, " bot");
+    phone_copy(&d);
+    type_slowly(&mut app, "tom note, both boot targets");
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was not taken in");
+    // o, t, b and e went on typing: no pair was picked unseen
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(pairs(&mut app), 2);
+    let s = status_line(&mut app);
+    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ 2 conflicts to resolve"), "{}", s);
+    assert!(lit(&mut app));
+    app.handle_key(key(KeyCode::Esc));
+    assert!(has_line(&d, "Mirrored pairs. bottom note, both boot targets"), "{}", root(&d));
+    // the ⚠ opens the view on the first of them, and it takes o at once
+    assert!(lit(&mut app));
+    click_button(&mut app, Action::ResolveConflicts);
+    assert_eq!(app.mode_pub(), "conflict");
+    assert!(!lit(&mut app));
+    assert!(screen(&mut app).contains("Mirrored pairs, no raidz."));
+    press(&mut app, "o");
+    assert_eq!(pairs(&mut app), 1);
+}
+
+#[test]
+fn pairs_that_came_in_while_busy_open_once_the_outline_is_idle() {
+    let d = homelab(Some(FIRST));
+    let mut app = App::new(d.path()).unwrap();
+    assert_eq!(pairs(&mut app), 1);
+    press(&mut app, "j");
+    phone_copy(&d);
+    app.reload_external();
+    // a key a moment ago: the outline stays
+    assert_eq!(app.mode_pub(), "normal");
+    let s = status(&mut app);
+    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ 3 conflicts to resolve"), "{}", s);
+    assert!(lit(&mut app));
+    assert_eq!(idle(&mut app, 1500), 0);
+    assert_eq!(app.mode_pub(), "normal");
+    // two seconds without a key: the view opens on NAS, not on the pair
+    // left from before, which is listed first
+    idle(&mut app, 1000);
+    assert_eq!(app.mode_pub(), "conflict");
+    let s = screen(&mut app);
+    assert!(s.contains("Mirrored pairs, no raidz.") && !s.contains("flaky"), "{}", s);
+    assert!(!lit(&mut app));
+    // closed, it stays closed
+    app.handle_key(key(KeyCode::Esc));
+    std::thread::sleep(Duration::from_millis(2100));
+    app.tick();
+    assert_eq!(app.mode_pub(), "normal");
+}
+
+#[test]
+fn a_view_that_opens_on_its_own_takes_no_side_for_half_a_second() {
+    let d = homelab(None);
+    let mut app = App::new(d.path()).unwrap();
+    phone_copy(&d);
+    // idle in the outline: the view opens at once
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "conflict");
+    let s = status(&mut app);
+    assert!(s.contains("sync conflicts in “NAS” and 1 more"), "{}", s);
+    // keys meant for the outline pick nothing, nor edit
+    press(&mut app, "otbe");
+    assert_eq!(app.mode_pub(), "conflict");
+    assert_eq!(pairs(&mut app), 2);
+    std::thread::sleep(Duration::from_millis(550));
+    press(&mut app, "t");
+    assert_eq!(pairs(&mut app), 1);
+    assert!(has_line(&d, "Mirrored pairs, no raidz."), "{}", root(&d));
+}
+
+#[test]
+fn resolving_a_pair_names_its_node_and_u_in_the_view_undoes_it() {
+    let d = homelab(None);
+    let mut app = App::new(d.path()).unwrap();
+    phone_copy(&d);
+    fold_core::merge::merge_sync_conflicts(app.vault_mut(), false).unwrap();
+    app.enter_conflict_view();
+    let shown = |app: &mut App| if screen(app).contains("Mirrored pairs, no raidz.") { "NAS" } else { "Label the cables" };
+    let first = shown(&mut app);
+    press(&mut app, "t");
+    assert!(status(&mut app).contains(&format!("kept theirs for “{}” · u undoes", first)), "{}", status(&mut app));
+    // u, in the view, puts the pair back and shows it
+    press(&mut app, "u");
+    assert_eq!(pairs(&mut app), 2);
+    assert_eq!(app.mode_pub(), "conflict");
+    assert_eq!(shown(&mut app), first);
+    assert!(status(&mut app).contains(&format!("undone: keep theirs for “{}”", first)), "{}", status(&mut app));
+    // the buttons say the same
+    click_button(&mut app, Action::ConflictOurs);
+    assert!(status(&mut app).contains(&format!("kept ours for “{}” · u undoes", first)), "{}", status(&mut app));
+    let second = shown(&mut app);
+    assert_ne!(second, first);
+    press(&mut app, "b");
+    assert!(status(&mut app).contains(&format!("kept both for “{}” · u undoes", second)), "{}", status(&mut app));
+    assert_eq!(pairs(&mut app), 0);
+}
+
+#[test]
+fn pairs_that_come_in_while_the_view_is_open_leave_it_on_the_pair_it_shows() {
+    let d = homelab(Some(LAST));
+    let mut app = App::new(d.path()).unwrap();
+    app.enter_conflict_view();
+    assert!(screen(&mut app).contains("flaky"));
+    phone_copy(&d);
+    app.reload_external();
+    // listed after the new ones, the pair on screen stays on screen
+    assert_eq!(app.mode_pub(), "conflict");
+    assert_eq!(pairs(&mut app), 3);
+    let s = screen(&mut app);
+    assert!(s.contains("Conflict 3 of 3") && s.contains("flaky"), "{}", s);
+    press(&mut app, "o");
+    assert!(!root(&d).contains(LAST), "{}", root(&d));
+    assert_eq!(pairs(&mut app), 2);
 }
