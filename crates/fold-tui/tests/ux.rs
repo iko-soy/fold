@@ -594,7 +594,33 @@ fn a_change_from_outside_while_editing_saves_the_editor_first_and_says_both() {
     assert_eq!(root(&d), "# NAS!\n\n- disks\n\n# Inbox\n\n- [ ] a\n- [ ] phone-added task\n");
     // the typing is not what came from outside
     let s = status_line(&mut app);
-    assert!(s.contains("↻ changed outside fold: Inbox (+1 item) · your typing was saved first"), "{}", s);
+    assert!(s.contains("↻ typing saved; changed outside fold: Inbox (+1 item)"), "{}", s);
+}
+
+#[test]
+fn where_the_bar_is_short_what_came_in_gives_way_to_the_typing_saved_for_it() {
+    // 80×24 while editing: the EDIT badge leaves 53 columns, and with done
+    // hidden 40
+    for hide in [false, true] {
+        let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+        let mut app = App::new(d.path()).unwrap();
+        app.set_edit_keys(EditKeys::Normal);
+        if hide {
+            press(&mut app, "zd");
+        }
+        app.handle_key(key(KeyCode::Char('e')));
+        app.handle_key(key(KeyCode::End));
+        press(&mut app, " typed");
+        std::fs::write(d.path().join("root.md"), root(&d) + "- [ ] phone note\n").unwrap();
+        app.reload_external();
+        assert_eq!(app.mode_pub(), "edit");
+        let s = status80(&mut app);
+        if hide {
+            assert!(s.starts_with("  EDIT  ↻ typing saved; changed outside fold: I…  done hidden "), "{}", s);
+        } else {
+            assert!(s.starts_with("  EDIT  ↻ typing saved; changed outside fold: Inbox (+1 item)  root.md "), "{}", s);
+        }
+    }
 }
 
 /// The main loop until it has run a reload, for up to 5 s.
@@ -682,7 +708,7 @@ fn a_new_copy_that_changes_nothing_is_not_announced() {
     until_reload(&mut app);
     assert_eq!(app.mode_pub(), "edit");
     let s = said(&mut app);
-    assert!(!s.contains("changed outside") && !s.contains("saved first"), "{}", s);
+    assert!(!s.contains("changed outside") && !s.contains("typing saved"), "{}", s);
     assert_eq!(s, editing);
 }
 
@@ -1518,6 +1544,32 @@ fn where_the_bar_is_short_the_news_of_a_sync_conflict_cuts_the_name_first() {
     assert_eq!(app.mode_pub(), "edit");
     let s = status80(&mut app);
     assert!(s.contains(" EDIT  sync conflicts in “…” and 1 more: "), "{}", s);
+}
+
+#[test]
+fn news_of_a_sync_conflict_while_typing_says_what_to_do_and_no_more() {
+    // the typing on NAS is saved before the merge, as the save state on the
+    // right says; the news keeps to the pairs and what to do
+    let d = homelab(None);
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(EditKeys::Normal);
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, " typed");
+    phone_copy(&d);
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "edit");
+    assert!(has_line(&d, "Mirrored pairs. typed"), "{}", root(&d));
+    // 80×24: the name gives way first, as with nothing typed
+    let s = status80(&mut app);
+    assert!(s.starts_with("  EDIT  sync conflicts in “…” and 1 more: cli…  ⚠ 2 conflicts "), "{}", s);
+    // 120 columns: whole, the name too
+    let s = status(&mut app);
+    assert!(s.starts_with("  EDIT  sync conflicts in “NAS” and 1 more: click ⚠ to resolve  "), "{}", s);
+    assert!(!s.contains("typing"), "{}", s);
 }
 
 #[test]

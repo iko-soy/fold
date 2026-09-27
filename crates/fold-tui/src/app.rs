@@ -554,7 +554,7 @@ impl App {
         // change to nothing it shows leaves it as it is (§5.2)
         self.save_editor();
         let edit = self.editor_key().map(|k| (k, self.editor_files()));
-        let mut saved = std::mem::replace(&mut self.status, status);
+        let saved = std::mem::replace(&mut self.status, status);
         let typed = saved.is_empty() && typed && !self.editor_dirty();
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
@@ -566,7 +566,9 @@ impl App {
         // took in without a pair is said as any change is, from the vault
         // as the merge found it: typing saved first is not part of it. A
         // copy that brings nothing in, one left alone or the same as its
-        // file, says nothing, as at startup
+        // file, says nothing, as at startup. That the save took the typing
+        // is said ahead of what came in, which gives way where the bar is
+        // short; news of a pair, or an error, says no more (§10.6)
         let mut came_in = true;
         // listed before the merge: a copy that lands while it runs is new
         // to the next reload, not seen with these
@@ -577,12 +579,12 @@ impl App {
                 let now = tops(&self.vault);
                 came_in = !same_tops(&was, &now);
                 if came_in {
-                    self.say(changed_outside(&was, &now));
+                    self.say(changed_outside(&was, &now, typed));
                 }
             }
         } else {
             match self.vault.reload() {
-                Ok(()) => self.say(changed_outside(&before, &after.unwrap_or_else(|_| tops(&self.vault)))),
+                Ok(()) => self.say(changed_outside(&before, &after.unwrap_or_else(|_| tops(&self.vault)), typed)),
                 Err(e) => self.say(format!("reload error: {}", e)),
             }
         }
@@ -593,12 +595,8 @@ impl App {
         let edit = edit.filter(|(key, files)| {
             *files != self.editor_files() && !self.editor_takes_in(key) && self.drop_cut_blocks()
         });
-        // that the save took the typing is said beside what came in; with
-        // nothing come in it is an editor's save as any, which says nothing,
-        // and a refused one says why on its own
-        if typed && came_in {
-            saved = "your typing was saved first".into();
-        }
+        // a refused save says why beside what came in, or on its own where
+        // nothing came in
         if !saved.is_empty() {
             let msg = if came_in { format!("{} · {}", self.status, saved) } else { saved };
             self.say(msg);
@@ -734,7 +732,7 @@ impl App {
         if !self.merge_conflict_files() {
             let now = tops(&self.vault);
             if !same_tops(&was, &now) {
-                self.say(changed_outside(&was, &now));
+                self.say(changed_outside(&was, &now, false));
             }
         }
     }
@@ -3754,7 +3752,9 @@ fn same_tops(before: &[Top], after: &[Top]) -> bool {
 
 /// What a reload took in, in outline terms (§11.2): each top-level node
 /// that changed, came or went, and the items or sections it gained or lost.
-fn changed_outside(before: &[Top], after: &[Top]) -> String {
+/// With `typed`, that the editor's typing was saved first comes ahead of
+/// them, which give way where the status bar is short (§10.6).
+fn changed_outside(before: &[Top], after: &[Top], typed: bool) -> String {
     let mut parts = Vec::new();
     for a in after {
         match before.iter().find(|b| b.key == a.key) {
@@ -3777,10 +3777,11 @@ fn changed_outside(before: &[Top], after: &[Top]) -> String {
     for b in before.iter().filter(|b| !after.iter().any(|a| a.key == b.key)) {
         parts.push(format!("{} (removed)", b.title));
     }
+    let lead = if typed { "↻ typing saved; changed outside fold" } else { "↻ changed outside fold" };
     match parts.len() {
-        0 => "↻ changed outside fold".into(),
-        n if n > 3 => format!("↻ changed outside fold: {} and {} more", parts[..2].join(", "), n - 2),
-        _ => format!("↻ changed outside fold: {}", parts.join(", ")),
+        0 => lead.into(),
+        n if n > 3 => format!("{}: {} and {} more", lead, parts[..2].join(", "), n - 2),
+        _ => format!("{}: {}", lead, parts.join(", ")),
     }
 }
 

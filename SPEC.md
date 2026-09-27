@@ -1060,7 +1060,9 @@ app keeps track. Blocks are saved on their own:
 
 A save shows in the status bar's save state (§10.1), not as a message, but for `:w` and
 `Ctrl-S`, which are asked for and answer *saved*, and one that an outside change forced,
-which the news of that change mentions (§11.2).
+which the news of what came in mentions first, so that where the bar is short the list
+of it gives way: *↻ typing saved; changed outside fold: Inbox (+1 item)* (§11.2). News
+of a sync conflict says what to do and no more (§10.7).
 
 The pane's border shows the title of the block the cursor is in, *⚠ conflict copy from
 PHONE* after it in a conflict copy (§12.5), and a dot while something is unsaved, and lines
