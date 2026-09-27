@@ -1543,10 +1543,10 @@ fn z_and_g_show_what_can_follow_and_a_wrong_second_key_says_so() {
     press(&mut app, "z");
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(said(&mut app), "g Enter does nothing · after g press g");
-    // zd's words say what it would do now
+    // zd's words say what it would do now, and lead while done is hidden
     press(&mut app, "zd");
     press(&mut app, "z");
-    assert_eq!(said(&mut app), "z… p pane · w wrap · d show done · r raw · a archive");
+    assert_eq!(said(&mut app), "z… d show done · p pane · w wrap · r raw · a archive");
     app.handle_key(key(KeyCode::Esc));
     // [[ and ]] in the reading pane
     app.show_reading = true;
@@ -1665,4 +1665,21 @@ fn a_hint_too_long_for_the_bar_loses_whole_parts_and_keeps_the_way_to_help() {
     let bar: String = (0..80).map(|x| b[(x, 23)].symbol()).collect();
     assert!(bar.contains("n new · e edit · x done · m menu · ? help  "), "{}", bar);
     assert!(bar.contains("done hidden") && !bar.contains('…'), "{}", bar);
+}
+
+#[test]
+fn a_short_bar_keeps_the_key_that_shows_hidden_done_tasks_in_the_z_hint() {
+    // 80 columns, with the conflicts and done hidden on the right
+    let (_d, mut app) = lab();
+    press(&mut app, "zd");
+    app.say("");
+    press(&mut app, "z");
+    let bar = status80(&mut app);
+    assert!(bar.contains("⚠ 2 conflicts") && bar.contains("done hidden"), "{}", bar);
+    assert!(bar.contains("d show done") && bar.contains("p pane"), "{}", bar);
+    assert_eq!(bar.matches('…').count(), 1, "{}", bar);
+    // Esc lets z go; zd shows them again
+    app.handle_key(key(KeyCode::Esc));
+    press(&mut app, "zd");
+    assert!(!status80(&mut app).contains("done hidden"));
 }

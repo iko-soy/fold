@@ -876,7 +876,8 @@ Four regions, each of them live under the pointer:
   (*error: …*, *can't …*, *… refused: …*) stays until a key or click that comes once it
   is that old. The greeting is the outline's, and gives way at once to the editor's or a
   popup's keys. While a key sequence is half typed, the bar says what can follow it:
-  *z… p pane · w wrap · d hide done · r raw · a archive*.
+  *z… p pane · w wrap · d hide done · r raw · a archive*, cut down from its end where it
+  doesn't fit; with done hidden, *d show done* comes first.
 
 The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
 bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor

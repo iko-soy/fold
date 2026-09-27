@@ -221,12 +221,14 @@ fn fit_named(s: &str, w: usize) -> String {
 }
 
 /// Shorten a hint of `·`-separated parts to `w` columns by whole parts:
-/// the first and the last (the way on, as *? help* or *Esc close*) stay,
-/// those before the last go first.
-fn fit_parts(s: &str, w: usize) -> String {
+/// the first stays, and the last where it is the way on (as *? help* or
+/// *Esc close*); those before it go first. What can follow a key has no
+/// way on: its keys go from the end.
+fn fit_parts(s: &str, w: usize, way_on: bool) -> String {
     let mut parts: Vec<&str> = s.split(" · ").collect();
-    while parts.join(" · ").width() > w && parts.len() > 2 {
-        parts.remove(parts.len() - 2);
+    let keep = if way_on { 2 } else { 1 };
+    while parts.join(" · ").width() > w && parts.len() > keep {
+        parts.remove(parts.len() - keep);
     }
     parts.join(" · ")
 }
@@ -581,7 +583,7 @@ impl App {
         let msg_room = rx.saturating_sub(x + 1);
         let (msg, hint) = self.status_left();
         let msg = if hint {
-            fit_parts(&msg, msg_room as usize)
+            fit_parts(&msg, msg_room as usize, self.pending.is_none())
         } else if msg == super::HINT && super::HINT.width() > msg_room as usize {
             super::HINT_SHORT.to_string()
         } else {

@@ -387,10 +387,13 @@ impl App {
     }
 
     /// What can follow the first key of a sequence (§10.3): each second
-    /// key, and what it does, in the status bar's words.
+    /// key, and what it does, in the status bar's words, the one to keep
+    /// longest where the bar is short first.
     fn follows(&self, first: char) -> Vec<(char, &'static str)> {
         match first {
-            'z' => vec![('p', "pane"), ('w', "wrap"), ('d', if self.hide_done { "show done" } else { "hide done" }), ('r', "raw"), ('a', "archive")],
+            // done hidden, the way back to them leads (§10.1)
+            'z' if self.hide_done => vec![('d', "show done"), ('p', "pane"), ('w', "wrap"), ('r', "raw"), ('a', "archive")],
+            'z' => vec![('p', "pane"), ('w', "wrap"), ('d', "hide done"), ('r', "raw"), ('a', "archive")],
             'g' => vec![('g', "top")],
             '[' => vec![('[', "previous heading")],
             ']' => vec![(']', "next heading")],
