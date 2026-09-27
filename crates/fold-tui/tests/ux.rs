@@ -1431,6 +1431,67 @@ fn enter_on_a_copy_s_heading_in_the_reading_pane_zooms_into_it_unfolded() {
     assert_eq!(app.rows().len(), 3, "{}", s);
 }
 
+/// fold started again on `app`'s view, as it remembers it (§10.1).
+fn restarted(d: &tempfile::TempDir, app: &App) -> App {
+    let mut again = App::new(d.path()).unwrap();
+    again.apply_view(fold_tui::app::View::parse(&app.view().to_text()).unwrap(), false);
+    again
+}
+
+#[test]
+fn a_zoom_on_a_conflict_copy_shows_what_is_in_it_after_a_restart() {
+    let (d, mut app) = lab();
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.rows().len(), 3);
+    // the zoom is remembered, the copy's fold is not: it starts unfolded
+    let mut again = restarted(&d, &app);
+    let s = screen(&mut again);
+    assert!(s.contains("▾ NAS ⚠") && s.contains("Snapshot policy"), "{}", s);
+    assert_eq!(again.rows().len(), 3, "{}", s);
+    // folded there by hand, it stays folded through a change from outside
+    press(&mut again, "h");
+    assert_eq!(again.rows().len(), 1);
+    again.reload_external();
+    assert_eq!(again.rows().len(), 1, "{}", screen(&mut again));
+}
+
+#[test]
+fn zooming_out_or_a_breadcrumb_to_a_conflict_copy_shows_what_is_in_it() {
+    let (d, mut app) = lab();
+    // zoomed into a task in the copy when fold ends
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+    app.handle_key(key(KeyCode::Enter));
+    select(&mut app, "Snapshot policy");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(screen(&mut app).contains("fold › Homelab › NAS › Snapshot policy"), "{}", screen(&mut app));
+    // Backspace, in the outline or the reading pane, lands on the copy
+    for reading in [false, true] {
+        let mut again = restarted(&d, &app);
+        if reading {
+            again.handle_key(key(KeyCode::Tab));
+        }
+        again.handle_key(key(KeyCode::Backspace));
+        let s = screen(&mut again);
+        assert!(s.contains("▾ NAS ⚠") && s.contains("Replace fan"), "{}", s);
+        assert_eq!(again.rows().len(), 3, "{}", s);
+    }
+    // so does its breadcrumb
+    let mut again = restarted(&d, &app);
+    let b = frame(&mut again);
+    let (x, y) = find(&b, "NAS › Snapshot policy").unwrap_or_else(|| panic!("{}", text(&b)));
+    click_at(&mut again, x, y, MouseButton::Left);
+    let s = screen(&mut again);
+    assert!(s.contains("▾ NAS ⚠") && s.contains("Replace fan"), "{}", s);
+    assert_eq!(again.rows().len(), 3, "{}", s);
+    // and so does deleting the task: the zoom falls back to the copy
+    let mut again = restarted(&d, &app);
+    press(&mut again, "d");
+    let s = screen(&mut again);
+    assert!(s.contains("▾ NAS ⚠") && s.contains("Replace fan"), "{}", s);
+    assert_eq!(again.rows().len(), 2, "{}", s);
+}
+
 #[test]
 fn move_to_leaves_conflict_copies_out_and_other_pickers_mark_them() {
     let (_d, mut app) = lab();

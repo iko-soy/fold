@@ -784,7 +784,13 @@ impl App {
         }
     }
 
+    /// A copy's own fold hides nothing it is zoomed into to show (§10.1),
+    /// however the zoom gets there: Enter, Backspace, a breadcrumb or the
+    /// view remembered.
     fn set_zoom(&mut self, r: Option<NRef>) {
+        if let Some(z) = r.filter(|&z| self.vault.tree.node(z).conflict().is_some()) {
+            self.set_folded(z, false);
+        }
         self.zoom_root = r;
         self.zoom_anchor = None;
     }
@@ -796,9 +802,16 @@ impl App {
         self.zoom_anchor = self.zoom_root.map(|z| self.vault.key_of(z));
     }
 
-    /// The verb is over: the zoom it found by key holds.
+    /// The verb is over: the zoom it found by key holds, with the fold it
+    /// had; one that fell back to an ancestor lands there as any zoom does.
     fn settle_zoom(&mut self) {
-        self.set_zoom(self.zoom());
+        let z = self.zoom();
+        if self.zoom_anchor.is_some() && z.map(|z| self.vault.key_of(z)) != self.zoom_anchor {
+            self.set_zoom(z);
+        } else {
+            self.zoom_root = z;
+            self.zoom_anchor = None;
+        }
     }
 
     /// A node's parent in the outline, `None` at the top: a block root's
@@ -3137,10 +3150,6 @@ impl App {
     /// Zoom into a node: the reading pane shows it (§10.3 `Enter`).
     fn zoom_into(&mut self, r: NRef) {
         if self.vault.tree.node(r).kind != Kind::Root {
-            // a copy's own fold hides nothing it is zoomed into to show
-            if self.vault.tree.node(r).conflict().is_some() {
-                self.set_folded(r, false);
-            }
             self.set_zoom(Some(r));
             self.cursor = 0;
             self.read_cursor = 0;
