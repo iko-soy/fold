@@ -929,8 +929,10 @@ title ends in `…`.
 While dragging, the target row is highlighted (*into*) or marked with `▶` and a bar
 (*before*), the row being moved is dimmed, the status bar spells out the move, and the pane
 scrolls when the pointer reaches its edge. Both drops are clamped by the ordering rule
-(§3.1) and say so when they are; a drop into the node's own subtree is refused. One drag is
-one undo step.
+(§3.1) and say so when they are; a drop into the node's own subtree is refused, and so is
+one into a conflict copy it is not in, which keeping ours trashes (§12.5): over the copy's
+title or a row in it, nothing is marked and the status bar says why. One drag is one undo
+step.
 
 **No key acts out of sight.** The wheel leaves the selection, and the reading pane's cursor,
 where they are, even out of view. A key that acts on one — in the outline
@@ -1365,8 +1367,8 @@ against the sibling before it, and the status line counts them. Resolving a pair
 
 Unresolved pairs are ordinary blocks; they sync to every device and are visible in any
 editor, and can be lived with indefinitely. The app marks each copy `⚠` and folds it,
-leaves its tasks out of the counts, and offers it as no *Move to…* destination; `>` puts
-nothing under it (§10.1, §10.3). No verb puts a node between a copy and the node it
+leaves its tasks out of the counts, and offers it as no *Move to…* destination; `>` and a
+drop put nothing under it (§10.1, §10.3). No verb puts a node between a copy and the node it
 follows, which the copy would then pair with, nor takes one away from the other: `J`/`K`,
 *Move to…*, `za`, `>`, `<` and a drop move the two as one, from either side, and into
 neither; `d` on the node deletes its copies with it, and on a copy that copy alone, as

@@ -7,6 +7,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use fold_core::ops::{self, Drop};
 use fold_core::parse::Kind;
 use fold_core::reading::LineRef;
+use fold_core::tree::NRef;
 use std::time::{Duration, Instant};
 
 impl App {
@@ -262,9 +263,16 @@ impl App {
                 .map(|&(j, _, title_x)| (j, if x < title_x { Drop::Before } else { Drop::Into })),
             _ => None,
         };
-        self.ui.drop = target.filter(|(j, _)| *j != from);
+        let target = target.filter(|(j, _)| *j != from);
+        // nor into a conflict copy, which keeping ours trashes (§12.5): the
+        // copy is no target, and the bar says why
+        let into_copy = target.is_some_and(|(j, how)| {
+            rows.get(from).zip(rows.get(j)).is_some_and(|(f, t)| self.drop_into_copy(f.nref, t.nref, how))
+        });
+        self.ui.drop = target.filter(|_| !into_copy);
         let name = |i: usize| rows.get(i).map(|r| self.vault.tree.node(r.nref).title.clone()).unwrap_or_default();
         let msg = match self.ui.drop {
+            _ if into_copy => format!("can't move “{}” into a conflict copy", name(from)),
             Some((j, Drop::Before)) => format!("move “{}” before “{}”", name(from), name(j)),
             Some((j, Drop::Into)) => format!("move “{}” into “{}”", name(from), name(j)),
             None => format!("moving “{}” — drop on a title to nest, left of it to place before", name(from)),
@@ -287,6 +295,11 @@ impl App {
         }
         let rows = self.rows();
         let (Some(from), Some(to)) = (press.row.and_then(|i| rows.get(i)), rows.get(j)) else { return };
+        // the rows may have changed since the drag last said where it goes
+        if self.drop_into_copy(from.nref, to.nref, how) {
+            self.say(format!("can't move {} into a conflict copy", self.named(from.nref)));
+            return;
+        }
         // a drop is an outline verb: the editor saves first (§10.6), which
         // re-parses what it wrote, so both nodes are found again by key
         let keys = (self.vault.key_of(from.nref), self.vault.key_of(to.nref));
@@ -329,6 +342,19 @@ impl App {
             Err(e) => self.say(format!("can't move: {}", e)),
         }
         self.editor_after_write(edit);
+    }
+
+    /// Whether dropping `r` on `target` puts it into a conflict copy it is
+    /// not in already (§12.5): onto the copy's title, or onto or left of a
+    /// row in it. Left of the copy's own row, it goes after the copy.
+    fn drop_into_copy(&self, r: NRef, target: NRef, how: Drop) -> bool {
+        let tree = &self.vault.tree;
+        let own = self.chain(tree.resolved_child(r));
+        let mut dest = self.chain(tree.resolved_child(target));
+        if how == Drop::Before {
+            dest.pop();
+        }
+        dest.iter().any(|c| tree.node(*c).conflict().is_some() && !own.contains(c))
     }
 
     fn mouse_right(&mut self, x: u16, y: u16) {
@@ -387,7 +413,7 @@ impl App {
     }
 
     /// The node a reading-pane line belongs to.
-    fn doc_line_node(&self, i: usize) -> Option<fold_core::tree::NRef> {
+    fn doc_line_node(&self, i: usize) -> Option<NRef> {
         let doc = self.reading_doc();
         match fold_core::reading::node_at(&doc, i) {
             Some(LineRef::Title(r)) | Some(LineRef::Body(r)) | Some(LineRef::Embed(r)) => Some(r),

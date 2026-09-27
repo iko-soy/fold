@@ -2253,6 +2253,57 @@ fn a_drag_an_indent_or_an_outdent_takes_a_node_s_conflict_copy_with_it() {
 }
 
 #[test]
+fn a_drop_puts_nothing_into_a_conflict_copy() {
+    // dropped on the title of the copy of NAS, Networking would go out of
+    // sight under its fold, and keeping ours would trash it with the copy
+    // (§12.5): the drag says so while it is over the copy, and letting go
+    // does nothing
+    let (d, mut app) = lab();
+    let before = root(&d);
+    draw(&mut app);
+    let from = app.hit_pos(Hit::Row(row_of(&app, "Networking"))).unwrap();
+    let to = app.hit_pos(Hit::Row(copy_row(&app, "NAS"))).unwrap();
+    let at = |kind, (column, row)| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+    app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), to));
+    assert_eq!(said(&mut app), "can't move “Networking” into a conflict copy");
+    app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), to));
+    assert_eq!(said(&mut app), "can't move “Networking” into a conflict copy");
+    assert_eq!(root(&d), before);
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    // nor onto a row in the copy unfolded, or left of one
+    app.cursor = copy_row(&app, "NAS");
+    press(&mut app, "l");
+    let (from, to) = (row_of(&app, "Networking"), copy_row(&app, "Snapshot policy"));
+    drag(&mut app, from, to, true);
+    assert_eq!(said(&mut app), "can't move “Networking” into a conflict copy");
+    let (from, to) = (row_of(&app, "Label the cables"), copy_row(&app, "Replace fan"));
+    drag(&mut app, from, to, false);
+    assert_eq!(said(&mut app), "can't move “Label the cables” into a conflict copy");
+    assert_eq!(root(&d), before);
+    // a node in the copy still moves within it, as > moves it
+    let (from, to) = (copy_row(&app, "Replace fan"), copy_row(&app, "Snapshot policy"));
+    drag(&mut app, from, to, false);
+    assert_eq!(said(&mut app), "moved “Replace fan”");
+    assert_eq!(copy_row(&app, "Replace fan") + 1, copy_row(&app, "Snapshot policy"), "{}", screen(&mut app));
+    // the rows changing under a drag: the row it lets go on is now in the
+    // copy, and that is refused too
+    let (d, mut app) = lab();
+    let before = root(&d);
+    draw(&mut app);
+    let from = app.hit_pos(Hit::Row(row_of(&app, "Replace fan"))).unwrap();
+    let to = app.hit_pos(Hit::Row(row_of(&app, "Networking"))).unwrap();
+    app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), to));
+    assert_eq!(said(&mut app), "move “Replace fan” into “Networking”");
+    app.cursor = copy_row(&app, "NAS");
+    press(&mut app, "l");
+    app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), to));
+    assert_eq!(said(&mut app), "can't move “Replace fan” into a conflict copy");
+    assert_eq!(root(&d), before);
+}
+
+#[test]
 fn a_node_in_a_conflict_pair_keeps_its_spelling_until_it_is_resolved() {
     // a heading made a bullet goes before the headings, and would leave
     // its copy to pair with the node before it (§12.5)
