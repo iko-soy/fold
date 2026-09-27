@@ -118,6 +118,9 @@ pub struct Ui {
     pub outline_view: usize,
     pub reading_view: usize,
     pub reading_len: usize,
+    /// The doc line each screen row of the reading pane showed, `None` for
+    /// the property header and raw source.
+    pub read_rows: Vec<Option<usize>>,
     /// Highlighted code blocks by (info string, code).
     pub highlight_cache: std::collections::HashMap<(String, String), Vec<Vec<Span<'static>>>>,
 }
@@ -162,6 +165,13 @@ fn follow(scroll: &mut usize, cursor: usize, moved: bool, view: usize, len: usiz
         }
     }
     *scroll = (*scroll).min(len.saturating_sub(view.max(1)));
+}
+
+/// Whether line `at` of `len` is in a view of `view` lines scrolled to
+/// `scroll`, clamped as `follow` clamps it.
+pub(super) fn in_view(scroll: usize, at: usize, view: usize, len: usize) -> bool {
+    let top = scroll.min(len.saturating_sub(view.max(1)));
+    at >= top && at < top + view
 }
 
 fn put(buf: &mut Buffer, x: u16, y: u16, s: &str, max: u16, style: Style) -> u16 {
@@ -789,6 +799,7 @@ impl App {
             }
         }
         self.ui.reading_len = rows.len();
+        self.ui.read_rows = rows.iter().map(|d| d.doc).collect();
         let cursor_row = rows.iter().position(|d| d.doc == Some(self.read_cursor)).unwrap_or(0);
         let moved = self.ui.last_read_cursor != Some(self.read_cursor);
         self.ui.last_read_cursor = Some(self.read_cursor);

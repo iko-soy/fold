@@ -903,6 +903,15 @@ scrolls when the pointer reaches its edge. Both drops are clamped by the orderin
 (§3.1) and say so when they are; a drop into the node's own subtree is refused. One drag is
 one undo step.
 
+**No key acts out of sight.** The wheel leaves the selection, and the reading pane's cursor,
+where they are, even out of view. A key that acts on one — in the outline
+`x t d s J K > < ~ za r p P`, `e a m y` and the folds; in the reading pane `x`, `Enter` and
+`e a m o` — first scrolls it back into view, a third of the way down. A key that changes
+nothing then acts; one that changes something stops there, and until the next key or click
+the status bar names the node: *“Replace fan” is selected, press d again to delete it*.
+Pressed again, with the node in view, it acts. The pointer acts where it points and is
+never held back.
+
 **The node menu** (right-click, `⋯`, or `m`) lists every action on a node, each with its key:
 *Edit · Zoom in · Properties… | New sibling · New child | Done / reopen · Task on / off ·
 Heading ↔ bullet · Make block | Move up · Move down · Indent · Outdent · Move to… · Archive |

@@ -1,9 +1,10 @@
 //! What the app does over time, as `fold` runs it: the watcher, the
-//! autosave and the status line (§10.6, §11.2), and where the selection
-//! goes when rows come and go (§8.5).
+//! autosave and the status line (§10.6, §11.2), where the selection goes
+//! when rows come and go (§8.5), and keys on a selection the wheel left
+//! out of view (§10.1).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use fold_tui::app::{Action, App, EditKeys};
+use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use std::time::{Duration, Instant};
@@ -315,4 +316,195 @@ fn hiding_done_keeps_the_reading_pane_on_its_node() {
     draw(&mut app);
     assert_eq!(selected(&app), "Atlas");
     assert_eq!(app.read_cursor_pub(), at, "the reading cursor went back to the top");
+}
+
+// ------------------------------------------------------------ out of view
+
+/// A list longer than the screen, as in the report: `# Tasks` and 80
+/// tasks under it.
+fn long_list() -> String {
+    let tasks: String = (1..=80).map(|i| format!("- [ ] task number {}\n", i)).collect();
+    format!("# Tasks\n\n{}", tasks)
+}
+
+fn has_line(d: &tempfile::TempDir, line: &str) -> bool {
+    root(d).lines().any(|l| l == line)
+}
+
+/// Draw a frame, as the app does after every event: the screen's text.
+fn screen(app: &mut App) -> String {
+    let (w, h) = (120, 32);
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol()).collect::<String>() + "\n").collect()
+}
+
+/// The status bar, as the next frame draws it.
+fn status(app: &mut App) -> String {
+    screen(app).lines().last().unwrap_or_default().to_string()
+}
+
+/// Turn the wheel over what the last frame drew for `hit`, `notches`
+/// times down (up if negative), a frame after each.
+fn wheel(app: &mut App, hit: Hit, notches: i32) {
+    let kind = if notches > 0 { MouseEventKind::ScrollDown } else { MouseEventKind::ScrollUp };
+    for _ in 0..notches.abs() {
+        screen(app);
+        let (x, y) = app.hit_pos(hit).unwrap_or_else(|| panic!("nothing drawn for {:?}", hit));
+        app.handle_mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+    screen(app);
+}
+
+/// Whether the last frame drew outline row `i`.
+fn shown(app: &App, i: usize) -> bool {
+    app.hit_pos(Hit::Row(i)).is_some()
+}
+
+#[test]
+fn a_key_that_changes_a_selection_out_of_view_shows_it_and_waits_for_a_second_press() {
+    let d = vault(&long_list());
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "jj");
+    assert_eq!(selected(&app), "task number 2");
+    wheel(&mut app, Hit::OutlinePane, 10);
+    assert!(!shown(&app, 2));
+    // the first x shows it and says what a second would do
+    press(&mut app, "x");
+    assert!(has_line(&d, "- [ ] task number 2"), "checked out of view");
+    let s = status(&mut app);
+    assert!(shown(&app, 2), "not brought into view");
+    assert!(s.contains("“task number 2” is selected, press x again to mark it done"), "{}", s);
+    press(&mut app, "x");
+    assert!(has_line(&d, "- [x] task number 2"));
+    // d likewise: nothing trashed until it is in view
+    wheel(&mut app, Hit::OutlinePane, 10);
+    press(&mut app, "d");
+    assert!(has_line(&d, "- [x] task number 2"), "deleted out of view");
+    let s = status(&mut app);
+    assert!(s.contains("“task number 2” is selected, press d again to delete it"), "{}", s);
+    press(&mut app, "d");
+    assert!(!root(&d).contains("task number 2\n"), "{}", root(&d));
+}
+
+#[test]
+fn a_selection_brought_into_view_sits_a_third_of_the_way_down_until_the_wheel_moves_it_again() {
+    let d = vault(&long_list());
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "task number 40");
+    wheel(&mut app, Hit::OutlinePane, -10);
+    assert!(!shown(&app, 40));
+    press(&mut app, "t");
+    assert!(has_line(&d, "- [ ] task number 40"));
+    let s = screen(&mut app);
+    let top = s.lines().position(|l| l.contains("Outline")).unwrap();
+    let at = s.lines().position(|l| l.contains("task number 40 ")).expect("not brought into view");
+    let (view, down) = (32 - 4, at - top - 1);
+    assert!(down >= view / 4 && down <= view * 2 / 5, "{} rows down of {}", down, view);
+    // the wheel takes it out of view again: the next t is a first press
+    wheel(&mut app, Hit::OutlinePane, -10);
+    press(&mut app, "t");
+    assert!(has_line(&d, "- [ ] task number 40"), "changed out of view");
+    press(&mut app, "t");
+    assert!(has_line(&d, "- task number 40"), "{}", root(&d));
+    // za, a two-key verb, too
+    wheel(&mut app, Hit::OutlinePane, -10);
+    press(&mut app, "za");
+    assert!(has_line(&d, "- task number 40"), "archived out of view");
+    let s = status(&mut app);
+    assert!(s.contains("“task number 40” is selected, press za again to archive it"), "{}", s);
+    press(&mut app, "za");
+    assert!(root(&d).contains("# Archive"), "{}", root(&d));
+}
+
+#[test]
+fn a_key_that_changes_nothing_shows_a_selection_out_of_view_and_acts_at_once() {
+    let d = vault(&long_list());
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "jj");
+    wheel(&mut app, Hit::OutlinePane, 10);
+    press(&mut app, "m");
+    screen(&mut app);
+    assert!(app.hit_pos(Hit::MenuItem(0)).is_some(), "no node menu");
+    assert!(shown(&app, 2));
+    app.handle_key(key(KeyCode::Esc));
+    wheel(&mut app, Hit::OutlinePane, 10);
+    press(&mut app, "e");
+    assert_eq!(app.mode_pub(), "edit");
+    screen(&mut app);
+    assert!(shown(&app, 2));
+}
+
+#[test]
+fn the_reading_pane_shows_its_cursor_line_before_changing_it() {
+    let prose: String = (1..=60).map(|i| format!("line {} of the notes\n", i)).collect();
+    let d = vault(&format!("# Notes\n\n{}\n- [ ] buried task\n", prose));
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    screen(&mut app);
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "G");
+    let task = app.read_cursor_pub();
+    assert!(app.reading_doc_pub().lines[task].contains("buried task"));
+    wheel(&mut app, Hit::ReadingPane, -10);
+    assert!(app.hit_pos(Hit::DocLine(task)).is_none());
+    press(&mut app, "x");
+    assert!(has_line(&d, "- [ ] buried task"), "checked out of view");
+    let s = status(&mut app);
+    assert!(app.hit_pos(Hit::DocLine(task)).is_some(), "not brought into view");
+    assert!(s.contains("“buried task” is selected, press x again to mark it done"), "{}", s);
+    press(&mut app, "x");
+    assert!(has_line(&d, "- [x] buried task"));
+    // Enter on a task toggles it: the same
+    wheel(&mut app, Hit::ReadingPane, -10);
+    app.handle_key(key(KeyCode::Enter));
+    assert!(has_line(&d, "- [x] buried task"), "reopened out of view");
+    let s = status(&mut app);
+    assert!(s.contains("“buried task” is selected, press Enter again to reopen it"), "{}", s);
+    app.handle_key(key(KeyCode::Enter));
+    assert!(has_line(&d, "- [ ] buried task"));
+    assert!(!status(&mut app).contains("again"), "the words outlived the verb");
+}
+
+#[test]
+fn a_held_verb_s_words_go_once_it_acts_or_the_selection_moves() {
+    let d = vault(&long_list());
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "jj");
+    wheel(&mut app, Hit::OutlinePane, 10);
+    // J says nothing when it moves a node: the words must not stay
+    press(&mut app, "J");
+    let s = status(&mut app);
+    assert!(s.contains("“task number 2” is selected, press J again to move it down"), "{}", s);
+    press(&mut app, "J");
+    assert!(root(&d).contains("- [ ] task number 3\n- [ ] task number 2\n"), "{}", root(&d));
+    let s = status(&mut app);
+    assert!(!s.contains("again"), "{}", s);
+    // a click selects another node: the words named the one before
+    wheel(&mut app, Hit::OutlinePane, 10);
+    press(&mut app, "d");
+    assert!(status(&mut app).contains("press d again"));
+    let (x, y) = app.hit_pos(Hit::Row(10)).unwrap();
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        app.handle_mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+    let s = status(&mut app);
+    assert!(!s.contains("again"), "{}", s);
+}
+
+#[test]
+fn the_pointer_acts_on_a_selection_out_of_view_at_once() {
+    let d = vault(&long_list());
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    press(&mut app, "jj");
+    wheel(&mut app, Hit::OutlinePane, 10);
+    assert!(!shown(&app, 2));
+    // the reading pane's ⋯ is the selected node's menu
+    click_button(&mut app, Action::NodeMenu);
+    screen(&mut app);
+    let (x, y) = app.hit_pos(Hit::MenuItem(node_menu_index(Action::Delete))).unwrap();
+    app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+    assert!(!root(&d).contains("task number 2\n"), "{}", root(&d));
 }

@@ -151,6 +151,9 @@ pub struct App {
     filter_sel: usize,
     // two-key sequences: `z…`, `gg`, `[[` / `]]`
     pending: Option<char>,
+    /// What the status bar says of a verb held for a selection out of view
+    /// (§10.1), until the next key or click.
+    held_words: Option<String>,
     // the node the reading cursor belongs to; a new target resets it
     read_key: Option<NodeKey>,
     // whether the reading pane shows the property header as line 1
@@ -242,6 +245,7 @@ impl App {
             palette_sel: 0,
             filter_sel: 0,
             pending: None,
+            held_words: None,
             read_key: None,
             read_header: false,
         })
@@ -1661,8 +1665,19 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        let held = self.held_words.take();
         self.handle_key_inner(key);
+        self.drop_held_words(held);
         self.settle_undo();
+    }
+
+    /// A held verb's words are let go once the next key or click is handled
+    /// (§10.1): the verb has acted, or the selection may have moved. What
+    /// that key or click said, or a verb held again, stays.
+    fn drop_held_words(&mut self, held: Option<String>) {
+        if self.held_words.is_none() && held.is_some_and(|w| w == self.status) {
+            self.say("");
+        }
     }
 
     fn handle_key_inner(&mut self, key: KeyEvent) {
@@ -1678,7 +1693,11 @@ impl App {
                     self.raw_mode = !self.raw_mode;
                     self.say(if self.raw_mode { "raw" } else { "styled" });
                 }
-                ('z', KeyCode::Char('a')) => self.act_archive(),
+                ('z', KeyCode::Char('a')) => {
+                    if !self.outline_held("za") {
+                        self.act_archive();
+                    }
+                }
                 ('z', KeyCode::Char('w')) => self.run_action(Action::Wrap),
                 ('z', KeyCode::Char('p')) => self.run_action(Action::ReadingPane),
                 ('g', KeyCode::Char('g')) => match self.focus {
@@ -1760,6 +1779,85 @@ impl App {
         self.say(said);
     }
 
+    /// A key verb on the selection while the wheel has left it out of view
+    /// (§10.1): the outline scrolls it back first, a third of the way down.
+    /// A verb that changes something is held there, the status bar naming
+    /// the node, and acts when pressed again with the node in view; one
+    /// that changes nothing goes on. True when the verb is held.
+    fn outline_held(&mut self, key: &str) -> bool {
+        let (view, len) = (self.ui.outline_view, self.rows().len());
+        let at = self.cursor.min(len.saturating_sub(1));
+        // before the first frame there is no view to be out of
+        if view == 0 || len == 0 || ui::in_view(self.outline_scroll, at, view, len) {
+            return false;
+        }
+        self.outline_scroll = at.saturating_sub(view / 3);
+        self.held(key, self.current())
+    }
+
+    /// The same for the reading pane's verbs on the line under its cursor
+    /// (§10.4).
+    fn reading_held(&mut self, key: &str, doc: &fold_core::reading::ReadingDoc) -> bool {
+        use fold_core::reading::LineRef;
+        let view = self.ui.reading_view;
+        let Some(at) = self.ui.read_rows.iter().position(|&d| d == Some(self.read_cursor)) else { return false };
+        if view == 0 || ui::in_view(self.scroll_reading, at, view, self.ui.read_rows.len()) {
+            return false;
+        }
+        self.scroll_reading = at.saturating_sub(view / 3);
+        // Enter acts on a title line only
+        let r = match fold_core::reading::node_at(doc, self.read_cursor) {
+            Some(LineRef::Title(r)) => Some(r),
+            Some(LineRef::Body(r) | LineRef::Embed(r)) if key != "Enter" => Some(r),
+            _ => None,
+        };
+        self.held(key, r)
+    }
+
+    /// Whether a verb just brought into view waits for a second press: one
+    /// that would change `r` does, and says so.
+    fn held(&mut self, key: &str, r: Option<NRef>) -> bool {
+        let Some(r) = r else { return false };
+        let Some(what) = self.change_words(key, r) else { return false };
+        let title = &self.vault.tree.node(self.vault.tree.resolved_child(r)).title;
+        let title = if title.is_empty() { "(untitled)" } else { title.as_str() };
+        let words = format!("“{}” is selected, press {} again to {}", title, key, what);
+        self.say(words.clone());
+        self.held_words = Some(words);
+        true
+    }
+
+    /// What a key would do to `r`, in the status bar's words; `None` when
+    /// it changes nothing: `e a m y`, the folds, `o`, `x` on a node that is
+    /// no task, a paste with nothing copied.
+    fn change_words(&self, key: &str, r: NRef) -> Option<&'static str> {
+        let n = self.vault.tree.node(self.vault.tree.resolved_child(r));
+        Some(match key {
+            // Enter zooms into a heading, and toggles a task item (§10.4)
+            "Enter" if n.kind == Kind::Section => return None,
+            "x" | "Enter" => match n.task? {
+                TaskState::Open => "mark it done",
+                TaskState::Done => "reopen it",
+            },
+            "t" if n.task.is_some() => "remove its checkbox",
+            "t" => "make it a task",
+            "d" => "delete it",
+            "s" => "make it a block",
+            "J" => "move it down",
+            "K" => "move it up",
+            ">" => "indent it",
+            "<" => "outdent it",
+            "~" if n.kind == Kind::Section => "make it a bullet",
+            "~" => "make it a heading",
+            "r" => "move it elsewhere",
+            "za" => "archive it",
+            "p" | "P" if self.register.is_empty() => return None,
+            "p" => "paste after it",
+            "P" => "paste before it",
+            _ => return None,
+        })
+    }
+
     pub fn key_normal(&mut self, key: KeyEvent) {
         let rows = self.rows();
         match self.focus {
@@ -1772,6 +1870,16 @@ impl App {
         let len = rows.len();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pane_outline.height.saturating_sub(2) as usize / 2).max(1);
+        // a verb on a selection the wheel left out of view shows it first
+        let verb = match key.code {
+            _ if ctrl => None,
+            KeyCode::Char(c) if "xtdsJK><~rpPeamyhlHL".contains(c) => Some(c.to_string()),
+            KeyCode::Left | KeyCode::Right => Some("h".into()),
+            _ => None,
+        };
+        if verb.is_some_and(|k| self.outline_held(&k)) {
+            return;
+        }
         match key.code {
             KeyCode::Char('d') if ctrl => {
                 self.cursor = (self.cursor + half).min(len.saturating_sub(1));
@@ -1985,6 +2093,15 @@ impl App {
         let doc = self.reading_doc();
         let nlines = doc.lines.len();
         let half = (self.pane_reading.height.saturating_sub(2) as usize / 2).max(1);
+        // a verb on a cursor line the wheel left out of view shows it first
+        let verb = match key.code {
+            KeyCode::Enter => Some("Enter".to_string()),
+            KeyCode::Char(c @ ('x' | 'e' | 'a' | 'm' | 'o')) => Some(c.to_string()),
+            _ => None,
+        };
+        if verb.is_some_and(|k| self.reading_held(&k, &doc)) {
+            return;
+        }
         match key.code {
             KeyCode::Tab => self.focus = Focus::Outline,
             KeyCode::Char('j') | KeyCode::Down => {

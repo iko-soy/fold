@@ -11,7 +11,12 @@ use std::time::{Duration, Instant};
 
 impl App {
     pub fn handle_mouse(&mut self, m: MouseEvent) {
+        let held = match m.kind {
+            MouseEventKind::Down(_) => self.held_words.take(),
+            _ => None,
+        };
         self.handle_mouse_inner(m);
+        self.drop_held_words(held);
         self.settle_undo();
     }
 
