@@ -107,7 +107,8 @@ Two boxes in the closet, one at Hetzner.
 
 Nothing else is special. Deleting goes to a trash (`$XDG_STATE_HOME/fold/trash`), and
 Syncthing conflict copies are merged node by node, with anything that differs kept as a
-`conflict:` block to resolve in the app.
+`conflict:` block to resolve in the app: it is marked `⚠` in the outline, and a click on the
+`⚠` shows both sides.
 
 ## The command line
 

@@ -2,8 +2,8 @@
 //! autosave and the status line (§10.6, §11.2), where the selection goes
 //! when rows come and go (§8.5), keys on a selection the wheel left out
 //! of view (§10.1), editor text no save can take when fold ends or
-//! reverts (§10.6), and sync conflicts that come in while you work
-//! (§10.7).
+//! reverts (§10.6), sync conflicts that come in while you work (§10.7),
+//! and the conflict copies they leave in the outline (§10.1, §12.5).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -794,4 +794,216 @@ fn pairs_that_come_in_while_the_view_is_open_leave_it_on_the_pair_it_shows() {
     press(&mut app, "o");
     assert!(!root(&d).contains(LAST), "{}", root(&d));
     assert_eq!(pairs(&mut app), 2);
+}
+
+// ------------------------------------------------------------ conflict copies
+
+/// A homelab vault merged with a phone's copy of it that changed NAS's
+/// text and checked the cables: a copy of NAS, with the tasks under it,
+/// and a copy of the cables task, each right after its own (§12.4).
+fn lab() -> (tempfile::TempDir, App) {
+    let text = "# Homelab\n\n## NAS\n\nMirrored pairs.\n\n- [ ] Snapshot policy\n- [x] Replace fan\n\n## Networking\n\n- [ ] Label the cables\n";
+    let d = vault(text);
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260927-100000-PHONE.md"),
+        text.replace("pairs.", "pairs, no raidz.").replace("[ ] Label", "[x] Label"),
+    )
+    .unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert_eq!(fold_core::merge::conflict_pairs(&v).len(), 2);
+    drop(v);
+    let app = App::new(d.path()).unwrap();
+    (d, app)
+}
+
+/// Draw a frame: the screen as cells, to read colours and find things.
+fn frame(app: &mut App) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    t.backend().buffer().clone()
+}
+
+fn line(b: &ratatui::buffer::Buffer, y: u16) -> String {
+    (0..b.area.width).map(|x| b[(x, y)].symbol()).collect()
+}
+
+fn text(b: &ratatui::buffer::Buffer) -> String {
+    (0..b.area.height).map(|y| line(b, y) + "\n").collect()
+}
+
+/// Where `s` starts on screen, the topmost first.
+fn find(b: &ratatui::buffer::Buffer, s: &str) -> Option<(u16, u16)> {
+    (0..b.area.height).find_map(|y| {
+        let l = line(b, y);
+        l.find(s).map(|i| (l[..i].chars().count() as u16, y))
+    })
+}
+
+/// Where the ⚠ after `s` is on screen.
+fn warning_after(b: &ratatui::buffer::Buffer, s: &str) -> (u16, u16) {
+    let at = format!("{} ⚠", s);
+    let (x, y) = find(b, &at).unwrap_or_else(|| panic!("no “{}” on screen:\n{}", at, text(b)));
+    (x + at.chars().count() as u16 - 1, y)
+}
+
+fn click_at(app: &mut App, x: u16, y: u16, button: MouseButton) {
+    app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(button), column: x, row: y, modifiers: KeyModifiers::NONE });
+    app.handle_mouse(MouseEvent { kind: MouseEventKind::Up(button), column: x, row: y, modifiers: KeyModifiers::NONE });
+}
+
+/// Which pair the conflict view shows, by what is on screen.
+fn pair_shown(app: &mut App) -> &'static str {
+    assert_eq!(app.mode_pub(), "conflict");
+    let s = screen(app);
+    match (s.contains("no raidz"), s.contains("Label the cables")) {
+        (true, false) => "NAS",
+        (false, true) => "Label the cables",
+        _ => panic!("{}", s),
+    }
+}
+
+#[test]
+fn a_conflict_copy_s_row_shows_a_warning_and_whose_copy_it_is() {
+    let (_d, mut app) = lab();
+    let b = frame(&mut app);
+    // ⚠ in the warning colour where a block's ▤ goes, and where its text
+    // would go, the device and time it came from
+    let (x, y) = warning_after(&b, "NAS");
+    assert_eq!(b[(x, y)].fg, ratatui::style::Color::Yellow);
+    let row = line(&b, y);
+    assert!(row.contains("NAS ⚠  1/2  other device · PHONE 09-27 10:00"), "{}", row);
+    assert!(!row.contains("raidz"), "{}", row);
+    warning_after(&b, "☑ Label the cables");
+    assert!(!text(&b).contains('▤'), "{}", text(&b));
+    // their tasks are not counted twice above them
+    assert!(text(&b).contains("Homelab  2/3"), "{}", text(&b));
+    assert!(text(&b).contains("Networking  1/1"), "{}", text(&b));
+}
+
+#[test]
+fn a_conflict_copy_starts_folded_and_that_fold_is_not_remembered() {
+    let (_d, mut app) = lab();
+    let s = screen(&mut app);
+    assert!(s.contains("▸ NAS ⚠"), "{}", s);
+    assert_eq!(s.matches("Snapshot policy").count(), 1, "{}", s);
+    // a click unfolds it as any row, for this run alone
+    let b = frame(&mut app);
+    let (x, y) = find(&b, "▸ NAS ⚠").unwrap();
+    click_at(&mut app, x, y, MouseButton::Left);
+    let s = screen(&mut app);
+    assert_eq!(s.matches("Snapshot policy").count(), 2, "{}", s);
+    assert!(app.view().folded.is_empty());
+    press(&mut app, "j");
+    let b = frame(&mut app);
+    let (x, y) = find(&b, "▾ NAS ⚠").unwrap();
+    click_at(&mut app, x, y, MouseButton::Left);
+    assert_eq!(screen(&mut app).matches("Snapshot policy").count(), 1);
+    assert!(app.view().folded.is_empty());
+    // zoomed into, it shows what is in it
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+    app.handle_key(key(KeyCode::Enter));
+    let s = screen(&mut app);
+    assert!(s.contains("▾ NAS ⚠") && s.contains("Snapshot policy"), "{}", s);
+}
+
+#[test]
+fn a_click_on_a_copy_s_warning_opens_the_conflict_view_at_its_pair() {
+    // the view lists pairs by their copies' files, so each is tried
+    let (_d, mut app) = lab();
+    for copy in ["NAS", "Label the cables"] {
+        let b = frame(&mut app);
+        let (x, y) = warning_after(&b, copy);
+        click_at(&mut app, x, y, MouseButton::Left);
+        assert_eq!(pair_shown(&mut app), copy);
+        app.handle_key(key(KeyCode::Esc));
+    }
+}
+
+#[test]
+fn resolve_conflict_in_the_node_menu_of_either_side_opens_its_pair() {
+    let (_d, mut app) = lab();
+    // right-click ours, then a copy: the menu ends in Resolve conflict…
+    for side in ["Label the cables", "NAS ⚠"] {
+        let b = frame(&mut app);
+        let (x, y) = find(&b, side).unwrap();
+        click_at(&mut app, x, y, MouseButton::Right);
+        let b = frame(&mut app);
+        let (x, y) = find(&b, "Resolve conflict…").unwrap_or_else(|| panic!("{}", text(&b)));
+        click_at(&mut app, x, y, MouseButton::Left);
+        assert_eq!(pair_shown(&mut app), side.trim_end_matches(" ⚠"));
+        app.handle_key(key(KeyCode::Esc));
+    }
+    // a node in no pair has none
+    select(&mut app, "Networking");
+    press(&mut app, "m");
+    let s = screen(&mut app);
+    assert!(s.contains("Move to…") && !s.contains("Resolve conflict"), "{}", s);
+}
+
+#[test]
+fn the_reading_pane_marks_a_conflict_copy_s_title_line() {
+    let (_d, mut app) = lab();
+    app.show_reading = true;
+    select(&mut app, "Homelab");
+    let b = frame(&mut app);
+    let (x, y) = warning_after(&b, "## NAS");
+    assert_eq!(b[(x, y)].fg, ratatui::style::Color::Yellow);
+    assert!(line(&b, y).contains("## NAS ⚠  other device · PHONE 09-27 10:00"), "{}", line(&b, y));
+    assert_eq!(text(&b).matches("## NAS").count(), 2, "{}", text(&b));
+    warning_after(&b, "☑ Label the cables");
+    // its ⚠ opens its pair, and the pane is on Homelab after
+    click_at(&mut app, x, y, MouseButton::Left);
+    assert_eq!(pair_shown(&mut app), "NAS");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(selected(&app), "Homelab");
+    // the copy's own pane says so in its border
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+    let b = frame(&mut app);
+    assert!(find(&b, "╭ NAS ⚠ ─").is_some(), "{}", text(&b));
+}
+
+#[test]
+fn move_to_leaves_conflict_copies_out_and_other_pickers_mark_them() {
+    let (_d, mut app) = lab();
+    select(&mut app, "Replace fan");
+    press(&mut app, "r");
+    press(&mut app, "Snapshot");
+    draw(&mut app);
+    assert!(app.hit_pos(Hit::PickRow(0)).is_some());
+    assert!(app.hit_pos(Hit::PickRow(1)).is_none(), "{}", screen(&mut app));
+    app.handle_key(key(KeyCode::Esc));
+    // Go to… and the filter list both, the one in the copy with its ⚠
+    app.run_action(Action::GoTo);
+    press(&mut app, "Snapshot");
+    let b = frame(&mut app);
+    assert!(app.hit_pos(Hit::PickRow(1)).is_some(), "{}", text(&b));
+    assert!(find(&b, "Snapshot policy ⚠  Homelab › NAS").is_some(), "{}", text(&b));
+    app.handle_key(key(KeyCode::Esc));
+    press(&mut app, "/Snapshot");
+    let b = frame(&mut app);
+    assert!(app.hit_pos(Hit::FilterRow(1)).is_some(), "{}", text(&b));
+    assert_eq!(text(&b).matches("Snapshot policy ⚠  Homelab › NAS").count(), 1, "{}", text(&b));
+}
+
+#[test]
+fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
+    let (_d, mut app) = lab();
+    app.set_edit_keys(EditKeys::Normal);
+    select(&mut app, "Homelab");
+    press(&mut app, "e");
+    let b = frame(&mut app);
+    assert!(find(&b, "Editing Homelab").is_some() && find(&b, "conflict copy").is_none(), "{}", text(&b));
+    // down through ours, into the copy of NAS
+    let mut seen = None;
+    for _ in 0..20 {
+        app.handle_key(key(KeyCode::Down));
+        let b = frame(&mut app);
+        if let Some((_, y)) = find(&b, "conflict copy") {
+            seen = Some(line(&b, y));
+            break;
+        }
+    }
+    let border = seen.expect("never said so");
+    assert!(border.contains("Editing NAS ⚠ conflict copy from PHONE"), "{}", border);
 }

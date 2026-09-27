@@ -125,6 +125,11 @@ impl App {
                     self.open_menu(r, x.saturating_sub(24), y + 1);
                 }
             }
+            Hit::Conflict(i) => {
+                self.focus_pane(Focus::Outline);
+                self.cursor = i;
+                self.run_action(super::Action::ResolveConflict);
+            }
             Hit::DocLine(i) => {
                 self.focus_pane(Focus::Reading);
                 self.read_cursor = i;
@@ -135,6 +140,12 @@ impl App {
             Hit::DocCheck(i) => {
                 self.read_cursor = i;
                 self.toggle_doc_line(i);
+            }
+            Hit::DocConflict(i) => {
+                self.read_cursor = i;
+                if let Some(r) = self.doc_line_node(i) {
+                    self.enter_conflict_view_at(r);
+                }
             }
             Hit::Link(i) => {
                 self.read_cursor = i;
@@ -226,7 +237,7 @@ impl App {
         // only over an outline row (§10.1): released anywhere else, over the
         // reading pane or a border, the drag does nothing
         let target = match self.ui.hit_at(x, y) {
-            Some(Hit::Row(j) | Hit::Fold(j) | Hit::Check(j) | Hit::RowMenu(j)) => self
+            Some(Hit::Row(j) | Hit::Fold(j) | Hit::Check(j) | Hit::RowMenu(j) | Hit::Conflict(j)) => self
                 .ui
                 .rows_geom
                 .iter()
@@ -304,14 +315,14 @@ impl App {
 
     fn mouse_right(&mut self, x: u16, y: u16) {
         match self.ui.hit_at(x, y) {
-            Some(Hit::Row(i) | Hit::Fold(i) | Hit::Check(i) | Hit::RowMenu(i)) => {
+            Some(Hit::Row(i) | Hit::Fold(i) | Hit::Check(i) | Hit::RowMenu(i) | Hit::Conflict(i)) => {
                 self.focus_pane(Focus::Outline);
                 self.cursor = i;
                 if let Some(r) = self.current() {
                     self.open_menu(r, x, y + 1);
                 }
             }
-            Some(Hit::DocLine(i) | Hit::DocCheck(i) | Hit::Link(i)) => {
+            Some(Hit::DocLine(i) | Hit::DocCheck(i) | Hit::DocConflict(i) | Hit::Link(i)) => {
                 self.read_cursor = i;
                 if let Some(r) = self.doc_line_node(i).or_else(|| self.reading_target()) {
                     self.open_menu(r, x, y + 1);
@@ -345,11 +356,11 @@ impl App {
             }
             _ => match self.ui.hit_at(x, y) {
                 Some(Hit::EditArea) => self.ui.edit_scroll = step(self.ui.edit_scroll),
-                Some(Hit::ReadingPane | Hit::DocLine(_) | Hit::DocCheck(_) | Hit::Link(_)) => {
+                Some(Hit::ReadingPane | Hit::DocLine(_) | Hit::DocCheck(_) | Hit::DocConflict(_) | Hit::Link(_)) => {
                     self.scroll_reading = step(self.scroll_reading)
                 }
                 Some(
-                    Hit::OutlinePane | Hit::Row(_) | Hit::Fold(_) | Hit::Check(_) | Hit::RowMenu(_),
+                    Hit::OutlinePane | Hit::Row(_) | Hit::Fold(_) | Hit::Check(_) | Hit::RowMenu(_) | Hit::Conflict(_),
                 ) => self.outline_scroll = step(self.outline_scroll),
                 _ => {}
             },

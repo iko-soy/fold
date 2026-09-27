@@ -36,7 +36,11 @@ pub use editor::Keys as EditKeys;
 
 /// Where an action sits in the node menu (for tests and scripted clicks).
 pub fn node_menu_index(a: Action) -> usize {
-    action::NODE_MENU.iter().position(|i| *i == Some(a)).expect("in the node menu")
+    action::NODE_MENU
+        .iter()
+        .chain(action::CONFLICT_MENU)
+        .position(|i| *i == Some(a))
+        .expect("in the node menu")
 }
 pub use ui::Hit;
 pub use view::View;
@@ -83,6 +87,9 @@ pub struct App {
     zoom_anchor: Option<NodeKey>,
     pub cursor: usize,
     folded: Vec<NodeKey>,
+    /// The conflict copies unfolded: a copy starts folded, a fold of this
+    /// run's view alone, never remembered (§10.1).
+    unfolded_copies: Vec<NodeKey>,
     hide_done: bool,
     raw_mode: bool,
     /// Long lines wrap in the reading pane and the editor (§10.1); `zw`.
@@ -209,6 +216,7 @@ impl App {
             zoom_anchor: None,
             cursor: 0,
             folded: Vec::new(),
+            unfolded_copies: Vec::new(),
             hide_done: false,
             raw_mode: false,
             wrap: true,
@@ -621,8 +629,7 @@ impl App {
             depth,
             via_embed,
         });
-        let key = self.vault.key_of(r);
-        if self.folded.contains(&key) {
+        if self.is_folded(r) {
             return;
         }
         for c in self.vault.tree.resolved_children(r) {
@@ -699,17 +706,30 @@ impl App {
         self.vault.find_by_key(key).filter(|&r| self.vault.key_of(r) == *key)
     }
 
+    /// A conflict copy is folded until unfolded (§10.1); any other node
+    /// once folded.
     fn is_folded(&self, r: NRef) -> bool {
-        self.folded.contains(&self.vault.key_of(r))
+        let key = self.vault.key_of(r);
+        match self.vault.tree.node(r).conflict() {
+            Some(_) => !self.unfolded_copies.contains(&key),
+            None => self.folded.contains(&key),
+        }
+    }
+
+    fn set_folded(&mut self, r: NRef, fold: bool) {
+        let key = self.vault.key_of(r);
+        let (keys, listed) = match self.vault.tree.node(r).conflict() {
+            Some(_) => (&mut self.unfolded_copies, !fold),
+            None => (&mut self.folded, fold),
+        };
+        keys.retain(|k| *k != key);
+        if listed {
+            keys.push(key);
+        }
     }
 
     fn toggle_fold(&mut self, r: NRef) {
-        let key = self.vault.key_of(r);
-        if let Some(i) = self.folded.iter().position(|k| *k == key) {
-            self.folded.remove(i);
-        } else {
-            self.folded.push(key);
-        }
+        self.set_folded(r, !self.is_folded(r));
     }
 
     fn refresh_after(&mut self, action: &str) {
@@ -1647,6 +1667,7 @@ impl App {
             return;
         }
         let q = p.text.to_lowercase();
+        let refile = matches!(p.action, PromptAction::Refile);
         // a node cannot move into its own subtree
         let moving = p.moving.as_ref().and_then(|k| self.find_exact(k)).map(|r| self.vault.tree.resolved_child(r));
         let mut nodes: Vec<NRef> = Vec::new();
@@ -1659,6 +1680,10 @@ impl App {
         for r in nodes {
             let chain = self.chain(r);
             if moving.map(|m| chain.contains(&m)).unwrap_or(false) {
+                continue;
+            }
+            // nor into a conflict copy, which keeping ours trashes (§12.5)
+            if refile && chain.iter().any(|&c| self.vault.tree.node(c).conflict().is_some()) {
                 continue;
             }
             let title = self.vault.tree.node(r).title.to_lowercase();
@@ -1689,8 +1714,7 @@ impl App {
         let mut chain = self.chain(r);
         chain.pop();
         for a in chain {
-            let k = self.vault.key_of(a);
-            self.folded.retain(|f| f != &k);
+            self.set_folded(a, false);
         }
         if self.zoom().is_some() && !self.rows().iter().any(|row| row.nref == r) {
             self.set_zoom(None);
@@ -1715,6 +1739,27 @@ impl App {
         self.conflict_idx = self.pairs_among(&waiting).first().map_or(0, |&(i, _)| i);
         self.conflict_opened = None;
         self.mode = Mode::Conflict;
+    }
+
+    /// The copy in the pair `r` is a side of (§12.5): itself, if it is a
+    /// copy with a node to pair with, else the copy right after it.
+    fn copy_of_pair(&self, r: NRef) -> Option<NRef> {
+        let r = self.vault.tree.resolved_child(r);
+        let pairs = fold_core::merge::conflict_pairs(&self.vault);
+        let pair = pairs.iter().find(|&&(_, t)| t == r).or_else(|| pairs.iter().find(|&&(o, _)| o == r));
+        pair.map(|&(_, t)| t)
+    }
+
+    /// The conflict view at the pair `r` is a side of: a click on a copy's
+    /// ⚠, or *Resolve conflict…* in either side's node menu (§10.7).
+    fn enter_conflict_view_at(&mut self, r: NRef) {
+        let copy = self.copy_of_pair(r).map(|t| self.vault.key_of(t));
+        self.enter_conflict_view();
+        // found again by key: the editor, closing, saves and renumbers
+        let at = copy.and_then(|k| self.conflict_blocks().iter().position(|b| *b == k));
+        if let Some(i) = at.filter(|_| self.mode == Mode::Conflict) {
+            self.conflict_idx = i;
+        }
     }
 
     pub fn key_conflict_pub(&mut self, key: KeyEvent) { self.key_conflict(key) }
@@ -2093,27 +2138,24 @@ impl App {
             KeyCode::Char('H') => {
                 if let Some(r) = self.current() {
                     // fold everything under cursor
-                    let mut keys = Vec::new();
+                    let mut nodes = Vec::new();
                     self.vault.tree.walk(r, &mut |t, n| {
                         if !t.resolved_children(n).is_empty() {
-                            keys.push(self.vault.key_of(n));
+                            nodes.push(n);
                         }
                     });
-                    for k in keys {
-                        if !self.folded.contains(&k) {
-                            self.folded.push(k);
-                        }
+                    for n in nodes {
+                        self.set_folded(n, true);
                     }
                 }
             }
             KeyCode::Char('L') => {
                 if let Some(r) = self.current() {
-                    let mut keys = Vec::new();
-                    self.vault.tree.walk(r, &mut |t, n| {
-                        keys.push(self.vault.key_of(n));
-                        let _ = t;
-                    });
-                    self.folded.retain(|k| !keys.contains(k));
+                    let mut nodes = Vec::new();
+                    self.vault.tree.walk(r, &mut |_, n| nodes.push(n));
+                    for n in nodes {
+                        self.set_folded(n, false);
+                    }
                 }
             }
             KeyCode::Char('-') => self.goto_parent_row(&rows),
@@ -2592,11 +2634,20 @@ impl App {
         self.find_exact(&self.ui.menu.as_ref()?.target)
     }
 
+    /// The node menu's items for its node (§10.1): on either side of a
+    /// conflict pair, *Resolve conflict…* after the rest.
+    fn menu_items(&self) -> Vec<Option<Action>> {
+        let mut items = action::NODE_MENU.to_vec();
+        if self.menu_target().is_some_and(|r| self.copy_of_pair(r).is_some()) {
+            items.extend_from_slice(action::CONFLICT_MENU);
+        }
+        items
+    }
+
     fn key_menu(&mut self, key: KeyEvent) {
+        let all = self.menu_items();
         let Some(menu) = self.ui.menu.as_mut() else { return };
-        let items: Vec<usize> = (0..action::NODE_MENU.len())
-            .filter(|&i| action::NODE_MENU[i].is_some())
-            .collect();
+        let items: Vec<usize> = (0..all.len()).filter(|&i| all[i].is_some()).collect();
         let pos = items.iter().position(|&i| i == menu.sel).unwrap_or(0);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => self.ui.menu = None,
@@ -2613,8 +2664,9 @@ impl App {
     /// Run a node-menu item on the menu's target, found by its key; the
     /// verb holds it by key across the editor's save (`run_action`).
     fn run_menu_item(&mut self, i: usize) {
+        let items = self.menu_items();
         let Some(menu) = self.ui.menu.take() else { return };
-        let Some(Some(a)) = action::NODE_MENU.get(i) else { return };
+        let Some(Some(a)) = items.get(i) else { return };
         let Some(target) = self.find_exact(&menu.target) else {
             self.say("that node is gone");
             return;
@@ -2748,6 +2800,11 @@ impl App {
                 }
             }
             Action::ResolveConflicts => self.enter_conflict_view(),
+            Action::ResolveConflict => {
+                if let Some(r) = self.subject() {
+                    self.enter_conflict_view_at(r);
+                }
+            }
             Action::EditorKeys => self.set_edit_keys(self.edit_keys.next()),
             Action::EditDone => {
                 self.close_editor();
@@ -2808,6 +2865,10 @@ impl App {
     /// Zoom into a node: the reading pane shows it (§10.3 `Enter`).
     fn zoom_into(&mut self, r: NRef) {
         if self.vault.tree.node(r).kind != Kind::Root {
+            // a copy's own fold hides nothing it is zoomed into to show
+            if self.vault.tree.node(r).conflict().is_some() {
+                self.set_folded(r, false);
+            }
             self.set_zoom(Some(r));
             self.cursor = 0;
             self.read_cursor = 0;
@@ -2863,6 +2924,7 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("", ""),
         ("MOUSE", ""),
         ("click", "select · ▸/▾ fold · ☐ toggle · breadcrumb segments zoom out"),
+        ("", "  · ⚠ on a conflict copy: both sides, to resolve"),
         ("double-click", "a row zooms in · in the text: zoom a heading, follow a"),
         ("", "  block, or edit that very line"),
         ("right-click", "or ⋯ on a row — every action on that node"),

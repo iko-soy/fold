@@ -233,35 +233,48 @@ impl Tree {
         self.node(r).children.iter().map(|&c| (r.0, c)).collect()
     }
 
-    /// Derived open/total task counts for a subtree (§3.5).
+    /// Derived open/total task counts for a subtree (§3.5). A conflict
+    /// copy below `r` is left out, with its subtree: it repeats the node
+    /// before it (§12.4).
     pub fn task_counts(&self, r: NRef) -> (usize, usize) {
         let mut open = 0;
         let mut total = 0;
-        self.walk(r, &mut |t, n| {
+        let mut count = |t: &Tree, n: NRef| {
             if let Some(st) = t.node(n).task {
                 total += 1;
                 if st == TaskState::Open {
                     open += 1;
                 }
             }
-        });
+        };
+        let copy = |t: &Tree, n: NRef| t.node(n).conflict().is_some();
+        self.walk_inner(r, &copy, &mut count, &mut Vec::new());
         (open, total)
     }
 
     /// Pre-order walk over the resolved tree (embeds followed, cycles guarded).
     pub fn walk(&self, r: NRef, f: &mut dyn FnMut(&Tree, NRef)) {
         let mut seen = Vec::new();
-        self.walk_inner(r, f, &mut seen);
+        self.walk_inner(r, &|_, _| false, f, &mut seen);
     }
 
-    fn walk_inner(&self, r: NRef, f: &mut dyn FnMut(&Tree, NRef), seen: &mut Vec<NRef>) {
+    /// `walk`, passing over each subtree below `r` whose top `skip` picks.
+    fn walk_inner(
+        &self,
+        r: NRef,
+        skip: &dyn Fn(&Tree, NRef) -> bool,
+        f: &mut dyn FnMut(&Tree, NRef),
+        seen: &mut Vec<NRef>,
+    ) {
         if seen.contains(&r) {
             return; // cycle guard
         }
         seen.push(r);
         f(self, r);
         for cr in self.resolved_children(r) {
-            self.walk_inner(cr, f, seen);
+            if !skip(self, cr) {
+                self.walk_inner(cr, skip, f, seen);
+            }
         }
     }
 }
@@ -269,6 +282,11 @@ impl Tree {
 impl Node {
     pub fn is_block(&self) -> bool {
         self.block.is_some()
+    }
+    /// A conflict copy's `conflict:` value, unquoted: the other device and
+    /// when (§12.4). `None` for any other node.
+    pub fn conflict(&self) -> Option<&str> {
+        self.block.as_ref()?.prop("conflict").map(|v| v.trim_matches('"'))
     }
     pub fn is_embed(&self) -> bool {
         self.embed.is_some()

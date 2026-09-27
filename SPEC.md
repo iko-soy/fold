@@ -245,8 +245,9 @@ Titles may not contain `/` (the path separator). `[` and `]` are discouraged.
 ### 3.5 Derived facts
 
 Computed by the index, never stored in files: heading level, indent, path, file, span,
-open/done task counts per subtree (`3/7` in the outline), per-file mtime. Per-node
-timestamps are not tracked by the app (§12.6).
+open/done task counts per subtree (`3/7` in the outline; a conflict copy's tasks, §12.4,
+are not counted above it), per-file mtime. Per-node timestamps are not tracked by the app
+(§12.6).
 
 ---
 
@@ -847,10 +848,14 @@ Four regions, each of them live under the pointer:
   count). Done tasks are dimmed and struck through; sections are bold. Long titles end in
   `…`. Beside the reading pane, the date and count sit at the pane's right edge and rows
   show titles only. Without it, they follow the title, and after them, dimmed, comes the
-  first line of the node's own text, so no prose is out of sight.
+  first line of the node's own text, so no prose is out of sight. A conflict copy
+  (§12.5) has `⚠`, in the warning colour, for `▤`, and, in place of its text, whose copy
+  it is: *other device · PHONE 09-27 10:00*. It starts folded until unfolded or zoomed
+  into, a fold the view does not remember.
 - The **reading pane**: `render(target, 1, true)`, the zoom root's or else the selected
   node's, with light Markdown styling (§10.9); a block's properties appear as a dimmed
-  `⚑` line under its title, never as text. Its border carries the node's title and the
+  `⚑` line under its title, never as text, and a conflict copy's title line ends in its
+  `⚠` and whose copy it is, as its row does. Its border carries the node's title and the
   buttons *Edit* and `⋯` (the node menu). While editing, the pane is the editor (§10.6) and
   its buttons are *Done* and *Revert*.
 - The **status bar**: the last message on the left (at start, a hint at the gestures and
@@ -885,6 +890,7 @@ title ends in `…`.
 | click | an outline row | select it (the reading pane follows) |
 | click | `▸` / `▾` | fold / unfold |
 | click | `☐` / `☑`, in either pane | toggle the task |
+| click | a conflict copy's `⚠`, in either pane | the conflict view at its pair (§10.7) |
 | click | `⋯` (shown on the selected and the hovered row) | the node menu |
 | click | a breadcrumb segment | zoom there |
 | click | a link in the reading pane | open it |
@@ -916,12 +922,15 @@ never held back.
 **The node menu** (right-click, `⋯`, or `m`) lists every action on a node, each with its key:
 *Edit · Zoom in · Properties… | New sibling · New child | Done / reopen · Task on / off ·
 Heading ↔ bullet · Make block | Move up · Move down · Indent · Outdent · Move to… · Archive |
-Copy · Paste after · Paste before · Delete*. Hovering highlights an item; a click runs it.
+Copy · Paste after · Paste before · Delete*, and on either side of a conflict pair, last,
+*Resolve conflict…*: the conflict view at that pair. Hovering highlights an item; a click
+runs it.
 
 **Pickers instead of typing.** Where an action needs a node — *Move to…*, *Go to…* — the
 prompt is a list of every node, title first and path dimmed, narrowed as you type (title
 prefix, then title, then path) and picked with a click or `↑`/`↓` and `Enter`. A typed id,
-path or title (§3.4) still works. *Move to…* leaves out the moving node's own subtree.
+path or title (§3.4) still works. *Move to…* leaves out the moving node's own subtree, and
+conflict copies, which keeping ours trashes (§12.5); *Go to…* marks a node in one `⚠`.
 
 Every popup — node menu, prompt, properties, filter, commands, help — has its buttons on
 its bottom border (*OK*, *Close*, …), a list you can click and scroll, and closes on a click
@@ -990,9 +999,9 @@ the popup — closes the topmost thing.
 
 `/`, or *Filter* in the top bar, opens a popup with an input and the hits below it:
 fuzzy title match (nucleo) and full-text match over every text child, each hit shown as its
-title with its path dimmed. Clicking a hit — or `↑`/`↓` and `Enter` — unfolds its
-ancestors and selects it. `Esc` or a click outside closes. Creating nodes is `n` / `N`
-(§10.3).
+title with its path dimmed, and `⚠` after the title of a hit in a conflict copy (§12.5).
+Clicking a hit — or `↑`/`↓` and `Enter` — unfolds its ancestors and selects it. `Esc` or a
+click outside closes. Creating nodes is `n` / `N` (§10.3).
 
 ### 10.6 Editing
 
@@ -1013,9 +1022,10 @@ app keeps track. Blocks are saved on their own:
 - when the app ends any other way: `SIGTERM`, `SIGHUP` (a closed window, a dropped ssh
   session), `SIGINT`, an I/O error, a panic.
 
-The pane's border shows the title of the block the cursor is in and a dot while something
-is unsaved, and lines of other blocks in the subtree are drawn a shade dimmer — the only
-hints that blocks exist. *Revert* (or `:q!`) discards changes made since the last save.
+The pane's border shows the title of the block the cursor is in, *⚠ conflict copy from
+PHONE* after it in a conflict copy (§12.5), and a dot while something is unsaved, and lines
+of other blocks in the subtree are drawn a shade dimmer — the only hints that blocks
+exist. *Revert* (or `:q!`) discards changes made since the last save.
 
 Text a save cannot take — its block changed on disk under it (§5.2) — stays in the editor,
 and is never dropped without a copy: *Revert* first writes the editor's whole text to the
@@ -1074,15 +1084,15 @@ and each saves the editor first.
 
 ### 10.7 Conflict view
 
-Opened by the status bar's ⚠ count or *Resolve conflicts*, and on its own when a
-`.sync-conflict-*` file is detected or a splice hits a changed span — on the first new pair
-in the outline, and only from an outline at rest: normal mode, nothing open over it, no
-key, paste or click for 2 s. A busy user is not interrupted: the mode stays, the editor
-keeps its text, the status line names the node — *sync conflict in “NAS”: click ⚠ 1
-conflict to resolve* — and the ⚠ count is lit until the view opens, from a click or on its
-own once the outline is at rest. Opened on its own, for its first half second it ignores
-`o t b e`, meant for what was there before. Pairs that come in while it is open leave it
-on the pair it shows.
+Opened by the status bar's ⚠ count or *Resolve conflicts*; at a pair, by a copy's `⚠` or
+*Resolve conflict…* in either side's node menu; and on its own when a `.sync-conflict-*`
+file is detected or a splice hits a changed span — on the first new pair in the outline,
+and only from an outline at rest: normal mode, nothing open over it, no key, paste or
+click for 2 s. A busy user is not interrupted: the mode stays, the editor keeps its text,
+the status line names the node — *sync conflict in “NAS”: click ⚠ 1 conflict to resolve*
+— and the ⚠ count is lit until the view opens, from a click or on its own once the outline
+is at rest. Opened on its own, for its first half second it ignores `o t b e`, meant for
+what was there before. Pairs that come in while it is open leave it on the pair it shows.
 
 It shows each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
 `t` keeps theirs, `b` keeps both, `e` edits, `n` / `N` next / previous, `u` / `U` undo / redo,
@@ -1288,7 +1298,8 @@ before it, and the status line counts them. Resolving a pair:
   sibling.
 
 Unresolved pairs are ordinary blocks; they sync to every device and are visible in any
-editor, and can be lived with indefinitely.
+editor, and can be lived with indefinitely. The app marks each copy `⚠` and folds it,
+leaves its tasks out of the counts, and offers it as no *Move to…* destination (§10.1).
 
 ### 12.6 History (outside the app)
 

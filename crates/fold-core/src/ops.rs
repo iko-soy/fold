@@ -1226,8 +1226,11 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
     vault.tree.walk(target, &mut |t, r| {
         let n = t.node(r);
         if n.task == Some(TaskState::Done) {
-            let (open, _total) = t.task_counts(r);
-            if open == 0 {
+            // any open task below keeps it, one in a conflict copy too,
+            // which task counts leave out (§3.5)
+            let mut open = false;
+            t.walk(r, &mut |t, c| open |= t.node(c).task == Some(TaskState::Open));
+            if !open {
                 to_clear.push(r);
             }
         }
