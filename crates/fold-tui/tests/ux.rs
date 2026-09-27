@@ -338,12 +338,16 @@ fn a_copy_merged_into_the_node_the_editor_shows_deletes_a_block_cut_there() {
     app.handle_key(ctrl('v'));
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(root(&d), merged.replace("- one\n", "- task\n- one\n"));
-    // one undo takes back the paste, the next puts back the block's file
+    // one undo takes back the paste; the block went in the step that cut
+    // it, which the merge refuses to undo, so its file stays in the trash
+    // rather than come back embedded nowhere (§10.10)
     app.handle_key(key(KeyCode::Char('u')));
     assert_eq!(root(&d), merged);
     assert!(!block.exists());
     app.handle_key(key(KeyCode::Char('u')));
-    assert!(block.exists(), "undo did not put back the cut block's file");
+    assert_eq!(said(&mut app), "undo refused: root.md changed since edit “A”; not overwriting");
+    assert_eq!(root(&d), merged);
+    assert!(!block.exists(), "undo put back the block's file embedded nowhere");
 }
 
 /// A, its "task" a block of its own, open in the editor with that line
@@ -429,6 +433,27 @@ fn a_cut_block_deleted_after_more_saves_or_on_revert_comes_back_embedded_with_th
         assert_eq!(root(&d), embedded, "{}", how);
         assert!(block.exists(), "{}: undo did not put back the cut block's file", how);
     }
+}
+
+#[test]
+fn a_cut_block_deleted_by_a_change_from_outside_is_never_undone_to_a_file_embedded_nowhere() {
+    // the phone adds to A, the node the editor shows: it is re-rendered
+    // and the cut block deleted (§11.2), in the entry of the save that
+    // wrote its embed out, which the change refuses to undo; no undo puts
+    // back its file without the embed (§5.2, §10.10)
+    let (d, mut app, block, _) = cut_and_paused();
+    let phone = "# A\n\n- one\n- two\n- from phone\n";
+    std::fs::write(d.path().join("root.md"), phone).unwrap();
+    until_reload(&mut app);
+    assert!(!block.exists(), "a cut block was left embedded nowhere");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    for _ in 0..2 {
+        press(&mut app, "u");
+        assert_eq!(root(&d), phone, "undo overwrote the change from outside");
+        assert!(!block.exists(), "undo put back the block's file embedded nowhere: {}", said(&mut app));
+    }
+    assert_eq!(said(&mut app), "undo refused: root.md changed since edit “A”; not overwriting");
 }
 
 #[test]

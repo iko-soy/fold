@@ -655,9 +655,10 @@ impl App {
 
     /// Before the editor is re-rendered over text a reload changed
     /// (§11.2): a block cut there and not pasted back cannot be pasted as
-    /// itself any more, and is deleted as on a Revert (§5.2), one op
-    /// (§10.10). True when the editor can be re-rendered: text a refused
-    /// save still holds is not, nor is one whose cut blocks stay.
+    /// itself any more, and is deleted as on a Revert (§5.2), in the
+    /// op-log entry of the save that wrote its embed out (§10.10). True
+    /// when the editor can be re-rendered: text a refused save still holds
+    /// is not, nor is one whose cut blocks stay.
     fn drop_cut_blocks(&mut self) -> bool {
         if self.editor_dirty() {
             return false;
@@ -670,7 +671,7 @@ impl App {
             ed.release_clip();
             ed.buf.dirty.clear();
         }
-        self.record_undo(snap);
+        self.record_edit(snap);
         if let Err(e) = &res {
             self.say(format!("error: {}", e));
         }
@@ -2657,15 +2658,16 @@ impl App {
         }
     }
 
-    /// `record_undo` for a save of the editor, or its *Revert*: a block an
-    /// earlier save left in transit (§5.2) and this one deletes is deleted
-    /// in the entry of that save, which wrote its embed out, so one undo
-    /// puts back its file and its embed together, never the file embedded
-    /// nowhere (§10.10). One this save pastes back, writing its embed
-    /// again, makes that save, this one and those between one entry, so
-    /// no undo stops where its file is embedded nowhere either. The blocks
-    /// this save leaves in transit are remembered with its entry, until
-    /// their file is deleted or embedded again.
+    /// `record_undo` for a save of the editor, its *Revert*, or a reload
+    /// that re-renders it (§11.2): a block an earlier save left in transit
+    /// (§5.2) and this one deletes is deleted in the entry of that save,
+    /// which wrote its embed out, so one undo puts back its file and its
+    /// embed together, never the file embedded nowhere (§10.10). One this
+    /// save pastes back, writing its embed again, makes that save, this
+    /// one and those between one entry, so no undo stops where its file is
+    /// embedded nowhere either. The blocks this save leaves in transit are
+    /// remembered with its entry, until their file is deleted or embedded
+    /// again.
     fn record_edit(&mut self, snap: ops::Snapshot) {
         // the length of `undo` once this save's entry is in, if it has one
         let mut at = None;
