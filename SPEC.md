@@ -1298,7 +1298,9 @@ Deleted subtrees and resolved `conflict:` blocks are written to
 removal; editor text no save could take, to `<timestamp>-unsaved-<title>.md` (§10.6).
 `notes trash list|restore` manages it. `restore` moves an entry back into the vault, but an
 `unsaved-` entry has no id, so the vault would ignore it as a file (§6.4): it is printed
-instead, and stays in the trash. The app never deletes user content without a trash copy.
+instead, and stays in the trash. The content decides, not the name: a block file renamed
+`unsaved-….md` (§3.4) keeps its id and is moved back. The app never deletes user content
+without a trash copy.
 
 ---
 

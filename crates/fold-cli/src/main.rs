@@ -186,9 +186,20 @@ fn main() -> anyhow::Result<()> {
                         };
                         // text the editor could not save (§10.6) has no id:
                         // moved in, it would be a file fold ignores, so it
-                        // is given back and stays where it is
-                        if restored.starts_with("unsaved-") {
-                            print!("{}", std::fs::read_to_string(e.path())?);
+                        // is given back and stays where it is. The name
+                        // alone does not say so, as a block file may be
+                        // named anything (§3.4): one with an id goes back.
+                        let unsaved = restored
+                            .starts_with("unsaved-")
+                            .then(|| std::fs::read_to_string(e.path()))
+                            .transpose()?
+                            .filter(|text| {
+                                fold_core::parse::parse_frontmatter(text)
+                                    .and_then(|fm| fm.props.get("id").and_then(|v| fold_core::Id::parse(v)))
+                                    .is_none()
+                            });
+                        if let Some(text) = unsaved {
+                            print!("{}", text);
                             eprintln!(
                                 "{} stays in the trash: it is text the editor could not save, not a file fold reads; paste what you need into the editor",
                                 e.path().display()

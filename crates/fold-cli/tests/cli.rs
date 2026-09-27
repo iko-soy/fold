@@ -193,6 +193,29 @@ fn trash_restore_prints_unsaved_text_and_leaves_it_in_the_trash() {
         .success();
 }
 
+/// A block's filename is decoration (§3.4): one renamed `unsaved-ideas.md`
+/// and then deleted is still a block file in the trash, with its id, and
+/// restore moves it back like any other, not printed as editor text.
+#[test]
+fn trash_restore_moves_back_a_block_file_named_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# Keep\n").unwrap();
+    let trash = state.path().join("fold").join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    let entry = trash.join("20260927-114734-unsaved-ideas.md");
+    let text = "---\nid: racfer-hattes-mislup-nodrys\n---\n\n# Ideas\n\n- a shed\n";
+    std::fs::write(&entry, text).unwrap();
+    notes(dir.path())
+        .env("XDG_STATE_HOME", state.path())
+        .args(["trash", "restore", "unsaved-ideas"])
+        .assert()
+        .success()
+        .stdout("restored unsaved-ideas.md\n");
+    assert!(!entry.exists());
+    assert_eq!(std::fs::read_to_string(dir.path().join("unsaved-ideas.md")).unwrap(), text);
+}
+
 /// The trash lives outside the vault (§11.5), often on another filesystem
 /// (a Syncthing folder on an external disk vs `$XDG_STATE_HOME`). Merging
 /// must still move the conflict file to trash (copy + remove across
