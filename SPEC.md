@@ -959,7 +959,8 @@ its conflict pair's, which moves with it, and conflict copies, which keeping our
 
 Every popup — node menu, prompt, properties, filter, commands, help — has its buttons on
 its bottom border (*OK*, *Close*, …), a list you can click and scroll, and closes on a click
-outside it or `Esc`.
+outside it or `Esc`. It covers the panes: a click, right-click or wheel inside it never
+reaches what is behind it, so a right-click there opens no node menu.
 
 ### 10.2 Modes
 

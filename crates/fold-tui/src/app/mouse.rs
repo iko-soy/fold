@@ -95,6 +95,7 @@ impl App {
         let Some(hit) = self.ui.hit_at(x, y) else { return };
         match hit {
             Hit::Backdrop => self.close_top(),
+            Hit::Popup => {}
             Hit::Button(a, target) => {
                 self.action_target = target;
                 self.run_action(a);

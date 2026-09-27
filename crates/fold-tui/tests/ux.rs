@@ -4,8 +4,9 @@
 //! of view (§10.1), editor text no save can take when fold ends or
 //! reverts (§10.6), sync conflicts that come in while you work (§10.7),
 //! the conflict copies they leave in the outline (§10.1, §12.5), what
-//! the status line says a verb did (§10.1), and the next step it shows
-//! once that is old, or a key is half typed or does nothing (§10.1).
+//! the status line says a verb did (§10.1), the next step it shows once
+//! that is old, or a key is half typed or does nothing (§10.1), and the
+//! pointer inside a popup, which never reaches the panes behind (§10.1).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -2990,4 +2991,62 @@ fn a_short_bar_keeps_the_vim_and_helix_editor_s_way_out_that_saves() {
             assert_eq!(app.mode_pub(), "normal");
         }
     }
+}
+
+// ------------------------------------------------------------ popups
+
+/// Right-click inside the popup whose top border starts `title`, off its
+/// rows and buttons: the first cell within its border.
+fn right_click_in(app: &mut App, title: &str) {
+    let b = frame(app);
+    let at = format!("╭ {}", title);
+    let (x, y) = find(&b, &at).unwrap_or_else(|| panic!("no “{}” on screen:\n{}", at, text(&b)));
+    click_at(app, x + 1, y + 1, MouseButton::Right);
+}
+
+/// Whether the last frame drew the node menu.
+fn menu_shown(app: &App) -> bool {
+    app.hit_pos(Hit::MenuItem(node_menu_index(Action::Delete))).is_some()
+}
+
+#[test]
+fn a_right_click_in_the_property_form_opens_no_menu_on_the_node_behind_it() {
+    // the form covers the reading pane: a right-click in it is on no row
+    // or line (§10.1). The node menu it opened there ran Delete on the
+    // form's own node, and the next frame drew the form on a node gone
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "G");
+    assert_eq!(selected(&app), "renew passport");
+    press(&mut app, "a");
+    right_click_in(&mut app, "Properties — renew passport");
+    let b = frame(&mut app);
+    assert!(!menu_shown(&app), "{}", text(&b));
+    assert_eq!(app.mode_pub(), "props");
+    assert!(text(&b).contains("Properties — renew passport"), "{}", text(&b));
+    assert_eq!(root(&d), SAMPLE);
+    // Esc closes the form, and the selection is where it was
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(selected(&app), "renew passport");
+}
+
+#[test]
+fn a_right_click_in_any_popup_opens_no_menu_on_the_node_behind_it() {
+    // the filter's hits and a prompt's picks are nodes too: a verb from a
+    // menu behind them renumbers what they list
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    select(&mut app, "NAS");
+    for (keys, title) in [("/", "Filter"), (":", "Commands"), ("?", "Help"), ("r", "Move to — pick a node")] {
+        press(&mut app, keys);
+        right_click_in(&mut app, title);
+        let b = frame(&mut app);
+        assert!(!menu_shown(&app), "{}: {}", title, text(&b));
+        assert!(find(&b, &format!("╭ {}", title)).is_some(), "{} closed:\n{}", title, text(&b));
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode_pub(), "normal", "{}", title);
+    }
+    assert_eq!(root(&d), SAMPLE);
 }

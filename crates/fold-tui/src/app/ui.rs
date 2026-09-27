@@ -48,6 +48,9 @@ pub mod theme {
 pub enum Hit {
     /// Everything outside an open popup: a click closes it.
     Backdrop,
+    /// Inside a popup, off its list and buttons: it covers what is behind,
+    /// so a click or right-click there does nothing (§10.1).
+    Popup,
     /// A button; with a node, the action applies to that node.
     Button(Action, Option<NRef>),
     /// A breadcrumb segment; `None` is the vault root.
@@ -1180,7 +1183,7 @@ impl App {
     fn popup(&mut self, f: &mut Frame, screen: Rect, r: Rect, title: &str, buttons: &[Action]) -> Rect {
         let r = r.intersection(screen);
         self.ui.push(screen, Hit::Backdrop);
-        self.ui.push(r, Hit::ReadingPane);
+        self.ui.push(r, Hit::Popup);
         f.render_widget(Clear, r);
         let block = rounded(Line::from(Span::styled(format!(" {} ", title), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
