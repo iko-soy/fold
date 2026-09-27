@@ -549,13 +549,13 @@ impl App {
         let before = tops(&self.vault);
         let after = self.vault.on_disk().map(|v| tops(&v));
         let status = std::mem::take(&mut self.status);
-        let typed = self.editor_dirty();
+        let dirty = self.editor_dirty();
         // a block cut in the editor stays in transit across the save: a
         // change to nothing it shows leaves it as it is (§5.2)
         self.save_editor();
         let edit = self.editor_key().map(|k| (k, self.editor_files()));
         let saved = std::mem::replace(&mut self.status, status);
-        let typed = saved.is_empty() && typed && !self.editor_dirty();
+        let typed = saved.is_empty() && dirty && !self.editor_dirty();
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
         // vault, then may close the editor, which reads the outline, before
@@ -563,23 +563,30 @@ impl App {
         self.anchor_zoom();
         // a sync-conflict file starts the merge flow (§11.2): a new one, or
         // one a merge left alone or failed on, which may merge now; what it
-        // took in without a pair is said as any change is, from the vault
-        // as the merge found it: typing saved first is not part of it. A
-        // copy that brings nothing in, one left alone or the same as its
-        // file, says nothing, as at startup. That the save took the typing
-        // is said ahead of what came in, which gives way where the bar is
-        // short; news of a pair, or an error, says no more (§10.6)
+        // took in without a pair is said as any change is, with what came in
+        // beside it, the save's typing not part of it. A copy that brings
+        // nothing in, one left alone or the same as its file, says nothing,
+        // as at startup. That the save took the typing is said ahead of what
+        // came in, which gives way where the bar is short; news of a pair,
+        // or an error, says no more (§10.6)
         let mut came_in = true;
         // listed before the merge: a copy that lands while it runs is new
         // to the next reload, not seen with these
         let copies = self.vault.conflict_files().unwrap_or_default();
         if !copies.is_empty() {
-            let was = tops(&self.vault);
+            // the merge reads the files again, as the save left them, typing
+            // and all; where nothing was saved, as read above
+            let read = after.as_ref().ok().filter(|_| !dirty).cloned();
+            let was = read.unwrap_or_else(|| self.vault.on_disk().map(|v| tops(&v)).unwrap_or_else(|_| tops(&self.vault)));
             if !self.merge_conflict_files() {
-                let now = tops(&self.vault);
-                came_in = !same_tops(&was, &now);
+                // what came in: the files against what was read, then what
+                // the merge took in over them. Not the vault as the save left
+                // it: the save took in what changed outside in a file it
+                // wrote (§5.2)
+                let now = merged_over(after.unwrap_or_else(|_| was.clone()), &was, tops(&self.vault));
+                came_in = !same_tops(&before, &now);
                 if came_in {
-                    self.say(changed_outside(&was, &now, typed));
+                    self.say(changed_outside(&before, &now, typed));
                 }
             }
         } else {
@@ -3709,6 +3716,7 @@ fn leave_screen() {
 
 /// A top-level node before or after a reload: what it holds, and a hash of
 /// its text, to say what changed (§11.2).
+#[derive(Clone)]
 struct Top {
     key: NodeKey,
     title: String,
@@ -3742,6 +3750,28 @@ fn tops(vault: &Vault) -> Vec<Top> {
             Top { key: vault.key_of(top), title: tree.node(top).title.clone(), items, sections, text: text.finish() }
         })
         .collect()
+}
+
+/// The files as read before the editor's save, `after`, with what a merge
+/// of sync-conflict copies then took in over them (§11.2): each top-level
+/// node it changed from `was` to `now` moves by as much, one it brought
+/// comes in and one gone by then goes. What the save typed, in `was` and
+/// `now` both, is not laid over.
+fn merged_over(mut after: Vec<Top>, was: &[Top], now: Vec<Top>) -> Vec<Top> {
+    after.retain(|a| !was.iter().any(|w| w.key == a.key) || now.iter().any(|n| n.key == a.key));
+    for n in now {
+        match (was.iter().find(|w| w.key == n.key), after.iter_mut().find(|a| a.key == n.key)) {
+            (Some(w), Some(a)) if w.text != n.text => {
+                a.items = (a.items + n.items).saturating_sub(w.items);
+                a.sections = (a.sections + n.sections).saturating_sub(w.sections);
+                a.title = n.title;
+                a.text = n.text;
+            }
+            (None, None) => after.push(n),
+            _ => {}
+        }
+    }
+    after
 }
 
 /// Whether two outlines' top-level nodes are the same, text and all:

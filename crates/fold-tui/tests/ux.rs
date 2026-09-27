@@ -700,6 +700,52 @@ fn a_change_from_outside_beside_a_copy_the_merge_left_alone_is_announced() {
 }
 
 #[test]
+fn a_change_from_outside_to_the_file_typed_in_beside_a_copy_the_merge_left_alone_is_announced() {
+    // the editor's save takes the phone's line into root.md before the
+    // merge runs for the copy it leaves alone (§11.2): what came in is still
+    // what the files held against what was read
+    let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+    std::fs::write(d.path().join("notes.md"), "mine\n").unwrap();
+    std::fs::write(d.path().join("notes.sync-conflict-20260926-150000-PHONE.md"), "theirs\n").unwrap();
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, " typed");
+    std::fs::write(d.path().join("root.md"), root(&d) + "- [ ] phone note\n").unwrap();
+    app.reload_external();
+    assert_eq!(root(&d), "# NAS typed\n\n- disks\n\n# Inbox\n\n- [ ] a\n- [ ] phone note\n");
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(said(&mut app), "↻ typing saved; changed outside fold: Inbox (+1 item)");
+}
+
+#[test]
+fn a_file_typed_in_and_its_copy_that_land_together_are_both_announced() {
+    // Syncthing delivers the laptop's root.md and the phone's copy of it
+    // while the editor adds to NAS: the save takes the laptop's line in, the
+    // merge the phone's (§11.2), and both came in from outside
+    let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "- cables");
+    let text = root(&d);
+    std::fs::write(d.path().join("root.md"), text.clone() + "- [ ] from laptop\n").unwrap();
+    std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE.md"), text + "- [ ] from phone\n").unwrap();
+    app.reload_external();
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was not merged");
+    assert_eq!(pairs(&mut app), 0);
+    let r = root(&d);
+    assert!(r.contains("- cables\n") && r.contains("- [ ] from laptop\n") && r.contains("- [ ] from phone\n"), "{}", r);
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(said(&mut app), "↻ typing saved; changed outside fold: Inbox (+2 items)");
+}
+
+#[test]
 fn a_copy_merged_without_a_pair_is_announced_as_what_came_in() {
     let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
     let mut app = start(&d);
