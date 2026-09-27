@@ -201,6 +201,109 @@ fn help_and_the_view_toggles_from_the_editor_keep_a_cut_block_to_paste() {
 }
 
 #[test]
+fn a_change_from_outside_to_a_file_the_editor_does_not_hold_keeps_a_cut_block_to_paste() {
+    cut_then_the_phone_writes_the_inbox(false);
+}
+
+#[test]
+fn a_change_from_outside_beside_a_copy_the_merge_left_alone_keeps_a_cut_block_to_paste() {
+    cut_then_the_phone_writes_the_inbox(true);
+}
+
+/// §5.2, §11.2: the phone writing the Inbox's own file leaves the editor
+/// on A as it is, so a block cut there is still moved once pasted; beside
+/// the conflict copy of an ignored file (`copy`) too, which the merge
+/// leaves alone.
+fn cut_then_the_phone_writes_the_inbox(copy: bool) {
+    let d = vault("# A\n\n- one\n- task\n- two\n\n# Inbox\n\n- [ ] a\n");
+    if copy {
+        std::fs::write(d.path().join("notes.md"), "mine\n").unwrap();
+        std::fs::write(d.path().join("notes.sync-conflict-20260926-150000-PHONE.md"), "theirs\n").unwrap();
+    }
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    let i = v.find_by_path(&["Inbox".into()]).unwrap();
+    let inbox_id = fold_core::ops::make_block(&mut v, i).unwrap();
+    let inbox = v.dir.join(&v.tree.files[v.tree.block_by_id(&inbox_id).unwrap().0].path);
+    drop(v);
+    let embed = format!("![[{}]]", id.as_str());
+    let inbox_embed = format!("# ![[{}]]", inbox_id.as_str());
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), format!("# A\n\n- one\n- two\n\n{}\n", inbox_embed));
+    // the phone appends to the Inbox
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&inbox).unwrap();
+        f.write_all(b"- [ ] from phone\n").unwrap();
+    }
+    until_reload(&mut app);
+    assert!(app.rows().iter().any(|r| app.title_of(r.nref) == "from phone"));
+    assert!(block.exists(), "a change to another file deleted the cut block");
+    assert_eq!(app.mode_pub(), "edit");
+    // paste it above "- one"
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(ctrl('v'));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), format!("# A\n\n{}\n- one\n- two\n\n{}\n", embed, inbox_embed));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
+#[test]
+fn a_copy_merged_into_the_file_the_editor_holds_deletes_a_block_cut_there() {
+    // §5.2, §11.2: the merge changes A's file, so the editor is re-rendered
+    // and the cut line can no longer be pasted as the block: it is deleted,
+    // never left in a file embedded nowhere
+    let d = vault("# A\n\n- one\n- task\n- two\n\n# B\n\nb\n");
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n\n# B\n\nb\n");
+    assert!(block.exists(), "in transit");
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260927-100000-PHONE.md"),
+        "# A\n\n- one\n- two\n\n# B\n\nb\n- from phone\n",
+    )
+    .unwrap();
+    until_reload(&mut app);
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was not merged");
+    let merged = root(&d);
+    assert!(merged.contains("- from phone\n"), "{}", merged);
+    assert!(!block.exists(), "a cut block was left embedded nowhere");
+    assert_eq!(app.mode_pub(), "edit");
+    // the line pasted back is text of A
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(ctrl('v'));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), merged.replace("- one\n", "- task\n- one\n"));
+    // one undo takes back the paste, the next puts back the block's file
+    app.handle_key(key(KeyCode::Char('u')));
+    assert_eq!(root(&d), merged);
+    assert!(!block.exists());
+    app.handle_key(key(KeyCode::Char('u')));
+    assert!(block.exists(), "undo did not put back the cut block's file");
+}
+
+#[test]
 fn a_change_from_outside_is_taken_in_and_announced() {
     let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
     let mut app = start(&d);

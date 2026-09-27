@@ -1223,7 +1223,9 @@ nothing.
   `↻ changed outside fold: Inbox (+1 item)`.
 - A changed file with a built-in edit in progress: the editor saves its dirty blocks first;
   a block whose span hash no longer matches is merged two-way (§5.2 step 5), then the file
-  is re-parsed and the buffer re-rendered around the cursor.
+  is re-parsed and the buffer re-rendered around the cursor; a block cut there and not
+  pasted back is deleted then (§5.2). A change only to files the buffer does not hold
+  leaves the editor as it is, a cut block still to paste.
 - A new `*.sync-conflict-*.md` file starts the merge flow (§12). What it merges without a
   pair is said as above, at startup too; a copy it leaves alone or fails on is no change by
   itself, and is tried again with the next change.

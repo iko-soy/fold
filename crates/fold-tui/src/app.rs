@@ -520,8 +520,8 @@ impl App {
 
     /// Reload after an external change (§11.2): editor saves first, then
     /// re-parse, cursor re-attached by id, key, deepest surviving step, and
-    /// the editor re-rendered. A new sync-conflict file starts the merge
-    /// flow (§12).
+    /// the editor re-rendered if a file it holds changed. A new
+    /// sync-conflict file starts the merge flow (§12).
     pub fn reload_external(&mut self) {
         // what popups show is held by key: the editor's save and the reload
         // re-parse files, renumbering their nodes. A closed property form's
@@ -535,7 +535,10 @@ impl App {
         let after = self.vault.on_disk().map(|v| tops(&v));
         let status = std::mem::take(&mut self.status);
         let typed = self.editor_dirty();
-        let edit = self.editor_before_write("external change");
+        // a block cut in the editor stays in transit across the save: a
+        // change to no file the editor holds leaves it as it is (§5.2)
+        self.save_editor();
+        let edit = self.editor_key().map(|k| (k, self.editor_files()));
         let mut saved = std::mem::replace(&mut self.status, status);
         if saved.is_empty() && typed && !self.editor_dirty() {
             saved = "your typing was saved first".into();
@@ -560,6 +563,9 @@ impl App {
                 Err(e) => self.say(format!("reload error: {}", e)),
             }
         }
+        // a change to a file it holds re-renders it (below): its cut blocks
+        // are deleted first, before the zoom and the cursor are found again
+        let edit = edit.filter(|(_, files)| *files != self.editor_files() && self.drop_cut_blocks());
         if !saved.is_empty() {
             self.say(format!("{} · {}", self.status, saved));
         }
@@ -589,7 +595,45 @@ impl App {
                 self.filter_sel = i;
             }
         }
-        self.editor_after_write(edit);
+        if let Some((key, _)) = edit {
+            self.rebuild_editor(self.find_exact(&key));
+        }
+    }
+
+    /// The text of each file the open editor holds, found as the editor
+    /// finds it: by id, else by path; None for one gone.
+    fn editor_files(&self) -> Vec<Option<String>> {
+        let Some(ed) = self.editor.as_ref() else { return Vec::new() };
+        let tree = &self.vault.tree;
+        let file = |i: &fold_core::edit::OwnerInfo| match &i.id {
+            Some(id) => tree.block_by_id(id).map(|r| r.0),
+            None => self.vault.file_index(&i.path),
+        };
+        ed.buf.owners.values().map(|i| file(i).map(|f| tree.files[f].text.clone())).collect()
+    }
+
+    /// Before the editor is re-rendered over files a reload changed
+    /// (§11.2): a block cut there and not pasted back cannot be pasted as
+    /// itself any more, and is deleted as on a Revert (§5.2), one op
+    /// (§10.10). True when the editor can be re-rendered: text a refused
+    /// save still holds is not, nor is one whose cut blocks stay.
+    fn drop_cut_blocks(&mut self) -> bool {
+        if self.editor_dirty() {
+            return false;
+        }
+        let Some(ed) = self.editor.as_mut() else { return false };
+        let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(ed, None)));
+        let res = ed.buf.discard(&mut self.vault);
+        if res.is_ok() {
+            // let go of: what it held is deleted here, not by the next save
+            ed.release_clip();
+            ed.buf.dirty.clear();
+        }
+        self.record_undo(snap);
+        if let Err(e) = &res {
+            self.say(format!("error: {}", e));
+        }
+        res.is_ok()
     }
 
     /// The merge flow (§12.2): merge the sync-conflict copies, then show
@@ -1518,9 +1562,9 @@ impl App {
         Some(r)
     }
 
-    /// Before something writes files under an open editor, an outline verb
-    /// or a reload (§10.6, §11.2): the editor saves first. Returns what it
-    /// is open on and the files as they are, for `editor_after_write`.
+    /// Before an outline verb writes files under an open editor (§10.6):
+    /// the editor saves first. Returns what it is open on and the files as
+    /// they are, for `editor_after_write`.
     fn editor_before_write(&mut self, why: &str) -> Option<(NodeKey, ops::Snapshot)> {
         // the editor is re-rendered after, so a block cut and not pasted
         // back cannot be pasted as itself any more: once the editor is
