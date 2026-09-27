@@ -2885,7 +2885,19 @@ impl App {
         // node is held by key across it
         let target = self.action_target.map(|t| self.vault.key_of(t));
         let edit = match a {
-            Action::EditRevert => None,
+            // help, the popups and the view toggles write nothing and go
+            // back to the editor as it was: a block cut in it is still
+            // there to paste (§5.2)
+            Action::EditRevert
+            | Action::Help
+            | Action::Palette
+            | Action::Filter
+            | Action::Close
+            | Action::HideDone
+            | Action::ReadingPane
+            | Action::Wrap
+            | Action::RawMode
+            | Action::EditorKeys => None,
             _ => self.editor_before_write("outline verb"),
         };
         self.action_target = target.as_ref().and_then(|k| self.find_exact(k));

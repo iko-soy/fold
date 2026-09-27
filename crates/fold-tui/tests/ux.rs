@@ -156,6 +156,51 @@ fn a_nested_block_cut_in_the_editor_survives_until_it_is_pasted() {
 }
 
 #[test]
+fn help_and_the_view_toggles_from_the_editor_keep_a_cut_block_to_paste() {
+    // §5.2: help, the palette and the view toggles write nothing, so a
+    // block cut in the editor is still moved once pasted after them
+    let d = vault("# A\n\n- one\n- task\n- two\n");
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let embed = format!("![[{}]]", id.as_str());
+    let before = std::fs::read_to_string(&block).unwrap();
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n");
+    // F1, then Esc back to the editor
+    app.handle_key(key(KeyCode::F(1)));
+    assert_eq!(app.mode_pub(), "help");
+    app.handle_key(key(KeyCode::Esc));
+    assert!(block.exists(), "F1 deleted the cut block");
+    // the top bar's ?, closed with its ✕
+    click_button(&mut app, Action::Help);
+    assert_eq!(app.mode_pub(), "help");
+    click_button(&mut app, Action::Close);
+    assert!(block.exists(), "the ? button deleted the cut block");
+    // wrap lines from ☰ Commands
+    click_button(&mut app, Action::Palette);
+    press(&mut app, "wrap");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(block.exists(), "a view toggle deleted the cut block");
+    assert_eq!(app.mode_pub(), "edit");
+    // paste it above "- one"
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(ctrl('v'));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), format!("# A\n\n{}\n- one\n- two\n", embed));
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
+#[test]
 fn a_change_from_outside_is_taken_in_and_announced() {
     let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
     let mut app = start(&d);
