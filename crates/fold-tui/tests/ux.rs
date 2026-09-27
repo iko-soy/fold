@@ -1586,6 +1586,74 @@ fn the_node_menu_of_a_pair_fits_a_short_terminal_resolve_conflict_and_all() {
     assert_eq!(pair_shown(&mut app), "NAS");
 }
 
+/// The pointer moves to a point and rests there.
+fn point(app: &mut App, x: u16, y: u16) {
+    app.handle_mouse(MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE });
+}
+
+/// Right-click NAS on an 80×14 terminal: its menu fills the screen and
+/// stops short of Resolve conflict…. The column its items are drawn in,
+/// and its first and last item rows.
+fn short_menu(app: &mut App) -> (u16, u16, u16) {
+    let b = frame_at(app, 80, 14);
+    let (x, y) = find(&b, "NAS").unwrap();
+    point(app, x, y);
+    click_at(app, x, y, MouseButton::Right);
+    let b = frame_at(app, 80, 14);
+    assert!(find(&b, "│ Edit ").is_some() && find(&b, "Resolve conflict…").is_none(), "{}", text(&b));
+    let x = find(&b, "│ Edit ").unwrap().0 + 2;
+    let rows: Vec<u16> = (0..14).filter(|&y| matches!(app.hit_at(x, y), Some(Hit::MenuItem(_)))).collect();
+    (x, rows[0], *rows.last().unwrap())
+}
+
+#[test]
+fn on_a_short_terminal_the_wheel_scrolls_the_node_menu() {
+    let (_d, mut app) = lab();
+    let (x, top, _) = short_menu(&mut app);
+    // over its first item, the wheel goes down to the last item, back up
+    // to the first, and down again for a click to run the last
+    for (kind, to, gone) in [
+        (MouseEventKind::ScrollDown, "Resolve conflict…", "│ Edit "),
+        (MouseEventKind::ScrollUp, "│ Edit ", "Resolve conflict…"),
+        (MouseEventKind::ScrollDown, "Resolve conflict…", "│ Edit "),
+    ] {
+        for _ in 0..10 {
+            app.handle_mouse(MouseEvent { kind, column: x, row: top, modifiers: KeyModifiers::NONE });
+            frame_at(&mut app, 80, 14);
+        }
+        let b = frame_at(&mut app, 80, 14);
+        assert!(find(&b, to).is_some() && find(&b, gone).is_none(), "{:?}:\n{}", kind, text(&b));
+    }
+    let (x, y) = find(&frame_at(&mut app, 80, 14), "Resolve conflict…").unwrap();
+    click_at(&mut app, x, y, MouseButton::Left);
+    assert_eq!(pair_shown(&mut app), "NAS");
+}
+
+#[test]
+fn a_pointer_resting_on_the_node_menu_leaves_the_keys_to_scroll_it() {
+    let (_d, mut app) = lab();
+    let (x, _, bottom) = short_menu(&mut app);
+    // moved onto the last row, the pointer highlights its item
+    point(&mut app, x, bottom);
+    assert_eq!(frame_at(&mut app, 80, 14)[(x, bottom)].bg, ratatui::style::Color::Indexed(24));
+    // resting there, ↓ goes down to the last item and ↑ back up to the
+    // first, which Enter runs
+    for _ in 0..30 {
+        app.handle_key(key(KeyCode::Down));
+        frame_at(&mut app, 80, 14);
+    }
+    let b = frame_at(&mut app, 80, 14);
+    assert!(find(&b, "Resolve conflict…").is_some() && find(&b, "│ Edit ").is_none(), "{}", text(&b));
+    for _ in 0..30 {
+        app.handle_key(key(KeyCode::Up));
+        frame_at(&mut app, 80, 14);
+    }
+    let b = frame_at(&mut app, 80, 14);
+    assert!(find(&b, "│ Edit ").is_some() && find(&b, "Resolve conflict…").is_none(), "{}", text(&b));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.mode_pub(), "edit");
+}
+
 #[test]
 fn the_reading_pane_marks_a_conflict_copy_s_title_line() {
     let (_d, mut app) = lab();

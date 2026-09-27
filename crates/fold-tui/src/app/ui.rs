@@ -1234,14 +1234,17 @@ impl App {
                     put(buf, inner.x, yy, &"─".repeat(inner.width as usize), inner.width, Style::default().fg(theme::DIM));
                 }
                 Some(a) => {
-                    let hovered = self.ui.hovered(row);
-                    if hovered {
-                        if let Some(m) = self.ui.menu.as_mut() {
-                            m.sel = i;
-                        }
-                    }
-                    let sel = self.ui.menu.as_ref().map(|m| m.sel == i).unwrap_or(false);
-                    let base = if sel { Style::default().bg(theme::SEL) } else { Style::default() };
+                    // the item the pointer moved onto is highlighted
+                    // (mouse.rs); once the keys or the wheel move on, the
+                    // row it rests on is only hovered
+                    let bg = if menu.sel == i {
+                        Some(theme::SEL)
+                    } else if self.ui.hovered(row) {
+                        Some(theme::HOVER)
+                    } else {
+                        None
+                    };
+                    let base = bg.map(|b| Style::default().bg(b)).unwrap_or_default();
                     buf.set_style(row, base);
                     let label_style = if *a == Action::Delete { base.fg(theme::DANGER) } else { base };
                     put(buf, inner.x + 1, yy, a.label(), inner.width.saturating_sub(2), label_style);

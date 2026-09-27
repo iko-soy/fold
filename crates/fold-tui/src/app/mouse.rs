@@ -36,7 +36,14 @@ impl App {
     fn handle_mouse_inner(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
         match m.kind {
-            MouseEventKind::Moved => self.ui.hover = Some((x, y)),
+            MouseEventKind::Moved => {
+                self.ui.hover = Some((x, y));
+                // the pointer moving onto a menu item highlights it; one
+                // resting there leaves the keys and the wheel to move it
+                if let (Some(Hit::MenuItem(i)), Some(m)) = (self.ui.hit_at(x, y), self.ui.menu.as_mut()) {
+                    m.sel = i;
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.ui.hover = Some((x, y));
                 self.mouse_down(x, y);
@@ -351,6 +358,7 @@ impl App {
     fn mouse_wheel(&mut self, x: u16, y: u16, delta: i32) {
         let step = |v: usize| (v as i64 + delta as i64).max(0) as usize;
         if self.ui.menu.is_some() {
+            self.menu_step(delta);
             return;
         }
         if self.prompt.is_some() {

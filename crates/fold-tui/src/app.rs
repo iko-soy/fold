@@ -3050,20 +3050,24 @@ impl App {
     }
 
     fn key_menu(&mut self, key: KeyEvent) {
+        let Some(menu) = self.ui.menu.as_ref() else { return };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => self.ui.menu = None,
+            KeyCode::Up | KeyCode::Char('k') => self.menu_step(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.menu_step(1),
+            KeyCode::Enter => self.run_menu_item(menu.sel),
+            _ => {}
+        }
+    }
+
+    /// Move the node menu's highlight `by` items, over its separators: the
+    /// keys one, the wheel three (§10.1).
+    fn menu_step(&mut self, by: i32) {
         let all = self.menu_items();
         let Some(menu) = self.ui.menu.as_mut() else { return };
         let items: Vec<usize> = (0..all.len()).filter(|&i| all[i].is_some()).collect();
-        let pos = items.iter().position(|&i| i == menu.sel).unwrap_or(0);
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => self.ui.menu = None,
-            KeyCode::Up | KeyCode::Char('k') => menu.sel = items[pos.saturating_sub(1)],
-            KeyCode::Down | KeyCode::Char('j') => menu.sel = items[(pos + 1).min(items.len() - 1)],
-            KeyCode::Enter => {
-                let i = menu.sel;
-                self.run_menu_item(i);
-            }
-            _ => {}
-        }
+        let pos = items.iter().position(|&i| i == menu.sel).unwrap_or(0) as i64;
+        menu.sel = items[(pos + by as i64).clamp(0, items.len() as i64 - 1) as usize];
     }
 
     /// Run a node-menu item on the menu's target, found by its key; the
