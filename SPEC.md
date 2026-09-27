@@ -582,8 +582,9 @@ in it moved. `splice(block)` writes one dirty block:
 
 Splice runs without being asked (§10.6): when the cursor moves from a dirty block into
 another block, after a pause in typing, on leaving the editor, before any outline verb,
-before a reload, and on quit. A commit may write several files — one per dirty block — but
-each block is written by its own splice, and the law holds per block.
+before a reload, and on quit or any other end of the app. A commit may write several
+files — one per dirty block — but each block is written by its own splice, and the law
+holds per block.
 
 Edge cases follow from the tags, not from rules:
 
@@ -1008,11 +1009,19 @@ app keeps track. Blocks are saved on their own:
 - when the cursor moves out of a block that has changed;
 - after 750 ms without a keystroke;
 - on `Esc` or *Done* (back to normal mode), on any outline verb, before a reload caused by
-  an external change, and on quit.
+  an external change, and on quit;
+- when the app ends any other way: `SIGTERM`, `SIGHUP` (a closed window, a dropped ssh
+  session), `SIGINT`, an I/O error, a panic.
 
 The pane's border shows the title of the block the cursor is in and a dot while something
 is unsaved, and lines of other blocks in the subtree are drawn a shade dimmer — the only
 hints that blocks exist. *Revert* (or `:q!`) discards changes made since the last save.
+
+Text a save cannot take — its block changed on disk under it (§5.2) — stays in the editor,
+and is never dropped without a copy: *Revert* first writes the editor's whole text to the
+trash as `unsaved-<title>.md` (§11.5) and the status line names the entry, and the app
+ending any way but a quit does the same, saying where once the terminal is back. However it
+ends, the app leaves the terminal as it found it, a panic's message printed after.
 
 **Keymaps.** The editor speaks one of three keymaps, over the same text, cursor, selection,
 clipboard and undo:
@@ -1185,7 +1194,8 @@ engine.
 
 Deleted subtrees and resolved `conflict:` blocks are written to
 `$XDG_STATE_HOME/notes/trash/<timestamp>-<id-or-name>.md` (device-local, never synced) before
-removal. `notes trash list|restore` manages it. The app never deletes user content without
+removal; editor text no save could take, to `<timestamp>-unsaved-<title>.md` (§10.6).
+`notes trash list|restore` manages it. The app never deletes user content without
 a trash copy.
 
 ---

@@ -118,6 +118,9 @@ pub struct App {
     /// Where an outline verb moved the node the editor is open on: the
     /// editor is re-rendered there after the verb (`follow`).
     edit_moved: Option<NRef>,
+    /// A save of the editor's text failed and none has gone through since:
+    /// *Revert* keeps a copy of the text in the trash (§10.6).
+    edit_refused: bool,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -222,6 +225,7 @@ impl App {
             edit_last_key: Instant::now(),
             edit_return: Focus::Outline,
             edit_moved: None,
+            edit_refused: false,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -1041,6 +1045,7 @@ impl App {
         }
         let buf = fold_core::edit::open_editor(&self.vault, target);
         self.editor = Some(editor::Editor::new(buf, self.edit_keys, self.edit_clip.clone()));
+        self.edit_refused = false;
         if self.mode != Mode::Edit {
             self.edit_return = self.focus;
         }
@@ -1122,6 +1127,7 @@ impl App {
                 false
             }
         };
+        self.edit_refused = !saved;
         self.edit_last_key = Instant::now();
         saved
     }
@@ -1286,6 +1292,8 @@ impl App {
             self.settle_zoom_after_save(on_editor);
             if res.is_ok() {
                 self.record_undo(snap);
+            } else {
+                self.edit_refused = true;
             }
         }
     }
@@ -1754,15 +1762,31 @@ impl App {
         }
     }
 
-    /// Drop the editor's unsaved changes (§10.6: *Revert*, `:q!`).
+    /// Drop the editor's unsaved changes (§10.6: *Revert*, `:q!`). Text a
+    /// save was refused for is copied to the trash first (§11.5), and the
+    /// status line names the copy; one that cannot be written drops
+    /// nothing.
     fn discard_editor(&mut self) {
+        let mut said = String::from("changes discarded");
+        if let Some((name, text)) = self.editor_text().filter(|_| self.edit_refused && self.editor_dirty()) {
+            match self.vault.trash_text(&name, &text) {
+                Ok(p) => {
+                    let entry = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    said = format!("{}; a copy is in the trash: {}", said, entry);
+                }
+                Err(e) => {
+                    self.say(format!("error: {}; nothing discarded", e));
+                    return;
+                }
+            }
+        }
+        self.edit_refused = false;
         let ed = self.editor.take();
         self.mode = Mode::Normal;
         self.focus = self.edit_return;
         // the reload may renumber nodes: files can have changed on disk
         self.anchor_zoom();
         let _ = self.vault.reload();
-        let mut said = String::from("changes discarded");
         if let Some(ed) = ed {
             // a block a save took out of its parent (cut and not pasted
             // back, or deleted) cannot be pasted back as itself any more:
@@ -1777,6 +1801,32 @@ impl App {
         self.settle_zoom();
         self.clamp_cursor();
         self.say(said);
+    }
+
+    /// When fold ends any way but a quit — a signal, an error, a panic —
+    /// the editor is saved as on a quit (§10.6), and text no save can take
+    /// goes to the trash whole (§11.5). What to say once the terminal is
+    /// back, if anything.
+    pub fn keep_unsaved(&mut self) -> Option<String> {
+        // the text is taken first: after a panic, the save may panic too
+        let (name, text) = self.editor_text().filter(|_| self.editor_dirty())?;
+        let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.save_editor_releasing("exit")));
+        if saved.unwrap_or(false) {
+            return None;
+        }
+        Some(match self.vault.trash_text(&name, &text) {
+            Ok(p) => format!("unsaved text kept in {}", p.display()),
+            Err(e) => format!("unsaved text could not go to the trash ({}); here it is:\n\n{}", e, text),
+        })
+    }
+
+    /// The editor's whole text, and the name the trash keeps it under:
+    /// `unsaved-<title>.md`, by the node it is open on.
+    fn editor_text(&self) -> Option<(String, String)> {
+        let ed = self.editor.as_ref()?;
+        let title = ed.buf.owners.values().find(|i| i.parent.is_none()).map(|i| i.title.as_str()).unwrap_or("");
+        let text = ed.buf.lines.iter().map(|l| format!("{}\n", l.text)).collect();
+        Some((format!("unsaved-{}.md", fold_core::slug(title)), text))
     }
 
     /// A key verb on the selection while the wheel has left it out of view
@@ -2786,7 +2836,9 @@ fn extract_url(line: &str) -> Option<String> {
 // ------------------------------------------------------------ main loop
 
 /// Run the TUI on a vault. `keys` picks the editor's keymap (`normal`,
-/// `vim`, `helix`), overriding `$FOLD_KEYS`.
+/// `vim`, `helix`), overriding `$FOLD_KEYS`. However the session ends — a
+/// quit, a signal, an error, a panic — the terminal is put back, and the
+/// editor saved or its text kept in the trash (§10.6).
 pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
     let mut app = App::new(dir)?;
     if let Some(k) = keys {
@@ -2807,20 +2859,89 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
     if app.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
         app.merge_conflict_files("merged on startup");
     }
-    enable_raw_mode()?;
-    std::io::stdout().execute(EnterAlternateScreen)?;
-    std::io::stdout().execute(EnableMouseCapture)?;
-    std::io::stdout().execute(EnableBracketedPaste)?;
-    let backend = CrosstermBackend::new(std::io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    let res = run_loop(&mut terminal, &mut app);
+    let stop = stop_signals()?;
+    let screen = Screen::enter()?;
+    // a panic is caught here once its message is out (`Screen`), so the
+    // editor is still saved or kept before it goes on
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+        run_loop(&mut terminal, &mut app, &stop)
+    }));
+    // a quit closed the editor; any other end saves it, or keeps its text
+    let kept = app.keep_unsaved();
     let _ = view::save(dir, &app.view());
-    disable_raw_mode()?;
-    std::io::stdout().execute(DisableBracketedPaste)?;
-    std::io::stdout().execute(DisableMouseCapture)?;
-    std::io::stdout().execute(SetCursorStyle::DefaultUserShape)?;
-    std::io::stdout().execute(LeaveAlternateScreen)?;
-    res
+    drop(screen);
+    if let Some(words) = kept {
+        use std::io::Write;
+        // the terminal may be gone (a closed window): nothing to say it on
+        let _ = writeln!(std::io::stderr(), "{}", words);
+    }
+    match res {
+        Ok(res) => res,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// SIGTERM, SIGHUP (a closed window, a dropped ssh session) and SIGINT
+/// set a flag the main loop checks, so fold ends as on a quit, the editor
+/// saved or its text kept (§10.6), instead of dying mid-sentence.
+fn stop_signals() -> std::io::Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(sig, stop.clone())?;
+    }
+    Ok(stop)
+}
+
+thread_local! {
+    /// Whether this thread has the terminal as the TUI sets it up.
+    static ON_SCREEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The terminal as the TUI sets it up — raw, the alternate screen, mouse
+/// capture, bracketed paste — put back as it was when this drops, however
+/// the session ends. A panic puts it back before its message is printed,
+/// so the message is not lost with the alternate screen.
+struct Screen;
+
+impl Screen {
+    fn enter() -> std::io::Result<Screen> {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // a panic on another thread leaves the screen be
+            leave_screen();
+            hook(info);
+        }));
+        enable_raw_mode()?;
+        ON_SCREEN.set(true);
+        let screen = Screen;
+        std::io::stdout().execute(EnterAlternateScreen)?;
+        std::io::stdout().execute(EnableMouseCapture)?;
+        std::io::stdout().execute(EnableBracketedPaste)?;
+        Ok(screen)
+    }
+}
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        leave_screen();
+    }
+}
+
+/// Put the terminal back, once, if this thread set it up. Errors are
+/// ignored: the terminal may be gone.
+fn leave_screen() {
+    if !ON_SCREEN.try_with(|s| s.replace(false)).unwrap_or(false) {
+        return;
+    }
+    let _ = disable_raw_mode();
+    let mut out = std::io::stdout();
+    let _ = out.execute(DisableBracketedPaste);
+    let _ = out.execute(DisableMouseCapture);
+    let _ = out.execute(SetCursorStyle::DefaultUserShape);
+    let _ = out.execute(crossterm::cursor::Show);
+    let _ = out.execute(LeaveAlternateScreen);
 }
 
 /// A top-level node before or after a reload: what it holds, and a hash of
@@ -2909,9 +3030,15 @@ fn base64(bytes: &[u8]) -> String {
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<()> {
+    let events = read_events();
     let mut block = None;
     loop {
+        // a signal ends the session (`stop_signals`)
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         terminal.draw(|f| app.draw(f))?;
         // the cursor's shape follows the editor's mode
         let want = app.cursor_block();
@@ -2936,13 +3063,31 @@ fn run_loop(
             app.quit = false;
         }
         app.tick();
-        if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Mouse(m) => app.handle_mouse(m),
-                Event::Key(key) => app.handle_key(key),
-                Event::Paste(text) => app.handle_paste(&text),
-                _ => {}
-            }
+        let event = match events.recv_timeout(Duration::from_millis(200)) {
+            Ok(event) => event?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("no more input from the terminal"),
+        };
+        match event {
+            Event::Mouse(m) => app.handle_mouse(m),
+            Event::Key(key) => app.handle_key(key),
+            Event::Paste(text) => app.handle_paste(&text),
+            _ => {}
         }
     }
+}
+
+/// The terminal's events, read on a thread of their own: once the terminal
+/// is gone (a closed window), crossterm reads it without end, and the main
+/// loop must still come round to the signal that says so.
+fn read_events() -> std::sync::mpsc::Receiver<std::io::Result<Event>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || loop {
+        let event = event::read();
+        let failed = event.is_err();
+        if tx.send(event).is_err() || failed {
+            return;
+        }
+    });
+    rx
 }

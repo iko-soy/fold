@@ -508,6 +508,7 @@ dependencies = [
  "notify",
  "nucleo",
  "ratatui",
+ "signal-hook",
  "tempfile",
  "tree-sitter",
  "tree-sitter-ada",

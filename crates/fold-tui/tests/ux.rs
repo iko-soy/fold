@@ -1,7 +1,8 @@
 //! What the app does over time, as `fold` runs it: the watcher, the
 //! autosave and the status line (§10.6, §11.2), where the selection goes
-//! when rows come and go (§8.5), and keys on a selection the wheel left
-//! out of view (§10.1).
+//! when rows come and go (§8.5), keys on a selection the wheel left out
+//! of view (§10.1), and editor text no save can take when fold ends or
+//! reverts (§10.6).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -507,4 +508,101 @@ fn the_pointer_acts_on_a_selection_out_of_view_at_once() {
     let (x, y) = app.hit_pos(Hit::MenuItem(node_menu_index(Action::Delete))).unwrap();
     app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
     assert!(!root(&d).contains("task number 2\n"), "{}", root(&d));
+}
+
+// ------------------------------------------------------------ unsaved text
+
+/// The trash entries for editor text on `title`'s node that fold could
+/// not save (§11.5), `<timestamp>-unsaved-<title>.md`, as the returned
+/// closure finds them: those made after this call, since the trash
+/// outlives a test run.
+fn kept(title: &str) -> impl Fn() -> Vec<std::path::PathBuf> {
+    let suffix = format!("-unsaved-{}.md", title);
+    let entries = move || {
+        let mut out: Vec<_> = std::fs::read_dir(fold_core::vault::trash_dir())
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        out.retain(|p: &std::path::PathBuf| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix)));
+        out
+    };
+    let before = entries();
+    move || entries().into_iter().filter(|p| !before.contains(p)).collect()
+}
+
+/// The editor open on the vault's first node, `typed` typed at the end of
+/// its title line.
+fn typing(d: &tempfile::TempDir, typed: &str) -> App {
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(EditKeys::Normal);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, typed);
+    app
+}
+
+#[test]
+fn reverting_text_a_save_was_refused_for_keeps_a_copy_in_the_trash() {
+    let d = vault("# Rotation schedule\n\nkeep 24\n");
+    let kept = kept("rotation-schedule");
+    let mut app = typing(&d, " hourly");
+    // another program changes the node: the save is refused, and the
+    // editor stays open with the text
+    std::fs::write(d.path().join("root.md"), "# Rotation schedule\n\nkeep 48\n").unwrap();
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "edit");
+    // :q! leaves it, and the text goes to the trash first
+    app.handle_key(ctrl('e'));
+    press(&mut app, "q!");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# Rotation schedule\n\nkeep 48\n");
+    let copies = kept();
+    assert_eq!(copies.len(), 1, "{:?}", copies);
+    assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "# Rotation schedule hourly\n\nkeep 24\n");
+    // the status line says where
+    let name = copies[0].file_name().unwrap().to_string_lossy().to_string();
+    let s = status(&mut app);
+    assert!(s.contains(&format!("changes discarded; a copy is in the trash: {}", name)), "{}", s);
+}
+
+#[test]
+fn reverting_text_no_save_refused_keeps_no_copy() {
+    let d = vault("# Retention window\n\nkeep 24\n");
+    let kept = kept("retention-window");
+    let mut app = typing(&d, " days");
+    app.run_action(Action::EditRevert);
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), "# Retention window\n\nkeep 24\n");
+    assert!(kept().is_empty());
+    let s = status(&mut app);
+    assert!(s.contains("changes discarded") && !s.contains("trash"), "{}", s);
+}
+
+#[test]
+fn ending_fold_while_editing_saves_the_editor() {
+    // a signal, an error or a crash: the editor is saved as on a quit
+    let d = vault("# Offsite copy\n\nnightly\n");
+    let kept = kept("offsite-copy");
+    let mut app = typing(&d, " to B2");
+    assert_eq!(app.keep_unsaved(), None);
+    assert_eq!(root(&d), "# Offsite copy to B2\n\nnightly\n");
+    assert!(kept().is_empty());
+    // nothing unsaved, nothing to keep
+    assert_eq!(app.keep_unsaved(), None);
+}
+
+#[test]
+fn ending_fold_with_text_a_save_was_refused_for_keeps_it_in_the_trash() {
+    let d = vault("# Scrub cadence\n\n- monthly\n- [ ] scrub now\n");
+    let kept = kept("scrub-cadence");
+    let mut app = typing(&d, " weekly");
+    std::fs::write(d.path().join("root.md"), "# Scrub cadence\n\n- monthly, from the phone\n- [ ] scrub now\n").unwrap();
+    let words = app.keep_unsaved().expect("nothing kept");
+    let copies = kept();
+    assert_eq!(copies.len(), 1, "{:?}", copies);
+    assert_eq!(words, format!("unsaved text kept in {}", copies[0].display()));
+    // the editor's whole text, as it was
+    assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "# Scrub cadence weekly\n\n- monthly\n- [ ] scrub now\n");
+    // and the other program's change stays
+    assert_eq!(root(&d), "# Scrub cadence\n\n- monthly, from the phone\n- [ ] scrub now\n");
 }

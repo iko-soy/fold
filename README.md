@@ -65,7 +65,10 @@ per vault for next time.
 
 `e` edits the selected subtree's Markdown in the reading pane. It saves on its own — when
 you pause, when you leave a part of the tree that lives in another file, and when you're
-done. Pick a keymap with `--keys` or `$FOLD_KEYS`, or click `⌨` in the editor's border:
+done, or when fold is closed some other way (the window closed, the ssh session dropped,
+a crash). Text it cannot save because the file changed under it goes to the trash, and
+fold says where. Pick a keymap with `--keys` or `$FOLD_KEYS`, or click `⌨` in the editor's
+border:
 
 - **normal** (default) — a conventional editor like micro: Shift+arrows select,
   `Ctrl-C`/`X`/`V`, `Ctrl-Z`/`Y`, `Ctrl-S`, `Ctrl-F`.

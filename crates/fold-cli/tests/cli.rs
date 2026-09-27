@@ -206,3 +206,205 @@ fn merge_trashes_conflict_file_across_filesystems() {
         .stdout(predicate::str::contains("no sync-conflict files"));
     assert_eq!(md_files(dir.path()), before);
 }
+
+// ------------------------------------------------------------ the TUI in a terminal
+
+/// `fold` in a terminal of its own, the one util-linux `script` gives it:
+/// what it writes there, keys typed into it, and its pid.
+#[cfg(target_os = "linux")]
+struct Tty {
+    script: std::process::Child,
+    keys: std::process::ChildStdin,
+    out: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    pid: u32,
+}
+
+/// Poll `f` for up to 10 s until it gives something.
+#[cfg(target_os = "linux")]
+fn until<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(t) = f() {
+            return Some(t);
+        }
+        if std::time::Instant::now() > end {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Tty {
+    /// fold on `vault`, with the normal keymap, in a 120×32 terminal, its
+    /// trash under `state`; None where there is no `script` to run it in.
+    fn start(vault: &std::path::Path, state: &std::path::Path) -> Option<Tty> {
+        use std::io::Read;
+        use std::process::Stdio;
+        let pidfile = state.join("fold.pid");
+        let cmd = format!(
+            "stty cols 120 rows 32; echo $$ > '{}'; exec '{}' --keys normal --vault '{}'",
+            pidfile.display(),
+            env!("CARGO_BIN_EXE_fold"),
+            vault.display()
+        );
+        let script = std::process::Command::new("script")
+            .args(["-qfec", &cmd, "/dev/null"])
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "xterm-256color")
+            .env("XDG_STATE_HOME", state)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut script) = script else {
+            eprintln!("skipped: no script(1) to give fold a terminal");
+            return None;
+        };
+        let keys = script.stdin.take().unwrap();
+        let mut stdout = script.stdout.take().unwrap();
+        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = out.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0; 4096];
+            while let Ok(n @ 1..) = stdout.read(&mut buf) {
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        let pid = until(|| std::fs::read_to_string(&pidfile).ok()?.trim().parse().ok());
+        let Some(pid) = pid else {
+            let _ = script.kill();
+            eprintln!("skipped: script(1) ran no shell");
+            return None;
+        };
+        Some(Tty { script, keys, out, pid })
+    }
+
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.out.lock().unwrap()).to_string()
+    }
+
+    /// The last of the output, for a failure's message.
+    fn tail(&self) -> String {
+        let out = self.output();
+        let from = out.char_indices().rev().nth(600).map_or(0, |(i, _)| i);
+        format!("{:?}", &out[from..])
+    }
+
+    /// Whether fold draws `what` within 10 s.
+    fn shows(&self, what: &str) -> bool {
+        until(|| self.output().contains(what).then_some(())).is_some()
+    }
+
+    fn type_keys(&mut self, bytes: &str) {
+        use std::io::Write;
+        self.keys.write_all(bytes.as_bytes()).unwrap();
+        self.keys.flush().unwrap();
+    }
+
+    fn signal(&self, sig: &str) {
+        let pid = self.pid.to_string();
+        std::process::Command::new("kill").args(["-s", sig, &pid]).status().unwrap();
+    }
+
+    /// Whether fold is gone within 10 s (reaped, or a zombie no one reaps).
+    fn ended(&self) -> bool {
+        let stat = format!("/proc/{}/stat", self.pid);
+        until(|| {
+            let s = std::fs::read_to_string(&stat).unwrap_or_default();
+            let state = s.rsplit(") ").next().and_then(|r| r.chars().next());
+            matches!(state, None | Some('Z')).then_some(())
+        })
+        .is_some()
+    }
+
+    /// Open the editor on the first node, and paste ` MYTEXT` at the end of
+    /// its title line.
+    fn edit(&mut self) {
+        assert!(self.shows("Snapshot"), "fold drew nothing:\n{}", self.tail());
+        self.type_keys("e");
+        assert!(self.shows("EDIT"), "no editor:\n{}", self.tail());
+        // End, then a bracketed paste
+        self.type_keys("\x1b[F\x1b[200~ MYTEXT\x1b[201~");
+        assert!(self.shows("MYTEXT"), "nothing typed:\n{}", self.tail());
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Tty {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &self.pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = self.script.kill();
+        let _ = self.script.wait();
+    }
+}
+
+/// A vault named as a real one is (tempfile's own names start with a dot),
+/// and a state directory for its trash.
+#[cfg(target_os = "linux")]
+fn vault_and_state(root: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let vault = tempfile::Builder::new().prefix("vault").tempdir().unwrap();
+    std::fs::write(vault.path().join("root.md"), root).unwrap();
+    (vault, tempfile::tempdir().unwrap())
+}
+
+/// Where the output puts the terminal back as it was: out of the
+/// alternate screen, the mouse and bracketed paste turned off before.
+#[cfg(target_os = "linux")]
+fn put_back(out: &str) -> Option<usize> {
+    let at = out.rfind("\x1b[?1049l")?;
+    let tail = &out[out.rfind("\x1b[?1049h")?..at];
+    (tail.contains("\x1b[?1000l") && tail.contains("\x1b[?2004l")).then_some(at)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_signal_saves_the_editor_and_puts_the_terminal_back() {
+    let (vault, state) = vault_and_state("# Snapshot policy\n\nkeep 24\n");
+    let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
+    tty.edit();
+    tty.signal("TERM");
+    assert!(tty.ended(), "fold still runs");
+    let root = std::fs::read_to_string(vault.path().join("root.md")).unwrap();
+    assert_eq!(root, "# Snapshot policy MYTEXT\n\nkeep 24\n");
+    assert!(put_back(&tty.output()).is_some(), "terminal left as fold had it:\n{}", tty.tail());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_signal_keeps_text_a_save_was_refused_for_in_the_trash_and_says_where() {
+    let (vault, state) = vault_and_state("# Snapshot policy\n\nkeep 24\n");
+    let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
+    tty.edit();
+    // another program changes the node under the typing: no save can go
+    // through
+    std::fs::write(vault.path().join("root.md"), "# Snapshot policy\n\nkeep 48\n").unwrap();
+    tty.signal("TERM");
+    assert!(tty.ended(), "fold still runs");
+    let root = std::fs::read_to_string(vault.path().join("root.md")).unwrap();
+    assert_eq!(root, "# Snapshot policy\n\nkeep 48\n");
+    // said once the terminal is back, so it stays on screen
+    let out = tty.output();
+    let back = put_back(&out).unwrap_or_else(|| panic!("terminal left as fold had it:\n{}", tty.tail()));
+    let said = out[back..].find("unsaved text kept in ").unwrap_or_else(|| panic!("nothing said:\n{}", tty.tail()));
+    let path = out[back + said..]["unsaved text kept in ".len()..].lines().next().unwrap().trim_end();
+    assert!(path.starts_with(&state.path().join("fold").join("trash").display().to_string()), "{}", path);
+    assert!(path.ends_with("-unsaved-snapshot-policy.md"), "{}", path);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "# Snapshot policy MYTEXT\n\nkeep 24\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn closing_the_window_saves_the_editor() {
+    let (vault, state) = vault_and_state("# Snapshot policy\n\nkeep 24\n");
+    let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
+    tty.edit();
+    // the terminal goes away: fold gets SIGHUP, and nowhere to draw
+    tty.script.kill().unwrap();
+    assert!(tty.ended(), "fold still runs");
+    let root = std::fs::read_to_string(vault.path().join("root.md")).unwrap();
+    assert_eq!(root, "# Snapshot policy MYTEXT\n\nkeep 24\n");
+}
