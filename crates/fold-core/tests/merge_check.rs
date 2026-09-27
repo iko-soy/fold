@@ -393,6 +393,45 @@ fn sync_conflict_merge_keeps_embeds_in_the_merged_file() {
 }
 
 #[test]
+fn a_copy_from_before_a_block_was_moved_is_merged_without_its_embed() {
+    // the block was cut from NAS in the editor, which wrote root.md
+    // without its embed, and is not pasted yet: moved on this device. The
+    // phone's copy, from before the cut, still embeds it in NAS; its own
+    // change comes in, the embed does not, nor into NAS's conflict copy
+    // where the phone changed NAS's text too
+    let ours = "# Homelab\n\n## NAS\n\nMirrored pairs.\n\n### [x] Replace fan\n\n# Inbox\n\n- [ ] a\n";
+    let before = ours.replace("### [x]", &format!("### ![[{}]]\n\n### [x]", BID));
+    for nas in ["Mirrored pairs.", "Snapshots every 2h."] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.md"), ours).unwrap();
+        let block = dir.path().join("racfer~snapshot-policy.md");
+        let text = format!("---\nid: {}\n---\n\n# [ ] Snapshot policy\n\n- hourly\n", BID);
+        std::fs::write(&block, &text).unwrap();
+        let copy = "root.sync-conflict-20260927-101010-PHONE77.md";
+        let theirs = before.replace("- [ ] a\n", "- [ ] a\n- [ ] from phone\n").replace("Mirrored pairs.", nas);
+        std::fs::write(dir.path().join(copy), theirs).unwrap();
+        let mut v = Vault::open(dir.path()).unwrap();
+        let moving = [fold_core::ident::Id::parse(BID).unwrap()];
+        merge::merge_sync_conflicts_moving(&mut v, false, &moving).unwrap();
+        assert!(!dir.path().join(copy).exists(), "{}", nas);
+        let merged = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+        let embed = format!("![[{}]]", BID);
+        assert!(!merged.contains(&embed), "{}: {}", nas, merged);
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), text, "{}", nas);
+        if nas == "Mirrored pairs." {
+            assert_eq!(merged, ours.replace("- [ ] a\n", "- [ ] a\n- [ ] from phone\n"));
+            assert!(merge::conflict_pairs(&v).is_empty(), "{}", merged);
+            continue;
+        }
+        assert!(merged.contains("- [ ] from phone\n"), "{}", merged);
+        let pairs = merge::conflict_pairs(&v);
+        assert_eq!(pairs.len(), 1, "{}", merged);
+        let theirs = &v.tree.files[pairs[0].1 .0].text;
+        assert!(theirs.contains("Snapshots every 2h.") && !theirs.contains(&embed), "{}", theirs);
+    }
+}
+
+#[test]
 fn merge_leaves_ignored_files_alone() {
     // §4.1/§11.4: a `.md` file without an id is ignored — never parsed,
     // never written. A sync-conflict copy of it is not ours to merge.

@@ -351,6 +351,70 @@ fn a_copy_merged_into_the_node_the_editor_shows_deletes_a_block_cut_there() {
     assert!(!block.exists(), "undo put back the block's file embedded nowhere");
 }
 
+#[test]
+fn a_copy_from_before_a_cut_brings_in_its_own_change_and_the_paste_still_moves_the_block() {
+    // §5.2, §11.2, §12.4: the phone adds to the Inbox while "task" is cut
+    // in the editor on A. root.md changed on both sides, so Syncthing
+    // delivers the phone's as a copy of root.md from before the cut, the
+    // block's embed still in A. The block is moved here, not put back where
+    // it was cut: the copy's own change comes in, the editor stays as it
+    // is, and the paste embeds the block once. With A's text changed on the
+    // phone too, its conflict copy holds no embed of the block either
+    for phone_edits_a in [false, true] {
+        let d = vault("# A\n\n- one\n- task\n- two\n\n# Inbox\n\n- [ ] a\n");
+        let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+        let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+        let id = fold_core::ops::make_block(&mut v, t).unwrap();
+        let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+        drop(v);
+        let embed = format!("![[{}]]", id.as_str());
+        let embedded = root(&d);
+        let before = std::fs::read_to_string(&block).unwrap();
+        let mut app = start(&d);
+        select(&mut app, "A");
+        app.set_edit_keys(EditKeys::Normal);
+        app.handle_key(key(KeyCode::Char('e')));
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(ctrl('k'));
+        idle(&mut app, 1000);
+        assert_eq!(root(&d), "# A\n\n- one\n- two\n\n# Inbox\n\n- [ ] a\n");
+        let mut phone = embedded.replace("- [ ] a\n", "- [ ] a\n- [ ] from phone\n");
+        if phone_edits_a {
+            phone = phone.replace("# A\n\n", "# A\n\nfrom phone too\n\n");
+        }
+        land(d.path(), "root.sync-conflict-20260927-101010-PHONE77.md", &phone);
+        until_reload(&mut app);
+        let case = format!("A edited on the phone: {}", phone_edits_a);
+        assert!(app.vault_conflict_files().unwrap().is_empty(), "{}: the copy was not merged", case);
+        assert!(root(&d).contains("- [ ] a\n- [ ] from phone\n"), "{}: {}", case, root(&d));
+        assert!(!root(&d).contains(&embed), "{}: the cut block was put back where it was cut: {}", case, root(&d));
+        assert!(block.exists(), "{}: the cut block was deleted", case);
+        assert_eq!(app.mode_pub(), "edit", "{}", case);
+        if phone_edits_a {
+            assert_eq!(pairs(&mut app), 1, "{}", case);
+        } else {
+            assert_eq!(said(&mut app), "↻ changed outside fold: Inbox (+1 item)", "{}", case);
+        }
+        // paste it above "- one"
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(ctrl('v'));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(root(&d).starts_with(&format!("# A\n\n{}\n- one\n- two\n", embed)), "{}: {}", case, root(&d));
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), before, "{}", case);
+        // one embed of the block in the vault, and its line nowhere else
+        let mut embeds = 0;
+        for f in std::fs::read_dir(d.path()).unwrap() {
+            let path = f.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            embeds += text.matches(&embed).count();
+            assert!(path == block || !text.contains("task"), "{}: pasted as plain text: {}", case, text);
+        }
+        assert_eq!(embeds, 1, "{}: the block is embedded {} times", case, embeds);
+    }
+}
+
 /// A, its "task" a block of its own, open in the editor with that line
 /// cut and a pause after: the autosave writes A without its embed, and
 /// the block waits in transit (§5.2). With the block's file, and root.md

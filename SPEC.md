@@ -1259,7 +1259,10 @@ nothing.
   or one the same as its file, says nothing, nor that the editor saved first for it. A copy
   it leaves alone or fails on is no change by itself, and is tried again with the next
   change. A copy that lands while a reload runs, as the next of a batch Syncthing delivers
-  a moment apart, is new to the next reload.
+  a moment apart, is new to the next reload. A block cut in the editor and not pasted back
+  is moved on this device: a copy from before the cut, as the phone's `root.md` with an
+  item added to the Inbox, still embeds it where it was, and is merged without that embed
+  (§12.3): the block is not put back there, and the paste embeds it once.
 - A deleted file that was a block marks its embed broken; nothing is written.
 - Editing the same vault in Helix at the same time is a supported workflow.
 
@@ -1317,10 +1320,11 @@ and nothing is lost.
 
 ### 12.3 Merge inputs
 
-Ours `O` is `X.md`; theirs `T` is the conflict file — or, for an in-session conflict
-(§5.2 step 5), the text the user just edited. There is no stored common ancestor (§11.3),
-so every merge is **two-way**: the engine can tell *that* two versions differ, not *which*
-side changed. One algorithm, one code path.
+Ours `O` is `X.md`; theirs `T` is the conflict file, without its embeds of the blocks cut
+in the editor and not pasted back (§11.2) — or, for an in-session conflict (§5.2 step 5),
+the text the user just edited. There is no stored common ancestor (§11.3), so every merge
+is **two-way**: the engine can tell *that* two versions differ, not *which* side changed.
+One algorithm, one code path.
 
 ### 12.4 Node-level merge
 

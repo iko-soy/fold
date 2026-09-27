@@ -540,6 +540,20 @@ fn dedent(line: &str, cols: usize) -> &str {
 /// Process every `*.sync-conflict-*.md` in the vault (§12.2, §13 `notes merge`).
 /// Returns a list of human-readable outcomes.
 pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result<Vec<String>> {
+    merge_sync_conflicts_moving(vault, dry_run, &[])
+}
+
+/// `merge_sync_conflicts` while the blocks `moving` are moved on this
+/// device: cut in the editor and not pasted back, in transit and embedded
+/// nowhere (§5.2). A copy made before the cut still embeds one where it
+/// was, and the merge never deletes (§12.4): it would put the block back
+/// there, and the paste would embed it a second time. Each copy is read
+/// without their embeds, as it would be had it been made after the cut.
+pub fn merge_sync_conflicts_moving(
+    vault: &mut Vault,
+    dry_run: bool,
+    moving: &[Id],
+) -> std::io::Result<Vec<String>> {
     let mut outcomes = Vec::new();
     // the files as they are, not as last read: a block that came in with
     // its copy is ours to merge into, not an ignored file (§12.2)
@@ -613,7 +627,7 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
             }
             _ => {}
         }
-        let outcome = merge_texts(&ours, &theirs, &device, &stamp);
+        let outcome = merge_texts(&ours, &without_embeds(&theirs, moving), &device, &stamp);
         outcomes.push(format!(
             "{}: {} conflict pair(s)",
             cfile, outcome.conflicts
@@ -643,6 +657,42 @@ pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result
         vault.reload()?;
     }
     Ok(outcomes)
+}
+
+/// `text` without its embed lines of the blocks `ids` (§4.7), each with
+/// the blank line after it where one is before it too, so the text around
+/// it reads as it does where the embed was written out.
+fn without_embeds(text: &str, ids: &[Id]) -> String {
+    if ids.is_empty() {
+        return text.to_string();
+    }
+    let t = standalone_tree(text);
+    let mut lines: Vec<usize> = t.files[0]
+        .nodes
+        .iter()
+        .filter(|n| n.embed.as_ref().is_some_and(|id| ids.contains(id)))
+        .map(|n| n.title_span.start)
+        .collect();
+    lines.sort_unstable();
+    let line_end = |at: usize| text[at..].find('\n').map_or(text.len(), |i| at + i + 1);
+    // the line before `at` is blank, or there is none
+    let blank_before = |at: usize| {
+        let before = text[..at].strip_suffix('\n');
+        before.is_none_or(|s| s.rsplit('\n').next().is_some_and(|l| l.trim().is_empty()))
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut kept = 0;
+    for start in lines {
+        let mut end = line_end(start);
+        let after = &text[end..line_end(end)];
+        if blank_before(start) && !after.is_empty() && after.trim().is_empty() {
+            end += after.len();
+        }
+        out.push_str(&text[kept..start]);
+        kept = end;
+    }
+    out.push_str(&text[kept..]);
+    out
 }
 
 /// A conflict block's filename that does not clobber an existing file:

@@ -9,6 +9,7 @@ use crossterm::terminal::{
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
 use crossterm::ExecutableCommand;
+use fold_core::ident::Id;
 use fold_core::ops;
 use fold_core::parse::{Kind, TaskState};
 use fold_core::tree::NRef;
@@ -695,11 +696,14 @@ impl App {
     /// busy user (§10.7): the view opens on them once the outline is at
     /// rest, at once if it is, and an open view stays on its pair. True
     /// when it said something: the pairs raised, or why it failed; what a
-    /// merge without pairs took in is the caller's to say.
+    /// merge without pairs took in is the caller's to say. A block cut in
+    /// the editor and not pasted back is moved here: a copy from before the
+    /// cut does not put it back where it was (§5.2, §11.2).
     fn merge_conflict_files(&mut self) -> bool {
         let before = self.conflict_blocks();
         let shown = before.get(self.conflict_idx).cloned().filter(|_| self.mode == Mode::Conflict);
-        match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
+        let moving: Vec<Id> = self.transit().into_iter().map(|(id, _)| id).collect();
+        match fold_core::merge::merge_sync_conflicts_moving(&mut self.vault, false, &moving) {
             Ok(_) => {
                 let blocks = self.conflict_blocks();
                 let raised: Vec<NodeKey> = blocks.iter().filter(|b| !before.contains(b)).cloned().collect();
@@ -2769,10 +2773,15 @@ impl App {
         true
     }
 
-    /// The files of the blocks the open editor holds in transit (§5.2):
-    /// nested there, with no line left in it, embedded nowhere, and still
-    /// in the vault.
+    /// The files of the blocks the open editor holds in transit (§5.2).
     fn transit_files(&self) -> Vec<String> {
+        self.transit().into_iter().map(|(_, path)| path).collect()
+    }
+
+    /// The blocks the open editor holds in transit (§5.2), with their
+    /// files: nested there, with no line left in it, embedded nowhere, and
+    /// still in the vault.
+    fn transit(&self) -> Vec<(Id, String)> {
         let Some(ed) = self.editor.as_ref() else { return Vec::new() };
         let tree = &self.vault.tree;
         ed.buf
@@ -2781,8 +2790,7 @@ impl App {
             .filter(|&(o, i)| i.parent.is_some() && !ed.buf.lines.iter().any(|l| l.owner == *o))
             .filter_map(|(_, i)| i.id.as_ref())
             .filter(|id| tree.embed_of(id).is_none())
-            .filter_map(|id| tree.block_by_id(id))
-            .map(|r| tree.files[r.0].path.clone())
+            .filter_map(|id| Some((id.clone(), tree.files[tree.block_by_id(id)?.0].path.clone())))
             .collect()
     }
 
