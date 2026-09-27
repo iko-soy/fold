@@ -2160,9 +2160,12 @@ impl App {
     /// back, if anything.
     pub fn keep_unsaved(&mut self) -> Option<String> {
         // the text is taken first: after a panic, the save may panic too
-        let (name, text) = self.editor_text().filter(|_| self.editor_dirty())?;
+        let (name, text) = self.editor_text()?;
+        let dirty = self.editor_dirty();
+        // saved even when clean: a block cut and not pasted back, left in
+        // transit by the autosave, is deleted on any end of the app (§5.2)
         let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.save_editor_releasing()));
-        if saved.unwrap_or(false) {
+        if saved.unwrap_or(false) || !dirty {
             return None;
         }
         Some(match self.vault.trash_text(&name, &text) {

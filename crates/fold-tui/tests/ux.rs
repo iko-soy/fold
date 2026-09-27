@@ -666,6 +666,33 @@ fn ending_fold_while_editing_saves_the_editor() {
 }
 
 #[test]
+fn ending_fold_while_editing_deletes_a_cut_block_the_autosave_left_in_transit() {
+    // §5.2: a block cut and not pasted back is deleted on any end of the
+    // app, even once the autosave has left nothing unsaved
+    let d = vault("# A\n\n- one\n- task\n- two\n");
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let kept = kept("a");
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n");
+    assert!(block.exists());
+    assert_eq!(app.keep_unsaved(), None);
+    assert!(!block.exists(), "the cut block outlived the app");
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n");
+    assert!(kept().is_empty());
+}
+
+#[test]
 fn ending_fold_with_text_a_save_was_refused_for_keeps_it_in_the_trash() {
     let d = vault("# Scrub cadence\n\n- monthly\n- [ ] scrub now\n");
     let kept = kept("scrub-cadence");
