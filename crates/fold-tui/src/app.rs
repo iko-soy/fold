@@ -98,6 +98,9 @@ pub struct App {
     /// the outline takes the screen and the pane appears only to edit.
     pub show_reading: bool,
     register: String,
+    /// The node the register holds, as the status bar names it, and its
+    /// spelling, for what the ordering rule did with a paste (§3.1).
+    copied: (String, Kind),
     status: String,
     status_time: Instant,
     undo: Vec<ops::Inverse>,
@@ -222,6 +225,7 @@ impl App {
             wrap: true,
             show_reading: false,
             register: String::new(),
+            copied: (String::new(), Kind::Item),
             status: HINT.into(),
             status_time: Instant::now(),
             undo: Vec::new(),
@@ -323,7 +327,7 @@ impl App {
     pub fn tick(&mut self) -> bool {
         // autosave after 750 ms without a keystroke (§10.6)
         if self.mode == Mode::Edit && self.editor_dirty() && self.edit_last_key.elapsed() > Duration::from_millis(750) {
-            self.save_editor("pause");
+            self.save_editor();
         }
         // external changes: debounced reload (§11.2)
         let due = self.poll_watcher();
@@ -396,13 +400,17 @@ impl App {
         let props_key = self.props_target.filter(|_| self.mode == Mode::Props).map(|t| self.vault.key_of(t));
         let filter_key = self.filter_rows.get(self.filter_sel).filter(|_| self.mode == Mode::Filter).map(|&r| self.vault.key_of(r));
         // what came in: the files as they are against what was read, taken
-        // before the editor's save writes what was typed; what the save
-        // says is said beside it
+        // before the editor's save writes what was typed; that the save
+        // took the typing, or why not, is said beside it
         let before = tops(&self.vault);
         let after = self.vault.on_disk().map(|v| tops(&v));
         let status = std::mem::take(&mut self.status);
+        let typed = self.editor_dirty();
         let edit = self.editor_before_write("external change");
-        let saved = std::mem::replace(&mut self.status, status);
+        let mut saved = std::mem::replace(&mut self.status, status);
+        if saved.is_empty() && typed && !self.editor_dirty() {
+            saved = "your typing was saved first".into();
+        }
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
         // vault, then may close the editor, which reads the outline, before
@@ -747,6 +755,11 @@ impl App {
 
     fn act_toggle_task(&mut self) {
         let Some(r) = self.subject() else { return };
+        let Some(words) = self.done_words(r) else {
+            // nothing changes, and nothing is left to undo
+            self.say(format!("{} isn't a task · t makes it one", self.named(r)));
+            return;
+        };
         self.push_undo("act_toggle_task");
         let key = self.vault.key_of(r);
         match ops::toggle_task(&mut self.vault, r) {
@@ -754,14 +767,27 @@ impl App {
                 if let Some(nr) = self.vault.find_by_key(&key) {
                     self.move_cursor_to(nr);
                 }
-                self.refresh_after("toggled");
+                self.refresh_after(&words);
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
 
+    /// What `x` does to `r`, in the status bar's words (§10.1); `None`
+    /// when it is no task.
+    fn done_words(&self, r: NRef) -> Option<String> {
+        Some(match self.vault.tree.node(self.vault.tree.resolved_child(r)).task? {
+            TaskState::Open => format!("done: {}", self.named(r)),
+            TaskState::Done => format!("reopened: {}", self.named(r)),
+        })
+    }
+
     fn act_toggle_taskness(&mut self) {
         let Some(r) = self.subject() else { return };
+        let words = match self.vault.tree.node(self.vault.tree.resolved_child(r)).task {
+            Some(_) => format!("removed the checkbox from {}", self.named(r)),
+            None => format!("made {} a task", self.named(r)),
+        };
         self.push_undo("act_toggle_taskness");
         let key = self.vault.key_of(r);
         match ops::toggle_taskness(&mut self.vault, r) {
@@ -769,7 +795,7 @@ impl App {
                 if let Some(nr) = self.vault.find_by_key(&key) {
                     self.move_cursor_to(nr);
                 }
-                self.refresh_after("task-ness toggled");
+                self.refresh_after(&words);
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
@@ -777,11 +803,13 @@ impl App {
 
     fn act_make_block(&mut self) {
         let Some(r) = self.subject() else { return };
+        let name = self.named(r);
         self.push_undo("act_make_block");
         let on = self.on_node(r);
         match ops::make_block(&mut self.vault, r) {
             Ok(id) => {
-                self.say(format!("block {}", id));
+                // no id, no file name (§1 principle 3b)
+                self.say(format!("gave {} its own file", name));
                 // the cursor (a zoom, the editor) stays on the node, now a block
                 if let Some(nr) = self.vault.tree.block_by_id(&id) {
                     self.follow(on, nr);
@@ -813,29 +841,38 @@ impl App {
     fn act_delete(&mut self) {
         let Some(r) = self.subject() else { return };
         self.push_undo("act_delete");
-        self.register = ops::yank(&self.vault, r);
+        self.copy(r);
+        let name = self.copied.0.clone();
         match ops::delete_subtree(&mut self.vault, r) {
-            Ok(m) => self.refresh_after(&m),
+            Ok(1) => self.refresh_after(&format!("deleted {} · u undoes", name)),
+            Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · u undoes", name, n)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
 
+    /// Put `r`'s subtree in the register (§10.3 `y`, `d`), and what it is.
+    fn copy(&mut self, r: NRef) {
+        self.register = ops::yank(&self.vault, r);
+        self.copied = (self.named(r), self.vault.tree.node(self.vault.tree.resolved_child(r)).kind);
+    }
+
     fn act_yank(&mut self) {
         let Some(r) = self.subject() else { return };
-        self.register = ops::yank(&self.vault, r);
-        self.say("yanked");
+        self.copy(r);
+        self.say(format!("copied {} · p pastes", self.copied.0));
     }
 
     fn act_paste(&mut self, after: bool) {
         if self.register.is_empty() {
-            self.say("register empty");
+            self.say("nothing copied yet · y copies a node");
             return;
         }
         let Some(r) = self.subject() else { return };
         self.push_undo("act_paste");
         let text = self.register.clone();
+        let (name, kind) = self.copied.clone();
         match ops::paste(&mut self.vault, r, &text, after) {
-            Ok(moved) => self.refresh_after(&with_rule_note("pasted", moved)),
+            Ok(moved) => self.refresh_after(&with_rule_note(&format!("pasted {}", name), moved, kind)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -856,6 +893,10 @@ impl App {
 
     fn act_spelling(&mut self) {
         let Some(r) = self.subject() else { return };
+        let (words, kind) = match self.vault.tree.node(self.vault.tree.resolved_child(r)).kind {
+            Kind::Section => (format!("made {} a bullet", self.named(r)), Kind::Item),
+            _ => (format!("made {} a heading", self.named(r)), Kind::Section),
+        };
         self.push_undo("act_spelling");
         let key = self.vault.key_of(r);
         match ops::toggle_spelling(&mut self.vault, r) {
@@ -863,9 +904,7 @@ impl App {
                 if let Some(nr) = self.vault.find_by_key(&key) {
                     self.move_cursor_to(nr);
                 }
-                if moved {
-                    self.say(with_rule_note("respelled", true));
-                }
+                self.say(with_rule_note(&words, moved, kind));
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
@@ -879,22 +918,21 @@ impl App {
         // it goes under the node before it (§10.3)
         let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
         let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| self.vault.key_of(sibs[i]));
+        let Some(prev) = prev else {
+            self.say(format!("can't indent {}: nothing above it to go under", self.named(r)));
+            return;
+        };
+        let name = self.named(r);
         let on = self.on_node(r);
         match ops::demote(&mut self.vault, s) {
             Ok(moved) => {
                 // the cursor (a zoom, the editor) stays on the node where it
                 // landed
-                let landed = match &prev {
-                    Some(dest) => self.moved_node(&key, kind, dest, None),
-                    None => self.find_exact(&key),
-                };
-                if let Some(nr) = landed {
+                if let Some(nr) = self.moved_node(&key, kind, &prev, None) {
                     self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
-                if moved {
-                    self.say(with_rule_note("demoted", true));
-                }
+                self.say(with_rule_note(&format!("indented {}", name), moved, kind));
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
@@ -913,23 +951,21 @@ impl App {
             let at = self.vault.tree.resolved_children(g).iter().position(|&c| c == p)?;
             Some(self.namesakes_before(r, g, at + 1))
         });
-        let grand = grand.map(|g| self.vault.key_of(g));
+        let Some(grand) = grand.map(|g| self.vault.key_of(g)) else {
+            self.say(format!("can't outdent {}: it is already at the top level", self.named(r)));
+            return;
+        };
+        let name = self.named(r);
         let on = self.on_node(r);
         match ops::promote(&mut self.vault, s) {
             Ok(moved) => {
                 // the cursor (a zoom, the editor) stays on the node where it
                 // landed
-                let landed = match &grand {
-                    Some(dest) => self.moved_node(&key, kind, dest, rank),
-                    None => self.find_exact(&key),
-                };
-                if let Some(nr) = landed {
+                if let Some(nr) = self.moved_node(&key, kind, &grand, rank) {
                     self.follow(on, nr);
                     self.move_cursor_to(nr);
                 }
-                if moved {
-                    self.say(with_rule_note("promoted", true));
-                }
+                self.say(with_rule_note(&format!("outdented {}", name), moved, kind));
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
@@ -937,18 +973,23 @@ impl App {
 
     fn act_archive(&mut self) {
         let Some(r) = self.subject() else { return };
+        let (name, kind) = (self.named(r), self.vault.tree.node(self.vault.tree.resolved_child(r)).kind);
         self.push_undo("act_archive");
         match ops::archive(&mut self.vault, r) {
-            Ok(moved) => self.refresh_after(&with_rule_note("archived", moved)),
+            Ok(moved) => self.refresh_after(&with_rule_note(&format!("archived {}", name), moved, kind)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
 
     fn act_clear_done(&mut self) {
         self.push_undo("act_clear_done");
-        let target = self.zoom().unwrap_or(self.vault.tree.root);
+        let zoom = self.zoom();
+        let under = zoom.map(|z| format!(" under {}", self.named(z))).unwrap_or_default();
+        let target = zoom.unwrap_or(self.vault.tree.root);
         match ops::clear_done(&mut self.vault, target) {
-            Ok(n) => self.refresh_after(&format!("{} done item(s) trashed", n)),
+            Ok(0) => self.refresh_after(&format!("no done tasks to clear{}", under)),
+            Ok(1) => self.refresh_after(&format!("cleared 1 done task{}", under)),
+            Ok(n) => self.refresh_after(&format!("cleared {} done tasks{}", n, under)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -958,10 +999,11 @@ impl App {
         self.push_undo("move to");
         let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
         let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
+        let words = format!("moved {} to {}", self.named(rr), self.named(dest));
         let on = self.on_node(rr);
         match ops::refile(&mut self.vault, r, dest) {
             Ok(moved) => {
-                self.refresh_after(&with_rule_note("moved", moved));
+                self.refresh_after(&with_rule_note(&words, moved, kind));
                 if let Some(nr) = self.moved_node(&key, kind, &dest_key, None) {
                     self.follow(on, nr);
                     self.reveal(nr);
@@ -1157,7 +1199,7 @@ impl App {
     fn open_editor_on(&mut self, target: NRef) {
         // an editor already open saves first, as on leaving it; one whose
         // save is refused stays, with its text and its clipboard
-        if !self.save_editor_releasing("switch") {
+        if !self.save_editor_releasing() {
             return;
         }
         if let Some(ed) = self.editor.take() {
@@ -1185,9 +1227,10 @@ impl App {
 
     /// Write the editor's dirty blocks; true when nothing is left unsaved.
     /// A refused save (the file changed on disk) keeps the text in the
-    /// editor and says why.
-    fn save_editor(&mut self, why: &str) -> bool {
-        self.write_editor(why, false)
+    /// editor and says why. One that goes through says nothing: the status
+    /// bar's ✓ saved says it (§10.6).
+    fn save_editor(&mut self) -> bool {
+        self.write_editor(false)
     }
 
     /// Save the editor to leave it, or before it is re-rendered (§10.6): a
@@ -1197,12 +1240,12 @@ impl App {
     /// as it was, its clipboard too; and the save and the deletion are one
     /// op-log entry (§10.10), so one undo puts back the block's file and
     /// its embed together.
-    fn save_editor_releasing(&mut self, why: &str) -> bool {
-        self.write_editor(why, true)
+    fn save_editor_releasing(&mut self) -> bool {
+        self.write_editor(true)
     }
 
     /// `save_editor`; with `release`, `save_editor_releasing`.
-    fn write_editor(&mut self, why: &str, release: bool) -> bool {
+    fn write_editor(&mut self, release: bool) -> bool {
         if release && !self.editor_dirty() {
             // nothing to save first, so nothing a refusal keeps in transit
             if let Some(ed) = self.editor.as_mut() {
@@ -1236,12 +1279,7 @@ impl App {
             self.move_cursor_to(r);
         }
         let saved = match res {
-            Ok(n) => {
-                if n > 0 {
-                    self.say(format!("saved {} block(s) ({})", n, why));
-                }
-                true
-            }
+            Ok(_) => true,
             Err(e) => {
                 self.say(format!("error: {}", e));
                 false
@@ -1276,7 +1314,7 @@ impl App {
     /// is dropped except by *Revert*.
     fn close_editor(&mut self) -> bool {
         // a block cut and not pasted back is deleted once saved (§5.2)
-        if !self.save_editor_releasing("exit") {
+        if !self.save_editor_releasing() {
             self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
             return false;
         }
@@ -1325,7 +1363,7 @@ impl App {
         // saved, it is deleted (§5.2). A refused save keeps it in transit,
         // as the editor keeps its text (it is not re-rendered)
         self.editor.as_ref()?;
-        self.save_editor_releasing(why);
+        self.save_editor_releasing();
         let key = self.editor_key()?;
         Some((key, ops::Snapshot::take(&self.vault, why)))
     }
@@ -1393,8 +1431,9 @@ impl App {
             self.discard_editor();
             return;
         }
-        if out.save {
-            self.save_editor("save");
+        // `:w`, Ctrl-S: asked for, so answered
+        if out.save && self.save_editor() {
+            self.say("saved");
         }
         if out.close {
             self.close_editor();
@@ -1972,7 +2011,7 @@ impl App {
     pub fn keep_unsaved(&mut self) -> Option<String> {
         // the text is taken first: after a panic, the save may panic too
         let (name, text) = self.editor_text().filter(|_| self.editor_dirty())?;
-        let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.save_editor_releasing("exit")));
+        let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.save_editor_releasing()));
         if saved.unwrap_or(false) {
             return None;
         }
@@ -2340,9 +2379,7 @@ impl App {
                             self.read_cursor = 0;
                             self.scroll_reading = 0;
                         } else if n.task.is_some() {
-                            self.act_on_node(r, |app, r| {
-                                let _ = ops::toggle_task(&mut app.vault, r);
-                            });
+                            self.toggle_read_task(r, "reading-pane edit");
                         }
                     }
                     Some(LineRef::Embed(e)) => {
@@ -2367,9 +2404,7 @@ impl App {
             }
             KeyCode::Char('x') => {
                 if let Some(r) = self.read_node() {
-                    self.act_on_node(r, |app, r| {
-                        let _ = ops::toggle_task(&mut app.vault, r);
-                    });
+                    self.toggle_read_task(r, "reading-pane edit");
                 }
             }
             KeyCode::Char('e') => {
@@ -2440,10 +2475,19 @@ impl App {
         }
     }
 
-    /// Run a mutation on a node from the reading pane, keeping the cursor.
-    fn act_on_node(&mut self, r: NRef, f: impl Fn(&mut App, NRef)) {
-        self.push_undo("reading-pane edit");
-        f(self, r);
+    /// Check or uncheck a task from the reading pane (§10.4), keeping the
+    /// cursor, and say which by name as `x` in the outline does; `desc`
+    /// names the op-log entry.
+    fn toggle_read_task(&mut self, r: NRef, desc: &str) {
+        let Some(words) = self.done_words(r) else {
+            self.say(format!("{} isn't a task", self.named(r)));
+            return;
+        };
+        self.push_undo(desc);
+        match ops::toggle_task(&mut self.vault, r) {
+            Ok(()) => self.say(words),
+            Err(e) => self.say(format!("error: {}", e)),
+        }
     }
 
     fn jump_heading(&mut self, doc: &fold_core::reading::ReadingDoc, dir: i32) {
@@ -2907,13 +2951,13 @@ impl App {
 
 }
 
-/// A status message, noting when the ordering rule placed the node other
-/// than asked (§3.1: items before sections).
-fn with_rule_note(what: &str, moved: bool) -> String {
-    if moved {
-        format!("{} — placed at the item/section boundary (§3.1)", what)
-    } else {
-        what.to_string()
+/// A status message, saying so when the ordering rule placed a node of
+/// `kind` other than asked (§3.1: items before sections).
+fn with_rule_note(what: &str, moved: bool, kind: Kind) -> String {
+    match (moved, kind) {
+        (false, _) => what.to_string(),
+        (true, Kind::Section) => format!("{} — placed after the items", what),
+        (true, _) => format!("{} — placed before the sections", what),
     }
 }
 

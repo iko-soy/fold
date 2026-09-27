@@ -861,7 +861,11 @@ Four regions, each of them live under the pointer:
 - The **status bar**: the last message on the left (at start, a hint at the gestures and
   `?`, cut down to *right-click for actions · ? help* where it doesn't fit); on the right
   the unresolved conflicts (click to resolve; lit while new ones wait, §10.7), *done
-  hidden* when `zd` is on (click to show), the file, and the save state.
+  hidden* when `zd` is on (click to show), the file, and the save state. A verb's message
+  names the node it acted on, in the menus' words, with the next key where one helps —
+  *deleted “Homelab” (12 nodes) · u undoes*, *moved “rack” to “NAS” — placed before the
+  sections* when the ordering rule chose the place (§3.1) — and names no file or id (§1,
+  3b), but for undo or redo refusing (§10.10).
 
 The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
 bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor
@@ -1021,6 +1025,10 @@ app keeps track. Blocks are saved on their own:
   an external change, and on quit;
 - when the app ends any other way: `SIGTERM`, `SIGHUP` (a closed window, a dropped ssh
   session), `SIGINT`, an I/O error, a panic.
+
+A save shows in the status bar's save state (§10.1), not as a message, but for `:w` and
+`Ctrl-S`, which are asked for and answer *saved*, and one that an outside change forced,
+which the news of that change mentions (§11.2).
 
 The pane's border shows the title of the block the cursor is in, *⚠ conflict copy from
 PHONE* after it in a conflict copy (§12.5), and a dot while something is unsaved, and lines

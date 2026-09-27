@@ -3,7 +3,8 @@
 //! when rows come and go (§8.5), keys on a selection the wheel left out
 //! of view (§10.1), editor text no save can take when fold ends or
 //! reverts (§10.6), sync conflicts that come in while you work (§10.7),
-//! and the conflict copies they leave in the outline (§10.1, §12.5).
+//! the conflict copies they leave in the outline (§10.1, §12.5), and
+//! what the status line says a verb did (§10.1).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -204,7 +205,7 @@ fn a_change_from_outside_while_editing_saves_the_editor_first_and_says_both() {
     assert_eq!(root(&d), "# NAS!\n\n- disks\n\n# Inbox\n\n- [ ] a\n- [ ] phone-added task\n");
     // the typing is not what came from outside
     let s = status_line(&mut app);
-    assert!(s.contains("↻ changed outside fold: Inbox (+1 item) · saved 1 block(s) (external change)"), "{}", s);
+    assert!(s.contains("↻ changed outside fold: Inbox (+1 item) · your typing was saved first"), "{}", s);
 }
 
 // ------------------------------------------------------------ hiding done
@@ -1006,4 +1007,193 @@ fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
     }
     let border = seen.expect("never said so");
     assert!(border.contains("Editing NAS ⚠ conflict copy from PHONE"), "{}", border);
+}
+
+// ------------------------------------------------------------ messages
+
+/// The sample vault, as `fold` ships it, cut down.
+const SAMPLE: &str = "# Homelab\n\nTwo boxes in the closet.\n\n## NAS\n\nMirrored pairs, no raidz.\n\n### [ ] Snapshot policy\n\n- hourly, keep 24\n- daily, keep 30\n\n### [x] Replace fan\n\n## Networking\n\n- [ ] Replace the flaky switch\n- [ ] Label the cables\n  - [x] patch panel\n  - [ ] rack\n- VLANs: 10 home, 20 iot, 30 guest\n\n# Work\n\n## Project Atlas\n\n- [ ] Draft the RFC\n- [ ] Review PR\n- [x] Kickoff meeting\n\n## Reading list\n\n- The Rust Book\n\n# Inbox\n\n- call the plumber\n- [ ] renew passport\n";
+
+/// What the status bar says on its left, past a mode's badge, as the
+/// next frame draws it.
+fn said(app: &mut App) -> String {
+    let s = status(app);
+    let mut parts = s.split("  ").map(str::trim).filter(|p| !p.is_empty());
+    let first = parts.next().unwrap_or_default();
+    let badge = first.chars().all(|c| c.is_ascii_uppercase());
+    if badge { parts.next().unwrap_or_default() } else { first }.to_string()
+}
+
+#[test]
+fn copy_and_paste_name_the_node_in_the_menu_s_words() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "p");
+    assert_eq!(said(&mut app), "nothing copied yet · y copies a node");
+    press(&mut app, "y");
+    assert_eq!(said(&mut app), "copied “NAS” · p pastes");
+    select(&mut app, "Reading list");
+    press(&mut app, "p");
+    assert_eq!(said(&mut app), "pasted “NAS”");
+    // the Copy button of the node menu says the same
+    select(&mut app, "Work");
+    app.run_action(Action::Copy);
+    assert_eq!(said(&mut app), "copied “Work” · p pastes");
+}
+
+#[test]
+fn checking_a_task_names_it_and_a_node_that_is_no_task_says_so() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "x");
+    assert_eq!(said(&mut app), "“NAS” isn't a task · t makes it one");
+    assert_eq!(root(&d), SAMPLE);
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "nothing to undo");
+    select(&mut app, "Draft the RFC");
+    press(&mut app, "x");
+    assert_eq!(said(&mut app), "done: “Draft the RFC”");
+    press(&mut app, "x");
+    assert_eq!(said(&mut app), "reopened: “Draft the RFC”");
+    press(&mut app, "t");
+    assert_eq!(said(&mut app), "removed the checkbox from “Draft the RFC”");
+    press(&mut app, "t");
+    assert_eq!(said(&mut app), "made “Draft the RFC” a task");
+    // x in the reading pane, on the line of a task, says the same
+    app.show_reading = true;
+    select(&mut app, "Project Atlas");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jj");
+    press(&mut app, "x");
+    assert!(root(&d).contains("- [x] Draft the RFC"), "{}", root(&d));
+    assert_eq!(said(&mut app), "done: “Draft the RFC”");
+}
+
+#[test]
+fn delete_and_make_block_name_the_node_and_show_no_file_or_id() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Homelab");
+    press(&mut app, "d");
+    assert_eq!(said(&mut app), "deleted “Homelab” (12 nodes) · u undoes");
+    press(&mut app, "u");
+    select(&mut app, "rack");
+    press(&mut app, "s");
+    assert_eq!(said(&mut app), "gave “rack” its own file");
+    // a block is deleted like any node: by name, its file unsaid
+    press(&mut app, "d");
+    assert_eq!(said(&mut app), "deleted “rack” · u undoes");
+}
+
+#[test]
+fn moves_name_the_node_and_say_in_words_where_the_ordering_rule_put_it() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "rack");
+    press(&mut app, ">");
+    assert_eq!(said(&mut app), "indented “rack”");
+    press(&mut app, "<");
+    assert_eq!(said(&mut app), "outdented “rack”");
+    // nowhere to go: nothing changed, and the words do not say it did
+    let before = root(&d);
+    select(&mut app, "patch panel");
+    press(&mut app, ">");
+    assert_eq!(said(&mut app), "can't indent “patch panel”: nothing above it to go under");
+    select(&mut app, "Homelab");
+    press(&mut app, "<");
+    assert_eq!(said(&mut app), "can't outdent “Homelab”: it is already at the top level");
+    assert_eq!(root(&d), before);
+    // out of a heading among headings, an item goes before them
+    select(&mut app, "hourly, keep 24");
+    press(&mut app, "<");
+    assert_eq!(said(&mut app), "outdented “hourly, keep 24” — placed before the sections");
+    // a bullet made a heading goes after the bullets
+    select(&mut app, "Replace the flaky switch");
+    press(&mut app, "~");
+    assert_eq!(said(&mut app), "made “Replace the flaky switch” a heading — placed after the items");
+    // a heading made a bullet, before the headings
+    select(&mut app, "Replace fan");
+    press(&mut app, "~");
+    assert_eq!(said(&mut app), "made “Replace fan” a bullet — placed before the sections");
+    // Move to… names where to
+    select(&mut app, "call the plumber");
+    press(&mut app, "r");
+    press(&mut app, "Project Atlas");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(said(&mut app), "moved “call the plumber” to “Project Atlas”");
+    select(&mut app, "renew passport");
+    press(&mut app, "r");
+    press(&mut app, "Homelab");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(said(&mut app), "moved “renew passport” to “Homelab” — placed before the sections");
+    select(&mut app, "Kickoff meeting");
+    press(&mut app, "za");
+    assert_eq!(said(&mut app), "archived “Kickoff meeting”");
+    assert!(!status(&mut app).contains('§'));
+}
+
+#[test]
+fn a_drop_the_ordering_rule_placed_says_where_in_words() {
+    let d = vault("# A\n\n- a1\n\n## S\n\n# B\n\n- b1\n");
+    let mut app = App::new(d.path()).unwrap();
+    // rows: A, a1, S, B, b1; b1 onto A's title goes into A, before S
+    draw(&mut app);
+    let (from, onto) = (app.hit_pos(Hit::Row(4)).unwrap(), app.hit_pos(Hit::Row(0)).unwrap());
+    let at = |kind, (column, row)| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+    app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), onto));
+    draw(&mut app);
+    app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), onto));
+    let r = root(&d);
+    assert!(r.find("- b1").is_some_and(|i| i < r.find("## S").unwrap()), "{}", r);
+    assert_eq!(said(&mut app), "moved “b1” — placed before the sections");
+}
+
+#[test]
+fn clear_done_counts_the_done_tasks_it_cleared() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    // under the zoom, only there
+    select(&mut app, "Networking");
+    app.handle_key(key(KeyCode::Enter));
+    app.run_action(Action::ClearDone);
+    assert_eq!(said(&mut app), "cleared 1 done task under “Networking”");
+    app.handle_key(key(KeyCode::Backspace));
+    app.handle_key(key(KeyCode::Backspace));
+    app.run_action(Action::ClearDone);
+    assert_eq!(said(&mut app), "cleared 2 done tasks");
+    app.run_action(Action::ClearDone);
+    assert_eq!(said(&mut app), "no done tasks to clear");
+}
+
+#[test]
+fn the_editor_s_own_saves_say_nothing_and_ctrl_s_says_saved() {
+    let d = vault("# Inbox\n\nnotes\n");
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(EditKeys::Normal);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(key(KeyCode::Char('!')));
+    // the pause saves it; the status bar's right side says so, the left
+    // side nothing
+    std::thread::sleep(Duration::from_millis(800));
+    app.tick();
+    assert_eq!(root(&d), "# Inbox!\n\nnotes\n");
+    let s = said(&mut app);
+    assert!(!s.contains("saved") && !s.contains("block"), "{}", s);
+    // leaving saves too, as quietly
+    app.handle_key(key(KeyCode::Char('?')));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), "# Inbox!?\n\nnotes\n");
+    let s = said(&mut app);
+    assert!(!s.contains("saved") && !s.contains("block"), "{}", s);
+    // Ctrl-S is asked for, and answered
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(key(KeyCode::Char('.')));
+    app.handle_key(ctrl('s'));
+    assert_eq!(root(&d), "# Inbox!?.\n\nnotes\n");
+    assert_eq!(said(&mut app), "saved");
 }

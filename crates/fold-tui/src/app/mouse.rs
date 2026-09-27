@@ -280,7 +280,7 @@ impl App {
         };
         let (rr, rt) = (self.vault.tree.resolved_child(r), self.vault.tree.resolved_child(target));
         let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
-        let title = self.vault.tree.node(rr).title.clone();
+        let name = self.named(rr);
         // it goes into the target, last, or just before it, under the
         // target's parent
         let (dest, rank) = match how {
@@ -296,7 +296,7 @@ impl App {
         self.push_undo("move");
         match ops::move_node(&mut self.vault, r, target, how) {
             Ok(moved) => {
-                self.say(super::with_rule_note(&format!("moved “{}”", title), moved));
+                self.say(super::with_rule_note(&format!("moved {}", name), moved, kind));
                 // find it where it landed, by its kind and place too: a
                 // namesake of it may be there already
                 match self.moved_node(&key, kind, &dest, rank) {
@@ -379,8 +379,7 @@ impl App {
     fn toggle_doc_line(&mut self, i: usize) {
         if let Some(r) = self.doc_line_node(i) {
             if self.vault.tree.node(self.vault.tree.resolved_child(r)).task.is_some() {
-                self.push_undo("toggle");
-                let _ = ops::toggle_task(&mut self.vault, r);
+                self.toggle_read_task(r, "toggle");
             }
         }
     }

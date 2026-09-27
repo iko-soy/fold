@@ -587,34 +587,36 @@ pub fn frontmatter_lines(vault: &Vault, file: usize) -> Vec<(String, String, boo
 
 /// Delete a subtree: its span leaves its file; block files go to trash (§11.5),
 /// including blocks nested anywhere under it, so none is left orphaned.
-pub fn delete_subtree(vault: &mut Vault, r: NRef) -> std::io::Result<String> {
+/// Returns how many nodes went, the node itself included, for the TUI to
+/// say (§10.1).
+pub fn delete_subtree(vault: &mut Vault, r: NRef) -> std::io::Result<usize> {
     let n = vault.tree.node(r);
     if n.kind == Kind::Root {
         return Err(io_err("cannot delete the root"));
     }
+    let mut count = 0;
+    vault.tree.walk(vault.tree.resolved_child(r), &mut |_, _| count += 1);
     if n.is_block() || n.is_embed() {
         let target = if n.is_embed() { vault.tree.resolved_child(r) } else { r };
         if target == r && n.is_embed() {
             // broken embed: just the line. So for a second embed of a
             // block, which renders as broken (§6.2): the block, and the
             // embed it is stitched in at, are not this line's
-            let duplicate = n.embed.as_ref().is_some_and(|id| vault.tree.block_by_id(id).is_some());
             let span = embed_line_span(&vault.tree, r);
             remove_span_with_separator(vault, r.0, span)?;
-            return Ok(if duplicate { "duplicate embed removed" } else { "broken embed removed" }.into());
+            return Ok(1);
         }
         // the block itself first: it leaves by its own embed
         let ids = nested_block_ids(vault, target);
-        let path = vault.tree.node(target).block.as_ref().unwrap().path.clone();
         if let Some((own, nested)) = ids.split_first() {
             trash_block(vault, own)?;
             trash_nested(vault, nested)?;
         }
-        return Ok(format!("block {:?} trashed", path));
+        return Ok(count);
     }
     let ids = plain_remove(vault, r)?;
     trash_nested(vault, &ids)?;
-    Ok("subtree trashed".into())
+    Ok(count)
 }
 
 /// Ids of every block in the resolved subtree of `r` (pre-order, `r` itself

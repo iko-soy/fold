@@ -880,6 +880,30 @@ fn respelling_a_broken_embed_keeps_its_id() {
 }
 
 #[test]
+fn delete_counts_the_nodes_it_took() {
+    // the TUI says what went by name and count, never by file (§10.1)
+    // (names no other test trashes: two trash copies of one name in the
+    // same second race for its temporary file)
+    let (_d, mut v) = vault_with("# A\n\n- tally\n  - one\n  - two\n- stack\n  - shelf\n");
+    let tally = at(&v, &["A", "tally"]);
+    assert_eq!(ops::delete_subtree(&mut v, tally).unwrap(), 3);
+    // a block, with a block nested in it
+    let shelf = at(&v, &["A", "stack", "shelf"]);
+    ops::make_block(&mut v, shelf).unwrap();
+    let stack = at(&v, &["A", "stack"]);
+    ops::make_block(&mut v, stack).unwrap();
+    let stack = at(&v, &["A", "stack"]);
+    assert!(v.tree.node(stack).is_block());
+    assert_eq!(ops::delete_subtree(&mut v, stack).unwrap(), 2);
+    // a broken embed is the one row it shows as
+    let (_d, mut v) = vault_with(&format!("# A\n\n![[{}]]\n", ID_A));
+    let e = v.tree.raw_children(at(&v, &["A"]))[0];
+    assert!(v.tree.node(e).is_embed());
+    assert_eq!(ops::delete_subtree(&mut v, e).unwrap(), 1);
+    assert_eq!(v.tree.files[0].text, "# A\n");
+}
+
+#[test]
 fn deleting_a_duplicate_embed_removes_only_its_line() {
     // a second embed of a block is a diagnostic and renders as broken
     // (§6.2): deleting it (from the reading pane) removes that line alone,
