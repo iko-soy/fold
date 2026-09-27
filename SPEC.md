@@ -1045,7 +1045,7 @@ app keeps track. Blocks are saved on their own:
 - when the app ends any other way: `SIGTERM`, `SIGHUP` (a closed window, a dropped ssh
   session), `SIGINT`, an I/O error, a panic. A second `SIGTERM` or `SIGINT` ends it at
   once, unsaved, as the signal would: the way out while a write waits on a terminal that
-  reads nothing.
+  reads nothing. A `SIGHUP` before one does not make it a second.
 
 A save shows in the status bar's save state (§10.1), not as a message, but for `:w` and
 `Ctrl-S`, which are asked for and answer *saved*, and one that an outside change forced,

@@ -484,6 +484,23 @@ fn a_second_signal_ends_fold_stuck_on_a_terminal_that_reads_nothing() {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn a_sigterm_after_a_sighup_still_saves_the_editor() {
+    let (vault, state) = vault_and_state("# Snapshot policy\n\nkeep 24\n");
+    let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
+    tty.edit();
+    // a SIGHUP and a SIGTERM soon after, before the loop sees the first:
+    // the SIGTERM is not a second one, which would end fold unsaved
+    let pid = tty.pid.to_string();
+    let both = format!("kill -s HUP {0}; sleep 0.05; kill -s TERM {0}", pid);
+    std::process::Command::new("sh").args(["-c", &both]).status().unwrap();
+    assert!(tty.ended(), "fold still runs");
+    let root = std::fs::read_to_string(vault.path().join("root.md")).unwrap();
+    assert_eq!(root, "# Snapshot policy MYTEXT\n\nkeep 24\n");
+    assert!(put_back(&tty.output()).is_some(), "terminal left as fold had it:\n{}", tty.tail());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn closing_the_window_saves_the_editor() {
     let (vault, state) = vault_and_state("# Snapshot policy\n\nkeep 24\n");
     let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
