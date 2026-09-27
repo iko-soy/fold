@@ -1119,9 +1119,15 @@ impl App {
         self.copy(r);
         let name = self.copied.0.clone();
         self.push_undo(&format!("delete {}", name));
+        // a node's conflict copies go with it (§12.5)
+        let what = match ops::conflict_copies(&self.vault.tree, r).len() {
+            0 => name,
+            1 => format!("{} and its conflict copy", name),
+            n => format!("{} and its {} conflict copies", name, n),
+        };
         match ops::delete_subtree(&mut self.vault, r) {
-            Ok(1) => self.refresh_after(&format!("deleted {} · u undoes", name)),
-            Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · u undoes", name, n)),
+            Ok(1) => self.refresh_after(&format!("deleted {} · u undoes", what)),
+            Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · u undoes", what, n)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -1174,6 +1180,11 @@ impl App {
             _ => ("a heading", Kind::Section),
         };
         let words = format!("made {} {}", self.named(r), spelling);
+        // a node in a conflict pair keeps its spelling (§12.5)
+        if ops::conflict_pair(&self.vault.tree, r).len() > 1 {
+            self.say(format!("can't make {} {}: {}", self.named(r), spelling, ops::PAIR_SPELLING));
+            return;
+        }
         self.push_undo(&format!("make {} {}", self.named(r), spelling));
         let key = self.vault.key_of(r);
         match ops::toggle_spelling(&mut self.vault, r) {
@@ -1192,9 +1203,11 @@ impl App {
         let r = self.vault.tree.resolved_child(s);
         self.push_undo(&format!("indent {}", self.named(r)));
         let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
-        // it goes under the node before it (§10.3)
+        // it goes under the node before it (§10.3), with its conflict
+        // pair, which moves as one (§12.5)
         let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
-        let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| sibs[i]);
+        let first = ops::conflict_pair(&self.vault.tree, r)[0];
+        let prev = sibs.iter().position(|&c| c == first).and_then(|i| i.checked_sub(1)).map(|i| sibs[i]);
         let Some(prev) = prev else {
             self.say(format!("can't indent {}: nothing above it to go under", self.named(r)));
             return;
@@ -1301,7 +1314,8 @@ impl App {
     /// Where a node a verb moved under `dest` (a key taken before the move:
     /// the move renumbers the nodes of the files it writes) landed: a block
     /// by its id; else, among `dest`'s children with the node's title and
-    /// kind, the one the ordering rule (§3.1) put it at. Moved in as the
+    /// kind, but no conflict copy (one that moved with it has its title,
+    /// §12.5), the one the ordering rule (§3.1) put it at. Moved in as the
     /// last child, that is the last of them (an item goes after the items,
     /// a section after the sections); put at a place among them, the one
     /// after the `rank` namesakes that `namesakes_before` counted there.
@@ -1314,7 +1328,7 @@ impl App {
         let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
         let mut hits = kids.iter().filter(|&&c| {
             let n = self.vault.tree.node(c);
-            n.title == title && n.kind == kind
+            n.title == title && n.kind == kind && n.conflict().is_none()
         });
         match rank {
             Some(i) => hits.nth(i).copied(),
@@ -1323,11 +1337,11 @@ impl App {
     }
 
     /// Before a verb puts `r` among `dest`'s children, just before the
-    /// `at`-th: how many of them, other than `r`, share its title and kind
-    /// and come before that place, for `moved_node`. Clamped by the
-    /// ordering rule (§3.1), an item goes no later than the first section
-    /// and a section no earlier than after the last item, so it still comes
-    /// right after these namesakes.
+    /// `at`-th: how many of them, other than `r` and conflict copies,
+    /// share its title and kind and come before that place, for
+    /// `moved_node`. Clamped by the ordering rule (§3.1), an item goes no
+    /// later than the first section and a section no earlier than after
+    /// the last item, so it still comes right after these namesakes.
     fn namesakes_before(&self, r: NRef, dest: NRef, at: usize) -> usize {
         let n = self.vault.tree.node(r);
         let kids = self.vault.tree.resolved_children(dest);
@@ -1335,7 +1349,7 @@ impl App {
             .take(at)
             .filter(|&&c| {
                 let m = self.vault.tree.node(c);
-                c != r && m.title == n.title && m.kind == n.kind
+                c != r && m.title == n.title && m.kind == n.kind && m.conflict().is_none()
             })
             .count()
     }
@@ -2017,8 +2031,10 @@ impl App {
         }
         let q = p.text.to_lowercase();
         let refile = matches!(p.action, PromptAction::Refile);
-        // a node cannot move into its own subtree
-        let moving = p.moving.as_ref().and_then(|k| self.find_exact(k)).map(|r| self.vault.tree.resolved_child(r));
+        // a node cannot move into its own subtree, nor into the node its
+        // conflict copy is of, which moves with it (§12.5)
+        let moving = p.moving.as_ref().and_then(|k| self.find_exact(k));
+        let moving = moving.map(|r| ops::conflict_pair(&self.vault.tree, r)).unwrap_or_default();
         let mut nodes: Vec<NRef> = Vec::new();
         self.vault.tree.walk(self.vault.tree.root, &mut |t, r| {
             if t.node(r).kind != Kind::Root && !t.node(r).is_embed() {
@@ -2028,7 +2044,7 @@ impl App {
         let mut scored: Vec<(u8, usize, NRef)> = Vec::new();
         for r in nodes {
             let chain = self.chain(r);
-            if moving.map(|m| chain.contains(&m)).unwrap_or(false) {
+            if moving.iter().any(|m| chain.contains(m)) {
                 continue;
             }
             // nor into a conflict copy, which keeping ours trashes (§12.5)

@@ -802,7 +802,8 @@ hiding them (remembered with the view, §10.1). The selection stays on its node;
 hidden with them gives way to its next shown sibling, else the row above it.
 
 When a list is genuinely finished, *clear done* (palette) trashes every done item with no
-open descendants under `target` (default: current zoom root); task blocks'
+open descendants under `target` (default: current zoom root), unless a conflict copy of
+it stays (§12.5); task blocks'
 files go to trash too. For whole finished subtrees — a completed project, a concluded
 meeting series — `za` refiles them under `Archive` (§6.5). The trash (§11.5) and file versioning (§12.6) backstop both.
 
@@ -951,7 +952,8 @@ list scrolls with the selection.
 prompt is a list of every node, title first and path dimmed, narrowed as you type (title
 prefix, then title, then path) and picked with a click or `↑`/`↓` and `Enter`. A typed id,
 path or title (§3.4) still works. *Move to…* leaves out the moving node's own subtree, and
-conflict copies, which keeping ours trashes (§12.5); *Go to…* marks a node in one `⚠`.
+its conflict pair's, which moves with it, and conflict copies, which keeping ours trashes
+(§12.5); *Go to…* marks a node in one `⚠`.
 
 Every popup — node menu, prompt, properties, filter, commands, help — has its buttons on
 its bottom border (*OK*, *Close*, …), a list you can click and scroll, and closes on a click
@@ -983,8 +985,8 @@ the popup — closes the topmost thing.
 | `Ctrl-d` / `Ctrl-u` | half-page down / up |
 | `Enter` | zoom: reading pane shows the cursor node; reading pane takes focus |
 | `Backspace` | zoom out to parent |
-| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged. `>` is refused under a conflict copy, which keeping ours trashes (§12.5) |
-| `~` | toggle spelling, section ↔ item (subtree unchanged). The node moves to its parent's boundary (§3.1): an item respelled as a section becomes the first section child, a section respelled as an item the last item child, so no sibling changes parent |
+| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged. `>` is refused under a conflict copy, which keeping ours trashes; a node and its conflict copy go as one, from either side (§12.5) |
+| `~` | toggle spelling, section ↔ item (subtree unchanged). The node moves to its parent's boundary (§3.1): an item respelled as a section becomes the first section child, a section respelled as an item the last item child, so no sibling changes parent. Refused on either side of a conflict pair until it is resolved (§12.5) |
 | `J` / `K` | move node down / up past the next / previous sibling node; text children stay put. A node and its conflict copy (§12.4) move as one, and a node moves past them as one. An item never moves below a section sibling, nor a section above an item: the move is refused with a message |
 | `n` / `N` | new sibling after cursor / new last child, spelled like the cursor node / like the last child node (a section if the parent has section children): inserts an empty node and opens it with `e` |
 | `e` | edit the subtree's Markdown in the built-in editor; saves as you go (§10.6) |
@@ -992,7 +994,7 @@ the popup — closes the topmost thing.
 | `x` | toggle task open / done: the checkbox, plus `done:` on a block |
 | `t` | toggle task-ness: adds or removes the checkbox (and a block's `done:`) |
 | `s` | make the node a block |
-| `y` / `d` | yank / delete subtree into the register (delete goes to trash too) |
+| `y` / `d` | yank / delete subtree into the register (delete goes to trash too, and takes the node's conflict copies with it, §12.5) |
 | `p` / `P` | paste register after / before cursor as sibling, clamped by the ordering rule (§3.1) |
 | `r` | refile: fuzzy-pick a destination; `Ctrl-Enter` = as first child |
 | `c` / `C` | capture to the inbox as bullet / as task |
@@ -1357,8 +1359,12 @@ Unresolved pairs are ordinary blocks; they sync to every device and are visible 
 editor, and can be lived with indefinitely. The app marks each copy `⚠` and folds it,
 leaves its tasks out of the counts, and offers it as no *Move to…* destination; `>` puts
 nothing under it (§10.1, §10.3). No verb puts a node between a copy and the node it
-follows, which the copy would then pair with: `J`/`K` move the two as one, and a node
-added, pasted, dropped or outdented there goes after the copy.
+follows, which the copy would then pair with, nor takes one away from the other: `J`/`K`,
+*Move to…*, `za`, `>`, `<` and a drop move the two as one, from either side, and into
+neither; `d` on the node deletes its copies with it, and on a copy that copy alone, as
+keep ours does; *clear done* keeps a done node whose copy it keeps; `~` is refused on
+either side until the pair is resolved. A node added, pasted, dropped or outdented between
+them goes after the copy.
 
 ### 12.6 History (outside the app)
 

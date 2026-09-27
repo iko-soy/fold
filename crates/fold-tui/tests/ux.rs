@@ -1997,6 +1997,168 @@ fn a_node_dropped_before_a_conflict_copy_is_selected_where_it_lands() {
     assert_eq!(selected(&app), "NAS");
 }
 
+/// Work's two sections, then the Inbox, merged with a phone's copy that
+/// added a line under Reading list: a copy of it after its list (§12.4).
+fn reading() -> (tempfile::TempDir, App) {
+    let text = "# Work\n\n## Project Atlas\n\n- [ ] Draft the RFC\n\n## Reading list\n\n- The Rust Book\n\n# Inbox\n\n- call the plumber\n";
+    let d = vault(text);
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260927-161600-PHONE77.md"),
+        text.replace("## Reading list\n\n", "## Reading list\n\nBooks to read this winter.\n\n"),
+    )
+    .unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert_eq!(fold_core::merge::conflict_pairs(&v).len(), 1);
+    drop(v);
+    let app = App::new(d.path()).unwrap();
+    (d, app)
+}
+
+/// The row of the node titled `title`, not of its copy.
+fn row_of(app: &App, title: &str) -> usize {
+    app.rows().iter().position(|r| app.title_of(r.nref) == title).unwrap()
+}
+
+/// The row of the copy of `title`, the last row titled so.
+fn copy_row(app: &App, title: &str) -> usize {
+    app.rows().iter().rposition(|r| app.title_of(r.nref) == title).unwrap()
+}
+
+/// Drag row `from` onto row `to`: onto its title, or left of it.
+fn drag(app: &mut App, from: usize, to: usize, into: bool) {
+    draw(app);
+    let from = app.hit_pos(Hit::Row(from)).unwrap();
+    let to = app.hit_pos(Hit::Row(to)).unwrap();
+    let to = if into { to } else { (2, to.1) };
+    let at = |kind, (column, row)| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+    app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), to));
+    draw(app);
+    app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), to));
+}
+
+#[test]
+fn move_to_takes_a_node_s_conflict_copy_with_it() {
+    // left behind, the copy of Reading list would pair with Project
+    // Atlas, and keeping theirs would replace that (§12.5)
+    let (d, mut app) = reading();
+    select(&mut app, "Reading list");
+    press(&mut app, "r");
+    press(&mut app, "Inbox");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(said(&mut app), "moved “Reading list” to “Inbox”");
+    assert_eq!(paired(&mut app), ["Reading list"], "{}", root(&d));
+    let r = root(&d);
+    assert!(r.find("# Inbox").unwrap() < r.find("## Reading list").unwrap(), "{}", r);
+    assert!(r.find("## Reading list").unwrap() < r.find("## ![[").unwrap(), "{}", r);
+    // the selection is on the node, not on its copy
+    assert_eq!(app.cursor, row_of(&app, "Reading list"));
+    // keeping theirs replaces Reading list, and Project Atlas stays
+    let b = frame(&mut app);
+    let (x, y) = warning_after(&b, "Reading list");
+    click_at(&mut app, x, y, MouseButton::Left);
+    press(&mut app, "t");
+    assert!(has_line(&d, "## Project Atlas") && has_line(&d, "- [ ] Draft the RFC"), "{}", root(&d));
+    assert!(has_line(&d, "Books to read this winter."), "{}", root(&d));
+    // from the copy, both go, and the selection stays on the copy; its
+    // node, and what is under it, is no destination, as its own subtree
+    let (d, mut app) = reading();
+    app.cursor = copy_row(&app, "Reading list");
+    press(&mut app, "rRust");
+    draw(&mut app);
+    assert!(app.hit_pos(Hit::PickRow(0)).is_none(), "{}", screen(&mut app));
+    app.handle_key(key(KeyCode::Esc));
+    press(&mut app, "r");
+    press(&mut app, "Inbox");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(paired(&mut app), ["Reading list"], "{}", root(&d));
+    let r = root(&d);
+    assert!(r.find("# Inbox").unwrap() < r.find("## Reading list").unwrap(), "{}", r);
+    assert_eq!(app.cursor, copy_row(&app, "Reading list"));
+}
+
+#[test]
+fn deleting_a_node_deletes_its_conflict_copy_with_it() {
+    // left behind, the copy of NAS would be first under Homelab, marked
+    // and folded with nothing to pair with
+    let (d, mut app) = lab();
+    let before = root(&d);
+    select(&mut app, "NAS");
+    press(&mut app, "d");
+    assert_eq!(said(&mut app), "deleted “NAS” and its conflict copy (6 nodes) · u undoes");
+    assert_eq!(paired(&mut app), ["Label the cables"], "{}", root(&d));
+    assert!(!app.rows().iter().any(|r| app.title_of(r.nref) == "NAS"), "{}", screen(&mut app));
+    assert_eq!(root(&d).matches("![[").count(), 1, "{}", root(&d));
+    // one u brings both back
+    press(&mut app, "u");
+    assert_eq!(root(&d), before);
+    assert_eq!(paired(&mut app), PAIRED);
+    // a copy goes alone, as keeping ours sends it
+    select_copy(&mut app);
+    press(&mut app, "d");
+    assert_eq!(said(&mut app), "deleted “NAS” (3 nodes) · u undoes");
+    assert_eq!(paired(&mut app), ["Label the cables"], "{}", root(&d));
+    assert!(has_line(&d, "## NAS") && has_line(&d, "Mirrored pairs."), "{}", root(&d));
+}
+
+#[test]
+fn a_drag_an_indent_or_an_outdent_takes_a_node_s_conflict_copy_with_it() {
+    let (d, mut app) = reading();
+    let before = root(&d);
+    // > on the copy: both go under Project Atlas, the node before them
+    app.cursor = copy_row(&app, "Reading list");
+    press(&mut app, ">");
+    assert_eq!(said(&mut app), "indented “Reading list”");
+    assert_eq!(paired(&mut app), ["Reading list"], "{}", root(&d));
+    assert!(has_line(&d, "### Reading list") && has_line(&d, "- [ ] Draft the RFC"), "{}", root(&d));
+    assert_eq!(app.cursor, copy_row(&app, "Reading list"));
+    // < on the node: both back after Project Atlas
+    select(&mut app, "Reading list");
+    press(&mut app, "<");
+    assert_eq!(said(&mut app), "outdented “Reading list”");
+    assert_eq!(paired(&mut app), ["Reading list"], "{}", root(&d));
+    assert_eq!(root(&d), before);
+    assert_eq!(app.cursor, row_of(&app, "Reading list"));
+    // the copy dragged into Inbox
+    let (from, to) = (copy_row(&app, "Reading list"), row_of(&app, "Inbox"));
+    drag(&mut app, from, to, true);
+    assert_eq!(paired(&mut app), ["Reading list"], "{}", root(&d));
+    let r = root(&d);
+    assert!(r.find("# Inbox").unwrap() < r.find("## Reading list").unwrap(), "{}", r);
+    // an item and its copy dragged before a section: before NAS
+    let (d, mut app) = lab();
+    let (from, to) = (row_of(&app, "Label the cables"), row_of(&app, "NAS"));
+    drag(&mut app, from, to, false);
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    let r = root(&d);
+    assert!(r.find("- [ ] Label the cables").unwrap() < r.find("## NAS").unwrap(), "{}", r);
+    assert_eq!(app.cursor, row_of(&app, "Label the cables"));
+    // > on a copy with nothing above its node
+    app.cursor = copy_row(&app, "Label the cables");
+    press(&mut app, ">");
+    assert_eq!(said(&mut app), "can't indent “Label the cables”: nothing above it to go under");
+}
+
+#[test]
+fn a_node_in_a_conflict_pair_keeps_its_spelling_until_it_is_resolved() {
+    // a heading made a bullet goes before the headings, and would leave
+    // its copy to pair with the node before it (§12.5)
+    let (d, mut app) = lab();
+    let before = root(&d);
+    select(&mut app, "NAS");
+    press(&mut app, "~");
+    assert_eq!(said(&mut app), "can't make “NAS” a bullet: resolve its conflict first");
+    select_copy(&mut app);
+    press(&mut app, "~");
+    assert_eq!(said(&mut app), "can't make “NAS” a bullet: resolve its conflict first");
+    select(&mut app, "Label the cables");
+    press(&mut app, "~");
+    assert_eq!(said(&mut app), "can't make “Label the cables” a heading: resolve its conflict first");
+    assert_eq!(root(&d), before);
+    assert_eq!(paired(&mut app), PAIRED);
+}
+
 #[test]
 fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
     let (_d, mut app) = lab();
