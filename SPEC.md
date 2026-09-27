@@ -1255,7 +1255,8 @@ nothing.
   pair is said as above, at startup too; a copy that brings nothing in, one it leaves alone
   or one the same as its file, says nothing, nor that the editor saved first for it. A copy
   it leaves alone or fails on is no change by itself, and is tried again with the next
-  change.
+  change. A copy that lands while a reload runs, as the next of a batch Syncthing delivers
+  a moment apart, is new to the next reload.
 - A deleted file that was a block marks its embed broken; nothing is written.
 - Editing the same vault in Helix at the same time is a supported workflow.
 

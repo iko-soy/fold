@@ -175,8 +175,8 @@ pub struct App {
     last_watch_event: Instant,
     self_write_until: Instant,
     pending_reload: bool,
-    /// The sync-conflict copies there were at the last reload: a new one is
-    /// a change to take in (§11.2).
+    /// The sync-conflict copies the last reload listed before its merge,
+    /// and still there after it: a new one is a change to take in (§11.2).
     conflict_copies: Vec<String>,
     // layout and pointer state (§10.1): panes, scroll offsets, the hit map
     pane_outline: Rect,
@@ -568,7 +568,10 @@ impl App {
         // copy that brings nothing in, one left alone or the same as its
         // file, says nothing, as at startup
         let mut came_in = true;
-        if self.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
+        // listed before the merge: a copy that lands while it runs is new
+        // to the next reload, not seen with these
+        let copies = self.vault.conflict_files().unwrap_or_default();
+        if !copies.is_empty() {
             let was = tops(&self.vault);
             if !self.merge_conflict_files() {
                 let now = tops(&self.vault);
@@ -601,6 +604,7 @@ impl App {
             self.say(msg);
         }
         self.conflict_copies = self.vault.conflict_files().unwrap_or_default();
+        self.conflict_copies.retain(|c| copies.contains(c));
         self.settle_zoom();
         if let Some(k) = cursor_key {
             if let Some(r) = self.vault.find_by_key(&k) {

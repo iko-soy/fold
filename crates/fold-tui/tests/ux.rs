@@ -703,6 +703,58 @@ fn a_copy_merged_at_startup_without_a_pair_is_announced_as_what_came_in() {
     assert_eq!(idle(&mut app, 1000), 0);
 }
 
+/// A file as Syncthing puts one in the vault: written to a dot-temp file,
+/// then renamed into place.
+fn land(dir: &std::path::Path, name: &str, text: &str) {
+    let tmp = dir.join(format!(".syncthing.{}.tmp", name));
+    std::fs::write(&tmp, text).unwrap();
+    std::fs::rename(&tmp, dir.join(name)).unwrap();
+}
+
+#[test]
+fn a_copy_that_lands_while_the_one_before_is_merged_is_merged_next() {
+    // Syncthing delivers a batch of copies a moment apart: one that lands
+    // while a reload merges the one before is new to the next (§11.2),
+    // not seen with it. A big vault makes the reload long enough to land in
+    let backlog: String = (0..5000).map(|i| format!("- [ ] backlog {}\n", i)).collect();
+    let mut text = format!("# Inbox\n\n- [ ] a\n\n# Backlog\n\n{}\n# Blocks\n\n", backlog);
+    let d = vault("");
+    for i in 0..500u64 {
+        let id = fold_core::ident::Id::from_bytes((i + 1).to_be_bytes());
+        let name = fold_core::ident::filename(id.as_str(), &format!("block-{}", i));
+        std::fs::write(d.path().join(name), format!("---\nid: {}\n---\n\n- [ ] block {}\n", id, i)).unwrap();
+        text.push_str(&format!("![[{}]]\n", id));
+    }
+    std::fs::write(d.path().join("root.md"), &text).unwrap();
+    let mut app = start(&d);
+    idle(&mut app, 300);
+    let phone = "root.sync-conflict-20260927-120000-PHONE.md";
+    land(d.path(), phone, &text.replace("- [ ] a\n", "- [ ] a\n- [ ] from A\n"));
+    // the tablet's copy lands as soon as the merge has taken the phone's
+    let tablet = {
+        let dir = d.path().to_path_buf();
+        let text = text.replace("- [ ] a\n", "- [ ] a\n- [ ] from B\n");
+        std::thread::spawn(move || {
+            let end = Instant::now() + Duration::from_secs(10);
+            while dir.join(phone).exists() && Instant::now() < end {
+                std::thread::yield_now();
+            }
+            land(&dir, "root.sync-conflict-20260927-120005-TABLET.md", &text);
+        })
+    };
+    until_reload(&mut app);
+    tablet.join().unwrap();
+    assert!(root(&d).contains("- [ ] from A\n"), "the phone's copy was not merged");
+    let end = Instant::now() + Duration::from_secs(5);
+    while !app.vault_conflict_files().unwrap().is_empty() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+        app.tick();
+    }
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the tablet's copy waits unmerged");
+    assert!(root(&d).contains("- [ ] from B\n"), "{}", &root(&d)[..60]);
+    assert!(app.rows().iter().any(|r| app.title_of(r.nref) == "from B"));
+}
+
 // ------------------------------------------------------------ hiding done
 
 /// Two lists with done tasks above the cursor's rows, as in the sample
