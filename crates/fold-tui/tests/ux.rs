@@ -1949,6 +1949,46 @@ fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
     assert!(border.contains("Editing NAS ⚠ conflict copy from PHONE"), "{}", border);
 }
 
+#[test]
+fn where_the_editor_s_border_is_short_its_mode_and_warning_stay_whole_left_of_its_buttons() {
+    // in a copy, Vim's and Helix's border says more than fits left of ⌨
+    // at 120 columns, and far more at 80
+    for (keys, name) in [(EditKeys::Vim, "vim"), (EditKeys::Helix, "helix")] {
+        let (_d, mut app) = lab();
+        app.set_edit_keys(keys);
+        select(&mut app, "Homelab");
+        press(&mut app, "e");
+        // down into the copy of NAS, where a wide border says so in full
+        for _ in 0..20 {
+            if find(&frame_at(&mut app, 200, 32), "conflict copy").is_some() {
+                break;
+            }
+            app.handle_key(key(KeyCode::Down));
+        }
+        assert!(find(&frame_at(&mut app, 200, 32), "conflict copy").is_some(), "{}", text(&frame_at(&mut app, 200, 32)));
+        // clean, in insert mode, then with something typed
+        for (typed, mode) in [("", "NORMAL"), ("i", "INSERT"), ("z", "INSERT")] {
+            press(&mut app, typed);
+            for (w, h) in [(120, 32), (80, 24)] {
+                let b = frame_at(&mut app, w, h);
+                let (_, y) = find(&b, "⌨").unwrap_or_else(|| panic!("no ⌨:\n{}", text(&b)));
+                let row = line(&b, y);
+                let border = &row[row.rfind('╭').unwrap()..];
+                let (left, right) = border.split_at(border.find('⌨').unwrap());
+                let why = format!("{} {}×{} after “{}”: {}", name, w, h, typed, border);
+                // the mode and the ⚠ whole, left of ⌨
+                assert!(left.contains(&format!(" {} ", mode)) && left.contains('⚠'), "{}", why);
+                if w == 120 {
+                    assert!(left.contains("Editing NAS ⚠"), "{}", why);
+                }
+                // right of it only the keymap and the buttons
+                let rest = right.replacen(&format!("⌨ {}", name), "", 1).replace("✓ Done", "").replace("↺ Revert", "");
+                assert!(rest.chars().all(|c| matches!(c, '─' | ' ' | '╮' | '✓' | '↺')), "{}", why);
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------ messages
 
 /// The sample vault, as `fold` ships it, cut down.

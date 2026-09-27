@@ -1058,7 +1058,10 @@ which the news of that change mentions (§11.2).
 The pane's border shows the title of the block the cursor is in, *⚠ conflict copy from
 PHONE* after it in a conflict copy (§12.5), and a dot while something is unsaved, and lines
 of other blocks in the subtree are drawn a shade dimmer — the only hints that blocks
-exist. *Revert* (or `:q!`) discards changes made since the last save.
+exist. The border's text stays left of `⌨` and the buttons: where that is short, the title
+gives way first, to its first letters, then the words after ⚠ (*⚠ copy from PHONE*, then
+*⚠*), then *Editing*; the ⚠, the dot and the Vim or Helix mode stay whole.
+*Revert* (or `:q!`) discards changes made since the last save.
 
 Text a save cannot take — its block changed on disk under it (§5.2) — stays in the editor,
 and is never dropped without a copy unless asked twice: *Revert* first writes the editor's

@@ -223,6 +223,36 @@ fn fit_named(s: &str, w: usize) -> String {
     }
 }
 
+/// The editor's border title in `w` columns: *Editing*, the block's
+/// title, *⚠ conflict copy from PHONE* in a copy from `device`, then
+/// `tail`, the dot and the mode, which stay whole. Where it is short,
+/// the block's title gives way first, to its first few letters, then
+/// the words after ⚠, then *Editing*, and last the title, down to `…`.
+fn editor_title(name: &str, device: Option<&str>, tail: Vec<Span<'static>>, w: usize) -> Line<'static> {
+    let warns = match device {
+        Some(d) => vec![format!(" ⚠ conflict copy from {}", d), format!(" ⚠ copy from {}", d), " ⚠".to_string()],
+        None => vec![String::new()],
+    };
+    let rest: usize = tail.iter().map(|s| s.width()).sum();
+    let few = name.width().min(8);
+    let bare = warns[warns.len() - 1].as_str();
+    let (lead, warn) = warns
+        .iter()
+        .map(|warn| (" Editing ", warn.as_str(), few))
+        .chain([(" ", bare, 1)])
+        .find(|(lead, warn, least)| lead.width() + warn.width() + rest + least <= w)
+        .map_or((" ", bare), |(lead, warn, _)| (lead, warn));
+    let mut spans = vec![
+        Span::styled(lead.to_string(), Style::default().fg(theme::ACCENT)),
+        Span::styled(fit(name, w.saturating_sub(lead.width() + warn.width() + rest)), Style::default().add_modifier(Modifier::BOLD)),
+    ];
+    if !warn.is_empty() {
+        spans.push(Span::styled(warn.to_string(), Style::default().fg(theme::WARN)));
+    }
+    spans.extend(tail);
+    Line::from(spans)
+}
+
 /// Shorten a hint of `·`-separated parts to `w` columns by whole parts:
 /// the first stays, and the last where it is the way on (as *? help* or
 /// *Esc close*); those before it go first. What can follow a key has no
@@ -1016,21 +1046,18 @@ impl App {
         let Some(ed) = &self.editor else { return };
         let owner = ed.buf.owner_at(ed.cursor.line);
         let owner_title = ed.buf.owners.get(&owner).map(|o| title_text(&o.title)).unwrap_or_default();
-        let mut title = vec![
-            Span::styled(" Editing ", Style::default().fg(theme::ACCENT)),
-            Span::styled(owner_title, Style::default().add_modifier(Modifier::BOLD)),
-        ];
         // the cursor in a conflict copy, or a block within one (§10.6)
+        let mut device = None;
         let mut at = Some(owner);
         while let Some(info) = at.and_then(|o| ed.buf.owners.get(&o)) {
             let node = info.id.as_ref().and_then(|id| self.vault.tree.block_by_id(id)).map(|r| self.vault.tree.node(r));
             if let Some(c) = node.and_then(|n| n.conflict()) {
-                title.push(Span::styled(format!(" ⚠ conflict copy from {}", copy_device(c)), Style::default().fg(theme::WARN)));
+                device = Some(copy_device(c).to_string());
                 break;
             }
             at = info.parent;
         }
-        title.push(if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) });
+        let mut tail = vec![if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) }];
         let mode = ed.mode_name();
         if !mode.is_empty() {
             let bg = match mode {
@@ -1038,11 +1065,11 @@ impl App {
                 "NORMAL" => theme::ACCENT,
                 _ => ratatui::style::Color::Magenta,
             };
-            title.push(Span::styled(format!(" {} ", mode), Style::default().bg(bg).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
-            title.push(Span::raw(" "));
+            tail.push(Span::styled(format!(" {} ", mode), Style::default().bg(bg).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
+            tail.push(Span::raw(" "));
         }
         let keys_label = ed.keys.name();
-        let block = rounded(Line::from(title), true);
+        let block = rounded(Line::default(), true);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let room = area.width.saturating_sub(4) / 2;
@@ -1050,12 +1077,19 @@ impl App {
         // the keymap, a click away from the next one
         let label = format!(" ⌨ {} ", keys_label);
         let lw = label.width() as u16;
+        let mut end = start;
         if start > area.x + lw + 2 {
             let r = Rect { x: start - lw - 1, y: area.y, width: lw, height: 1 };
             let bg = if self.ui.hovered(r) { theme::BUTTON_HOVER } else { theme::BUTTON };
             put(f.buffer_mut(), r.x, r.y, &label, lw, Style::default().bg(bg).fg(ratatui::style::Color::White));
             self.ui.push(r, Hit::Button(Action::EditorKeys, None));
+            end = r.x;
         }
+        // the title left of them, never under them: its last blank is the
+        // label's or the button's own
+        let w = end.saturating_sub(area.x);
+        let title = editor_title(&owner_title, device.as_deref(), tail, w as usize);
+        f.buffer_mut().set_line(area.x + 1, area.y, &title, w.saturating_sub(1));
         self.ui.edit_area = inner;
         self.ui.push(inner, Hit::EditArea);
         // a command, search or message takes the pane's last line
