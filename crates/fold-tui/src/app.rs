@@ -668,7 +668,8 @@ impl App {
                 self.conflicts_waiting.extend(raised);
                 if !self.open_waiting_conflicts() {
                     let news = self.conflict_news(&self.pairs_among(&self.conflicts_waiting));
-                    self.say(format!("{}: click {} to resolve", news, conflict_count(blocks.len())));
+                    // the lit ⚠ count beside it says how many (§10.7)
+                    self.say(format!("{}: click ⚠ to resolve", news));
                 }
             }
             Err(e) => self.say(format!("merge error: {}", e)),

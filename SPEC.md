@@ -1121,7 +1121,7 @@ Opened by the status bar's ⚠ count or *Resolve conflicts*; at a pair, by a cop
 file is detected or a splice hits a changed span — on the first new pair in the outline,
 and only from an outline at rest: normal mode, nothing open over it, no key, paste or
 click for 2 s. A busy user is not interrupted: the mode stays, the editor keeps its text,
-the status line names the node — *sync conflict in “NAS”: click ⚠ 1 conflict to resolve*
+the status line names the node — *sync conflict in “NAS”: click ⚠ to resolve*
 — and the ⚠ count is lit until the view opens, from a click or on its own once the outline
 is at rest. Opened on its own, for its first half second it ignores `o t b e`, meant for
 what was there before. Pairs that come in while it is open leave it on the pair it shows.

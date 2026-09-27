@@ -208,13 +208,16 @@ fn fit(s: &str, w: usize) -> String {
 }
 
 /// Cut a message to `w` columns: the node it names, quoted, gives way
-/// where that is enough, so the words around it stay whole; else its end.
+/// first, down to `…`, so the words around it stay whole where that is
+/// enough; then its end. Where the words before the name leave no room
+/// for it, the end alone is cut.
 fn fit_named(s: &str, w: usize) -> String {
     let over = s.width().saturating_sub(w);
     let name = s.find('“').map(|i| i + '“'.len_utf8()).and_then(|a| s[a..].find('”').map(|n| (a, a + n)));
     match name {
-        Some((a, b)) if over > 0 && over < s[a..b].width() => {
-            format!("{}{}{}", &s[..a], fit(&s[a..b], s[a..b].width() - over), &s[b..])
+        Some((a, b)) if over > 0 && s[a..b].width() > 1 && s[..a].width() + 3 <= w => {
+            let keep = s[a..b].width().saturating_sub(over).max(1);
+            fit(&format!("{}{}{}", &s[..a], fit(&s[a..b], keep), &s[b..]), w)
         }
         _ => fit(s, w),
     }

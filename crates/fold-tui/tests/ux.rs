@@ -1046,7 +1046,7 @@ fn a_sync_conflict_while_typing_leaves_the_editor_open_and_the_keys_in_it() {
     assert_eq!(app.mode_pub(), "edit");
     assert_eq!(pairs(&mut app), 2);
     let s = status_line(&mut app);
-    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ 2 conflicts to resolve"), "{}", s);
+    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ to resolve"), "{}", s);
     assert!(lit(&mut app));
     app.handle_key(key(KeyCode::Esc));
     assert!(has_line(&d, "Mirrored pairs. bottom note, both boot targets"), "{}", root(&d));
@@ -1071,7 +1071,7 @@ fn pairs_that_came_in_while_busy_open_once_the_outline_is_idle() {
     // a key a moment ago: the outline stays
     assert_eq!(app.mode_pub(), "normal");
     let s = status(&mut app);
-    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ 3 conflicts to resolve"), "{}", s);
+    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ to resolve"), "{}", s);
     assert!(lit(&mut app));
     assert_eq!(idle(&mut app, 1500), 0);
     assert_eq!(app.mode_pub(), "normal");
@@ -1087,6 +1087,34 @@ fn pairs_that_came_in_while_busy_open_once_the_outline_is_idle() {
     std::thread::sleep(Duration::from_millis(2100));
     app.tick();
     assert_eq!(app.mode_pub(), "normal");
+}
+
+#[test]
+fn where_the_bar_is_short_the_news_of_a_sync_conflict_cuts_the_name_first() {
+    // 80×24, a key a moment ago: the name gives way, then the end, and the
+    // lit ⚠ count beside it is not said again
+    let d = homelab(None);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "j");
+    phone_copy(&d);
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "normal");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" sync conflicts in “…” and 1 more: click ⚠ to"), "{}", s);
+    assert!(s.contains(" ⚠ 2 conflicts "), "{}", s);
+    // wider, the name comes back before the words go
+    let s = status(&mut app);
+    assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ to resolve "), "{}", s);
+    // typing on NAS, with less room still
+    let d = homelab(None);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    phone_copy(&d);
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "edit");
+    let s = status80(&mut app);
+    assert!(s.contains(" EDIT  sync conflicts in “…” and 1 more: "), "{}", s);
 }
 
 #[test]
