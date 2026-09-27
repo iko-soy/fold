@@ -870,9 +870,10 @@ Four regions, each of them live under the pointer:
   or click has come since, the next step takes its place: the keys of what is on screen —
   *n new · e edit · x done · m menu · / find · ? help* in the outline, *e edit · Enter
   zoom/follow · Tab outline* in the reading pane, *Esc done · Ctrl-S save · Ctrl-Z undo* in
-  the editor (*i insert · :wq done · :q! revert* in Vim and Helix, where `Esc` never
+  the editor (*i insert · :q! revert · :wq done* in Vim and Helix, where `Esc` never
   leaves), *n add · Enter change · d delete · Esc close* in the property form, and each
-  popup's own — cut down by whole parts where they don't fit. An error or a refusal
+  popup's own — cut down by whole parts where they don't fit, the first and the last kept,
+  so the way on (*? help*, *Esc done*, *:wq done*) stays. An error or a refusal
   (*error: …*, *can't …*, *… refused: …*) stays until a key or click that comes once it
   is that old. The greeting is the outline's, and gives way at once to the editor's or a
   popup's keys. While a key sequence is half typed, the bar says what can follow it:

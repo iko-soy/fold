@@ -385,11 +385,12 @@ impl App {
         match self.mode {
             Mode::Normal if self.focus == Focus::Reading => "e edit · Enter zoom/follow · Tab outline",
             Mode::Normal => "n new · e edit · x done · m menu · / find · ? help",
-            // in Vim and Helix, Esc never leaves (§10.6)
+            // in Vim and Helix, Esc never leaves (§10.6); :wq, the way on,
+            // is last, so it stays where the bar is short
             Mode::Edit => match self.editor.as_ref().map(|e| (e.keys, e.mode)) {
                 Some((editor::Keys::Normal, _)) | None => "Esc done · Ctrl-S save · Ctrl-Z undo",
-                Some((_, editor::Mode::Normal)) => "i insert · :wq done · :q! revert",
-                Some(_) => "Esc normal mode · :wq done · :q! revert",
+                Some((_, editor::Mode::Normal)) => "i insert · :q! revert · :wq done",
+                Some(_) => "Esc normal mode · :q! revert · :wq done",
             },
             Mode::Props => "n add · Enter change · d delete · Esc close",
             Mode::Filter => "↑↓ pick · Enter go · Esc close",

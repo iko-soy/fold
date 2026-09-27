@@ -2077,8 +2077,8 @@ fn the_editor_s_own_saves_say_nothing_and_ctrl_s_says_saved() {
 const OUTLINE_KEYS: &str = "n new · e edit · x done · m menu · / find · ? help";
 const READING_KEYS: &str = "e edit · Enter zoom/follow · Tab outline";
 const EDITOR_KEYS: &str = "Esc done · Ctrl-S save · Ctrl-Z undo";
-const VIM_KEYS: &str = "i insert · :wq done · :q! revert";
-const VIM_INSERT_KEYS: &str = "Esc normal mode · :wq done · :q! revert";
+const VIM_KEYS: &str = "i insert · :q! revert · :wq done";
+const VIM_INSERT_KEYS: &str = "Esc normal mode · :q! revert · :wq done";
 const PROPS_KEYS: &str = "n add · Enter change · d delete · Esc close";
 
 #[test]
@@ -2419,4 +2419,31 @@ fn a_short_bar_keeps_the_key_that_shows_hidden_done_tasks_in_the_z_hint() {
     app.handle_key(key(KeyCode::Esc));
     press(&mut app, "zd");
     assert!(!status80(&mut app).contains("done hidden"));
+}
+
+#[test]
+fn a_short_bar_keeps_the_vim_and_helix_editor_s_way_out_that_saves() {
+    // 80 columns, editing a block: its file on the right leaves the keys
+    // too little room, and :q! revert goes before :wq done
+    for title in ["Snapshot policy", "Snapshot policy for tank"] {
+        let d = vault(&SAMPLE.replace("Snapshot policy", title));
+        let mut app = App::new(d.path()).unwrap();
+        select(&mut app, title);
+        press(&mut app, "s");
+        for keys in [EditKeys::Vim, EditKeys::Helix] {
+            app.set_edit_keys(keys);
+            press(&mut app, "e");
+            app.say("");
+            let bar = status80(&mut app);
+            assert!(bar.contains("i insert") && bar.contains(":wq done"), "{}", bar);
+            press(&mut app, "i");
+            let bar = status80(&mut app);
+            assert!(bar.contains("Esc normal mode") && bar.contains(":wq done"), "{}", bar);
+            assert!(!bar.contains(":q! revert"), "{}", bar);
+            app.handle_key(key(KeyCode::Esc));
+            press(&mut app, ":wq");
+            app.handle_key(key(KeyCode::Enter));
+            assert_eq!(app.mode_pub(), "normal");
+        }
+    }
 }
