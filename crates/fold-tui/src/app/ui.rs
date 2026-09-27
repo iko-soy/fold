@@ -1434,7 +1434,7 @@ impl App {
     }
 
     fn draw_conflict(&mut self, f: &mut Frame, area: Rect) {
-        let pairs = fold_core::merge::conflict_pairs(&self.vault);
+        let pairs = self.view_pairs();
         let buf = f.buffer_mut();
         let head = Rect { height: 1, ..area };
         buf.set_style(head, Style::default().bg(theme::BAR));

@@ -749,24 +749,31 @@ impl App {
             && self.last_input.is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
     }
 
+    /// The unresolved pairs, (ours, theirs), as the conflict view lists
+    /// them (§12.5): first in the outline first, as it opens on the first
+    /// new one in the outline (§10.7), and `n` goes on down it.
+    fn view_pairs(&self) -> Vec<(NRef, NRef)> {
+        let mut pairs = fold_core::merge::conflict_pairs(&self.vault);
+        if pairs.len() > 1 {
+            // found by their blocks' files; the outline is walked for
+            // their order only when there is one to find
+            let tree = &self.vault.tree;
+            let mut order = Vec::new();
+            tree.walk(tree.root, &mut |_, r| order.push(r));
+            pairs.sort_by_key(|&(ours, _)| order.iter().position(|&r| r == ours));
+        }
+        pairs
+    }
+
     /// The pairs whose conflict blocks are `keys` (§12.5), first in the
     /// outline first: each one's place in the view's list, and its node.
     fn pairs_among(&self, keys: &[NodeKey]) -> Vec<(usize, NRef)> {
-        let mut out: Vec<(usize, NRef)> = fold_core::merge::conflict_pairs(&self.vault)
+        self.view_pairs()
             .into_iter()
             .enumerate()
             .filter(|(_, (_, theirs))| keys.contains(&self.vault.key_of(*theirs)))
             .map(|(i, (ours, _))| (i, ours))
-            .collect();
-        if out.len() > 1 {
-            // the view lists pairs by their blocks' files; the outline is
-            // walked for their order only when there is one to find
-            let tree = &self.vault.tree;
-            let mut order = Vec::new();
-            tree.walk(tree.root, &mut |_, r| order.push(r));
-            out.sort_by_key(|&(_, ours)| order.iter().position(|&r| r == ours));
-        }
-        out
+            .collect()
     }
 
     /// What came in, by the node of the first of those pairs in the
@@ -785,9 +792,10 @@ impl App {
         quoted(&self.vault.tree.node(self.vault.tree.resolved_child(r)).title)
     }
 
-    /// The conflict blocks of the unresolved pairs, by id (§12.5).
+    /// The conflict blocks of the unresolved pairs, by id, as the view
+    /// lists them (§12.5).
     fn conflict_blocks(&self) -> Vec<NodeKey> {
-        fold_core::merge::conflict_pairs(&self.vault)
+        self.view_pairs()
             .into_iter()
             .map(|(_, theirs)| self.vault.key_of(theirs))
             .collect()
@@ -2097,7 +2105,7 @@ impl App {
         if fresh && matches!(key.code, KeyCode::Char('o' | 't' | 'b' | 'e')) {
             return;
         }
-        let pairs = fold_core::merge::conflict_pairs(&self.vault);
+        let pairs = self.view_pairs();
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;

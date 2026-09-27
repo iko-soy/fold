@@ -1340,8 +1340,8 @@ algorithm is deterministic and idempotent.
 
 ### 12.5 Resolution
 
-The conflict view (§10.7) lists every `conflict:` block, each shown against the sibling
-before it, and the status line counts them. Resolving a pair:
+The conflict view (§10.7) lists every `conflict:` block, in outline order, each shown
+against the sibling before it, and the status line counts them. Resolving a pair:
 
 - **keep ours** — delete the conflict block and its embed (to trash);
 - **keep theirs** — replace ours' title and children (text and nodes) with the conflict block's,

@@ -1137,9 +1137,9 @@ fn reverting_text_the_trash_cannot_take_drops_it_when_asked_again() {
 
 // ------------------------------------------------------------ sync conflicts
 
-/// Conflict block ids that list first and last: the view lists pairs in
-/// the order of their blocks' files (§12.5), and a merge names its blocks
-/// by fresh ids.
+/// Conflict block ids whose files list first and last: a merge names its
+/// blocks by fresh ids, and pairs are found in their blocks' files' order,
+/// where the view lists them in the outline's (§12.5).
 const FIRST: &str = "bacbec-bacbec-bacbec-bacbec";
 const LAST: &str = "worzod-worzod-worzod-worzod";
 
@@ -1245,7 +1245,7 @@ fn pairs_that_came_in_while_busy_open_once_the_outline_is_idle() {
     assert_eq!(idle(&mut app, 1500), 0);
     assert_eq!(app.mode_pub(), "normal");
     // two seconds without a key: the view opens on NAS, not on the pair
-    // left from before, which is listed first
+    // left from before, whose block's file is listed first
     idle(&mut app, 1000);
     assert_eq!(app.mode_pub(), "conflict");
     let s = screen(&mut app);
@@ -1256,6 +1256,33 @@ fn pairs_that_came_in_while_busy_open_once_the_outline_is_idle() {
     std::thread::sleep(Duration::from_millis(2100));
     app.tick();
     assert_eq!(app.mode_pub(), "normal");
+}
+
+#[test]
+fn the_conflict_view_lists_its_pairs_in_outline_order_from_the_one_it_opens_on() {
+    // a pair left from before on the flaky switch, its block's file listed
+    // first; the phone's copy raises NAS, above it, and the cables, below
+    let d = homelab(Some(FIRST));
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "j");
+    phone_copy(&d);
+    app.reload_external();
+    assert_eq!(pairs(&mut app), 3);
+    // the ⚠ opens the view on NAS, the first new pair, and counts it first
+    click_button(&mut app, Action::ResolveConflicts);
+    assert_eq!(app.mode_pub(), "conflict");
+    let s = screen(&mut app);
+    assert!(s.contains("Conflict 1 of 3") && s.contains("no raidz"), "{}", s);
+    // n goes down the outline to the last pair, N back up
+    press(&mut app, "n");
+    let s = screen(&mut app);
+    assert!(s.contains("Conflict 2 of 3") && s.contains("flaky"), "{}", s);
+    press(&mut app, "n");
+    let s = screen(&mut app);
+    assert!(s.contains("Conflict 3 of 3") && s.contains("Label the cables"), "{}", s);
+    press(&mut app, "NN");
+    let s = screen(&mut app);
+    assert!(s.contains("Conflict 1 of 3") && s.contains("no raidz"), "{}", s);
 }
 
 #[test]
@@ -1341,11 +1368,11 @@ fn pairs_that_come_in_while_the_view_is_open_leave_it_on_the_pair_it_shows() {
     assert!(screen(&mut app).contains("flaky"));
     phone_copy(&d);
     app.reload_external();
-    // listed after the new ones, the pair on screen stays on screen
+    // listed after NAS now, the pair on screen stays on screen
     assert_eq!(app.mode_pub(), "conflict");
     assert_eq!(pairs(&mut app), 3);
     let s = screen(&mut app);
-    assert!(s.contains("Conflict 3 of 3") && s.contains("flaky"), "{}", s);
+    assert!(s.contains("Conflict 2 of 3") && s.contains("flaky"), "{}", s);
     press(&mut app, "o");
     assert!(!root(&d).contains(LAST), "{}", root(&d));
     assert_eq!(pairs(&mut app), 2);
