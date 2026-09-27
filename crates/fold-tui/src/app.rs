@@ -2530,9 +2530,7 @@ impl App {
                         // it); a task item toggles (§10.4)
                         let n = self.vault.tree.node(r);
                         if n.kind == Kind::Section {
-                            self.set_zoom(Some(r));
-                            self.read_cursor = 0;
-                            self.scroll_reading = 0;
+                            self.zoom_into(r);
                         } else if n.task.is_some() {
                             self.toggle_read_task(r);
                         }
@@ -2540,9 +2538,7 @@ impl App {
                     Some(LineRef::Embed(e)) => {
                         let t = self.vault.tree.resolved_child(e);
                         if t != e {
-                            self.set_zoom(Some(t));
-                            self.read_cursor = 0;
-                            self.scroll_reading = 0;
+                            self.zoom_into(t);
                         }
                     }
                     _ => {}

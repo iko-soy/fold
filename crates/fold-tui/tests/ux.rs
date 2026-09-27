@@ -1115,6 +1115,26 @@ fn the_reading_pane_marks_a_conflict_copy_s_title_line() {
 }
 
 #[test]
+fn enter_on_a_copy_s_heading_in_the_reading_pane_zooms_into_it_unfolded() {
+    let (_d, mut app) = lab();
+    app.show_reading = true;
+    select(&mut app, "Homelab");
+    app.handle_key(key(KeyCode::Tab));
+    // down to the copy's heading, the second ## NAS
+    let at = app.reading_doc_pub().lines.iter().rposition(|l| l.starts_with("## NAS")).unwrap();
+    for _ in 0..at {
+        press(&mut app, "j");
+        draw(&mut app);
+    }
+    assert_eq!(app.read_cursor_pub(), at);
+    app.handle_key(key(KeyCode::Enter));
+    // as a double-click or the outline's Enter: it shows what is in it
+    let s = screen(&mut app);
+    assert!(s.contains("▾ NAS ⚠") && s.contains("Snapshot policy"), "{}", s);
+    assert_eq!(app.rows().len(), 3, "{}", s);
+}
+
+#[test]
 fn move_to_leaves_conflict_copies_out_and_other_pickers_mark_them() {
     let (_d, mut app) = lab();
     select(&mut app, "Replace fan");
