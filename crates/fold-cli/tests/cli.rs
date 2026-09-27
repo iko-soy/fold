@@ -218,6 +218,8 @@ struct Tty {
     out: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     /// reads what script passes on; done once script closes its output
     reader: std::thread::JoinHandle<()>,
+    /// while set, the reader reads nothing (`stall`)
+    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pid: u32,
 }
 
@@ -267,9 +269,16 @@ impl Tty {
         let mut stdout = script.stdout.take().unwrap();
         let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = out.clone();
+        let stalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = stalled.clone();
         let reader = std::thread::spawn(move || {
             let mut buf = [0; 4096];
-            while let Ok(n @ 1..) = stdout.read(&mut buf) {
+            loop {
+                // a stalled terminal keeps its end open and reads nothing
+                while held.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let Ok(n @ 1..) = stdout.read(&mut buf) else { return };
                 sink.lock().unwrap().extend_from_slice(&buf[..n]);
             }
         });
@@ -279,7 +288,7 @@ impl Tty {
             eprintln!("skipped: script(1) ran no shell");
             return None;
         };
-        Some(Tty { script, keys, out, reader, pid })
+        Some(Tty { script, keys, out, reader, stalled, pid })
     }
 
     fn output(&self) -> String {
@@ -302,6 +311,19 @@ impl Tty {
         use std::io::Write;
         self.keys.write_all(bytes.as_bytes()).unwrap();
         self.keys.flush().unwrap();
+    }
+
+    /// Stop reading what fold writes, as a terminal that has stalled (an
+    /// ssh session gone quiet): once the pipes fill, fold's writes wait.
+    fn stall(&self) {
+        self.stalled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The syscall fold's main thread is in, by number; None where
+    /// /proc does not say.
+    fn syscall(&self) -> Option<String> {
+        let s = std::fs::read_to_string(format!("/proc/{}/syscall", self.pid)).ok()?;
+        Some(s.split(' ').next()?.trim().to_string())
     }
 
     fn signal(&self, sig: &str) {
@@ -345,6 +367,8 @@ impl Drop for Tty {
             .status();
         let _ = self.script.kill();
         let _ = self.script.wait();
+        // the reader reads to the end and is done
+        self.stalled.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -425,6 +449,37 @@ fn a_signal_puts_the_terminal_back_though_script_passes_it_on_late() {
         assert!(tty.ended(), "fold still runs");
         assert!(put_back(&tty.output()).is_some(), "terminal left as fold had it:\n{}", tty.tail());
     });
+}
+
+/// write(2)'s number, as /proc/<pid>/syscall gives it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const WRITE: &str = "1";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const WRITE: &str = "64";
+
+#[test]
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn a_second_signal_ends_fold_stuck_on_a_terminal_that_reads_nothing() {
+    let root: String = (0..300).map(|i| format!("- item {} of a long outline that fills the screen\n", i)).collect();
+    let (vault, state) = vault_and_state(&format!("# Snapshot policy\n\n{}", root));
+    let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
+    assert!(tty.shows("Snapshot"), "fold drew nothing:\n{}", tty.tail());
+    if tty.syscall().is_none() {
+        eprintln!("skipped: /proc does not say what fold waits on");
+        return;
+    }
+    // the terminal stops reading; fold, redrawing the whole outline from
+    // bottom to top and back, fills it and waits in a write
+    tty.stall();
+    tty.type_keys(&"Ggg".repeat(200));
+    let stuck = until(|| (tty.syscall().as_deref() == Some(WRITE)).then_some(()));
+    assert!(stuck.is_some(), "fold never waited on the terminal: {:?}", tty.syscall());
+    // the first signal asks fold to end as on a quit, which it cannot
+    // while it waits; the second ends it all the same
+    tty.signal("TERM");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    tty.signal("TERM");
+    assert!(until(|| tty.exited().then_some(())).is_some(), "fold still runs: {:?}", tty.syscall());
 }
 
 #[test]

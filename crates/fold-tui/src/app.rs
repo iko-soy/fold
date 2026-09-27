@@ -3314,6 +3314,12 @@ fn stop_signals() -> std::io::Result<std::sync::Arc<std::sync::atomic::AtomicBoo
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(unix)]
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP, signal_hook::consts::SIGINT] {
+        // a second SIGTERM or SIGINT ends fold as the signal would (§10.6):
+        // the loop never sees the flag while a write waits on a terminal
+        // that reads nothing. not SIGHUP, which a closed window can send twice
+        if sig != signal_hook::consts::SIGHUP {
+            signal_hook::flag::register_conditional_default(sig, stop.clone())?;
+        }
         signal_hook::flag::register(sig, stop.clone())?;
     }
     Ok(stop)

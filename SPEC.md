@@ -1043,7 +1043,9 @@ app keeps track. Blocks are saved on their own:
 - on `Esc` or *Done* (back to normal mode), on any outline verb, before a reload caused by
   an external change, and on quit;
 - when the app ends any other way: `SIGTERM`, `SIGHUP` (a closed window, a dropped ssh
-  session), `SIGINT`, an I/O error, a panic.
+  session), `SIGINT`, an I/O error, a panic. A second `SIGTERM` or `SIGINT` ends it at
+  once, unsaved, as the signal would: the way out while a write waits on a terminal that
+  reads nothing.
 
 A save shows in the status bar's save state (§10.1), not as a message, but for `:w` and
 `Ctrl-S`, which are asked for and answer *saved*, and one that an outside change forced,
@@ -1058,7 +1060,8 @@ Text a save cannot take — its block changed on disk under it (§5.2) — stays
 and is never dropped without a copy: *Revert* first writes the editor's whole text to the
 trash as `unsaved-<title>.md` (§11.5) and the status line names the entry, and the app
 ending any way but a quit does the same, saying where once the terminal is back. However it
-ends, the app leaves the terminal as it found it, a panic's message printed after.
+ends, but for that second signal, the app leaves the terminal as it found it, a panic's
+message printed after.
 
 **Keymaps.** The editor speaks one of three keymaps, over the same text, cursor, selection,
 clipboard and undo:
