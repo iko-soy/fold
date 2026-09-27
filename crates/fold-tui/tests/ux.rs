@@ -2208,7 +2208,7 @@ fn keys_fold_does_not_use_say_what_to_press_instead() {
     app.handle_key(ctrl('f'));
     assert_eq!(said(&mut app), "Ctrl-F does nothing here: / searches");
     app.handle_key(key(KeyCode::Delete));
-    assert_eq!(said(&mut app), "Delete does nothing here: Tab, then d deletes");
+    assert_eq!(said(&mut app), "Delete does nothing here: m, then choose Delete");
     app.handle_key(key(KeyCode::F(1)));
     assert_eq!(app.mode_pub(), "help");
     app.handle_key(key(KeyCode::Esc));
@@ -2220,6 +2220,34 @@ fn keys_fold_does_not_use_say_what_to_press_instead() {
     assert_eq!(app.mode_pub(), "edit");
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(root(&d), SAMPLE);
+}
+
+#[test]
+fn delete_in_the_reading_pane_points_at_the_menu_of_the_line_s_node() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    select(&mut app, "NAS");
+    app.handle_key(key(KeyCode::Tab));
+    // down to a child's heading: the pane shows NAS, the line is Replace fan
+    let at = app.reading_doc_pub().lines.iter().position(|l| l.contains("Replace fan")).unwrap();
+    for _ in 0..at {
+        press(&mut app, "j");
+        draw(&mut app);
+    }
+    app.handle_key(key(KeyCode::Delete));
+    // Tab, then d would delete NAS, the outline's selection
+    assert_eq!(said(&mut app), "Delete does nothing here: m, then choose Delete");
+    assert_eq!(root(&d), SAMPLE);
+    // done as it says, it deletes the line's node and nothing else
+    press(&mut app, "m");
+    // ↓ down to Delete, the menu's last item
+    for _ in 0..node_menu_index(Action::Delete) {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(said(&mut app), "deleted “Replace fan” · u undoes");
+    assert_eq!(root(&d), SAMPLE.replace("### [x] Replace fan\n\n", ""));
 }
 
 #[test]

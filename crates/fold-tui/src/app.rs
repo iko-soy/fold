@@ -447,7 +447,9 @@ impl App {
             KeyCode::Char('i') => "e edits",
             // the reading pane's o opens a link
             KeyCode::Char('o') => "n adds a node below",
-            KeyCode::Delete if reading => "Tab, then d deletes",
+            // the reading pane's m is the menu of the line's node; Tab,
+            // then d, would delete the outline's selection (§10.4)
+            KeyCode::Delete if reading => "m, then choose Delete",
             KeyCode::Delete => "d deletes",
             _ => return,
         };

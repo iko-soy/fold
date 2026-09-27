@@ -1016,7 +1016,7 @@ does nothing here: e edits*), `o` (*n adds a node below*), `Delete` (*d deletes*
 | `o` | open external link under cursor (`xdg-open` / `open`) |
 | `[[` / `]]` | previous / next heading |
 | `/` | in-block search; `n` / `N` next / previous match |
-| `:` `?` `F1` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor; `i`, `Delete`, `Ctrl-Z` and `Ctrl-F` (*/ searches*) say what to press instead |
+| `:` `?` `F1` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor; `i`, `Delete` (*m, then choose Delete*), `Ctrl-Z` and `Ctrl-F` (*/ searches*) say what to press instead |
 
 ### 10.5 Filter box
 
