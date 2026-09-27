@@ -1136,10 +1136,16 @@ operation did not touch are never written by undo, so an external edit to them s
 ### 11.2 Watcher and reload
 
 `notify`-based recursive watcher on the vault, 200 ms debounce, ignoring the patterns in
-§11.4.
+§11.4. Only writes count — a file created, written, renamed or removed — never a file
+opened or read, as every reload reads them all. A reload runs only when the files differ
+from what the app last read or wrote (a file's text changed, a file came or went) or a new
+`*.sync-conflict-*.md` file appeared. The app's own writes, seen once they land, reload
+nothing.
 
 - A changed file that the user is not editing is re-parsed; the cursor is re-attached by
   id, then key (§3.4), then the deepest step of the key that still exists.
+- The status line says what came in, by the top-level nodes it touched:
+  `↻ changed outside fold: Inbox (+1 item)`.
 - A changed file with a built-in edit in progress: the editor saves its dirty blocks first;
   a block whose span hash no longer matches is merged two-way (§5.2 step 5), then the file
   is re-parsed and the buffer re-rendered around the cursor.

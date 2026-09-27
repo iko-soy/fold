@@ -137,6 +137,9 @@ pub struct App {
     last_watch_event: Instant,
     self_write_until: Instant,
     pending_reload: bool,
+    /// The sync-conflict copies there were at the last reload: a new one is
+    /// a change to take in (§11.2).
+    conflict_copies: Vec<String>,
     // layout and pointer state (§10.1): panes, scroll offsets, the hit map
     pane_outline: Rect,
     pane_reading: Rect,
@@ -182,6 +185,7 @@ enum PromptAction {
 impl App {
     pub fn new(dir: &Path) -> std::io::Result<App> {
         let vault = Vault::open(dir)?;
+        let conflict_copies = vault.conflict_files()?;
         Ok(App {
             vault,
             mode: Mode::Normal,
@@ -229,6 +233,7 @@ impl App {
             last_watch_event: Instant::now(),
             self_write_until: Instant::now() - Duration::from_secs(1),
             pending_reload: false,
+            conflict_copies,
             pane_outline: Rect::default(),
             pane_reading: Rect::default(),
             outline_scroll: 0,
@@ -285,14 +290,38 @@ impl App {
         self.status_time = Instant::now();
     }
 
+    /// What the main loop does between events: the editor's autosave, then
+    /// a debounced reload. True when it reloaded.
+    pub fn tick(&mut self) -> bool {
+        // autosave after 750 ms without a keystroke (§10.6)
+        if self.mode == Mode::Edit && self.editor_dirty() && self.edit_last_key.elapsed() > Duration::from_millis(750) {
+            self.save_editor("pause");
+        }
+        // external changes: debounced reload (§11.2)
+        let due = self.poll_watcher();
+        if due {
+            self.reload_external();
+        }
+        due
+    }
+
     /// Drain watcher events; returns true if a debounced reload should run.
     /// Debounce state: events are drained immediately; a reload is due when
     /// at least one relevant event arrived and 200 ms have passed since the
-    /// last one (§11.2).
+    /// last one (§11.2), and the files hold something the vault does not.
     pub fn poll_watcher(&mut self) -> bool {
+        use notify::event::{AccessKind, AccessMode, EventKind, ModifyKind};
         if let Some(rx) = &self.watch_rx {
             while let Ok(res) = rx.try_recv() {
                 if let Ok(event) = res {
+                    // only a write can change a file's text: opening or
+                    // reading one, as every reload does, or its times and
+                    // mode changing is no change (§11.2)
+                    let write = match event.kind {
+                        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+                        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_)) => false,
+                        _ => true,
+                    };
                     // ignore our own temp files and ignored patterns (§11.4)
                     let relevant = event.paths.iter().any(|p| {
                         let name = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
@@ -300,7 +329,7 @@ impl App {
                             && !name.ends_with(".fold-tmp")
                             && !name.ends_with(".tmp")
                     });
-                    if relevant {
+                    if write && relevant {
                         self.pending_reload = true;
                         self.last_watch_event = Instant::now();
                     }
@@ -313,7 +342,17 @@ impl App {
         if due {
             self.pending_reload = false;
         }
-        due
+        // our own writes are seen once the self-write window is over:
+        // nothing to take in, and no reload to save the editor for
+        due && self.outside_change()
+    }
+
+    /// Whether the files hold something the vault does not (§11.2): a file
+    /// another program wrote, added or removed, or a new sync-conflict copy.
+    /// An unreadable vault counts: the reload says why.
+    fn outside_change(&self) -> bool {
+        let copies = self.vault.conflict_files().unwrap_or_default();
+        copies.iter().any(|c| !self.conflict_copies.contains(c)) || self.vault.changed_on_disk().unwrap_or(true)
     }
 
     /// Reload after an external change (§11.2): editor saves first, then
@@ -326,7 +365,14 @@ impl App {
         // node is stale after any verb since, and is let go
         let props_key = self.props_target.filter(|_| self.mode == Mode::Props).map(|t| self.vault.key_of(t));
         let filter_key = self.filter_rows.get(self.filter_sel).filter(|_| self.mode == Mode::Filter).map(|&r| self.vault.key_of(r));
+        // what came in: the files as they are against what was read, taken
+        // before the editor's save writes what was typed; what the save
+        // says is said beside it
+        let before = tops(&self.vault);
+        let after = self.vault.on_disk().map(|v| tops(&v));
+        let status = std::mem::take(&mut self.status);
         let edit = self.editor_before_write("external change");
+        let saved = std::mem::replace(&mut self.status, status);
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
         // vault, then may close the editor, which reads the outline, before
@@ -335,12 +381,15 @@ impl App {
         // sync-conflict files start the merge flow (§11.2)
         match self.vault.conflict_files() {
             Ok(files) if !files.is_empty() => self.merge_conflict_files("merged"),
-            _ => {
-                if let Err(e) = self.vault.reload() {
-                    self.say(format!("reload error: {}", e));
-                }
-            }
+            _ => match self.vault.reload() {
+                Ok(()) => self.say(changed_outside(&before, &after.unwrap_or_else(|_| tops(&self.vault)))),
+                Err(e) => self.say(format!("reload error: {}", e)),
+            },
         }
+        if !saved.is_empty() {
+            self.say(format!("{} · {}", self.status, saved));
+        }
+        self.conflict_copies = self.vault.conflict_files().unwrap_or_default();
         self.settle_zoom();
         if let Some(k) = cursor_key {
             if let Some(r) = self.vault.find_by_key(&k) {
@@ -2626,6 +2675,75 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
     res
 }
 
+/// A top-level node before or after a reload: what it holds, and a hash of
+/// its text, to say what changed (§11.2).
+struct Top {
+    key: NodeKey,
+    title: String,
+    items: usize,
+    sections: usize,
+    text: u64,
+}
+
+/// A vault's top-level nodes, as `Top`s.
+fn tops(vault: &Vault) -> Vec<Top> {
+    use std::hash::{Hash, Hasher};
+    let tree = &vault.tree;
+    tree.resolved_children(tree.root)
+        .into_iter()
+        .map(|top| {
+            let (mut items, mut sections) = (0, 0);
+            let mut text = std::collections::hash_map::DefaultHasher::new();
+            tree.walk(top, &mut |t, r| {
+                let n = t.node(r);
+                let file = t.text_of(r);
+                n.title_span.text(file).hash(&mut text);
+                n.text_lines(file).hash(&mut text);
+                n.block.as_ref().map(|b| &b.frontmatter_raw).hash(&mut text);
+                match n.kind {
+                    _ if r == top => {}
+                    Kind::Item => items += 1,
+                    Kind::Section => sections += 1,
+                    Kind::Root => {}
+                }
+            });
+            Top { key: vault.key_of(top), title: tree.node(top).title.clone(), items, sections, text: text.finish() }
+        })
+        .collect()
+}
+
+/// What a reload took in, in outline terms (§11.2): each top-level node
+/// that changed, came or went, and the items or sections it gained or lost.
+fn changed_outside(before: &[Top], after: &[Top]) -> String {
+    let mut parts = Vec::new();
+    for a in after {
+        match before.iter().find(|b| b.key == a.key) {
+            None => parts.push(format!("{} (new)", a.title)),
+            Some(b) if b.text != a.text => {
+                let counts: Vec<String> = [(b.items, a.items, "item"), (b.sections, a.sections, "section")]
+                    .into_iter()
+                    .filter(|(was, now, _)| was != now)
+                    .map(|(was, now, what)| {
+                        let n = was.abs_diff(now);
+                        format!("{}{} {}{}", if now > was { "+" } else { "−" }, n, what, if n == 1 { "" } else { "s" })
+                    })
+                    .collect();
+                let what = if counts.is_empty() { "edited".to_string() } else { counts.join(", ") };
+                parts.push(format!("{} ({})", a.title, what));
+            }
+            Some(_) => {}
+        }
+    }
+    for b in before.iter().filter(|b| !after.iter().any(|a| a.key == b.key)) {
+        parts.push(format!("{} (removed)", b.title));
+    }
+    match parts.len() {
+        0 => "↻ changed outside fold".into(),
+        n if n > 3 => format!("↻ changed outside fold: {} and {} more", parts[..2].join(", "), n - 2),
+        _ => format!("↻ changed outside fold: {}", parts.join(", ")),
+    }
+}
+
 /// Standard base64, for OSC 52.
 fn base64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2669,14 +2787,7 @@ fn run_loop(
             }
             app.quit = false;
         }
-        // autosave after 750 ms without a keystroke (§10.6)
-        if app.mode == Mode::Edit && app.editor_dirty() && app.edit_last_key.elapsed() > Duration::from_millis(750) {
-            app.save_editor("pause");
-        }
-        // external changes: debounced reload (§11.2)
-        if app.poll_watcher() {
-            app.reload_external();
-        }
+        app.tick();
         if event::poll(Duration::from_millis(200))? {
             match event::read()? {
                 Event::Mouse(m) => app.handle_mouse(m),

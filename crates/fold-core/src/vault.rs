@@ -2,7 +2,7 @@
 //! trash (§4.1, §11).
 
 use crate::ident::{split_filename, Id};
-use crate::parse::{parse_file, parse_frontmatter, Block, Kind, ParsedFile, Span};
+use crate::parse::{parse_file, parse_frontmatter, Block, Frontmatter, Kind, ParsedFile, Span};
 use crate::tree::{NRef, Tree};
 use std::path::{Path, PathBuf};
 
@@ -45,20 +45,41 @@ impl Vault {
     /// Rebuild the index from the vault (§11.3).
     pub fn reload(&mut self) -> std::io::Result<()> {
         let mut files: Vec<ParsedFile> = Vec::new();
-        let root_text = read_if_exists(&self.dir.join("root.md"))?.unwrap_or_default();
-        let root_block = Block {
-            id: None,
-            path: "root.md".into(),
-            props: parse_frontmatter(&root_text)
-                .map(|f| f.props)
-                .unwrap_or_default(),
-            frontmatter_raw: parse_frontmatter(&root_text)
-                .map(|f| f.raw)
-                .unwrap_or_default(),
-            frontmatter_span: parse_frontmatter(&root_text).map(|f| f.span),
-        };
-        files.push(parse_file("root.md", &root_text, 0, Some(root_block)));
+        for (name, text) in self.read_files()? {
+            let fm = parse_frontmatter(&text);
+            let idx = files.len();
+            let block = Block {
+                // root.md is the one file without an id
+                id: if idx == 0 { None } else { fm.as_ref().and_then(file_id) },
+                path: name.clone(),
+                props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
+                frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
+                frontmatter_span: fm.as_ref().map(|f| f.span),
+            };
+            files.push(parse_file(&name, &text, idx, Some(block)));
+        }
 
+        // Stitch: collect blocks, resolve embed edges (§4.7).
+        self.tree = Tree::new(files);
+        Ok(())
+    }
+
+    /// The vault as it is on disk now, parsed apart from this one: what a
+    /// reload would make of it, for saying what it changed (§11.2).
+    pub fn on_disk(&self) -> std::io::Result<Vault> {
+        let mut v = Vault {
+            dir: self.dir.clone(),
+            tree: Tree::new(Vec::new()),
+        };
+        v.reload()?;
+        Ok(v)
+    }
+
+    /// The files a reload parses, as they are on disk: `root.md` (empty
+    /// when missing), then every other `.md` file with a valid id, by name.
+    fn read_files(&self) -> std::io::Result<Vec<(String, String)>> {
+        let root_text = read_if_exists(&self.dir.join("root.md"))?.unwrap_or_default();
+        let mut files = vec![("root.md".to_string(), root_text)];
         let mut entries: Vec<String> = std::fs::read_dir(&self.dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
@@ -75,29 +96,23 @@ impl Vault {
                 Some(t) => t,
                 None => continue,
             };
-            let fm = parse_frontmatter(&text);
-            let id = fm
-                .as_ref()
-                .and_then(|f| f.props.get("id"))
-                .and_then(|v| Id::parse(v));
-            let id = match id {
-                Some(id) => id,
-                None => continue, // ignored: never parsed (§4.1)
-            };
-            let idx = files.len();
-            let block = Block {
-                id: Some(id),
-                path: name.clone(),
-                props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
-                frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
-                frontmatter_span: fm.as_ref().map(|f| f.span),
-            };
-            files.push(parse_file(&name, &text, idx, Some(block)));
+            if parse_frontmatter(&text).as_ref().and_then(file_id).is_none() {
+                continue; // ignored: never parsed (§4.1)
+            }
+            files.push((name, text));
         }
+        Ok(files)
+    }
 
-        // Stitch: collect blocks, resolve embed edges (§4.7).
-        self.tree = Tree::new(files);
-        Ok(())
+    /// Whether a reload would find anything the index does not hold: a
+    /// file's text changed, or a file came or went (§11.2). What the app
+    /// wrote itself, or a file written back as it was, is no change.
+    pub fn changed_on_disk(&self) -> std::io::Result<bool> {
+        let files = self.read_files()?;
+        Ok(files.len() != self.tree.files.len()
+            || files.iter().any(|(name, text)| {
+                self.file_index(name).is_none_or(|i| self.tree.files[i].text != *text)
+            }))
     }
 
     /// Files ignored by the parser, for `notes check` (§4.1).
@@ -333,6 +348,11 @@ pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
             std::fs::remove_file(from)
         }
     }
+}
+
+/// A file's id, from its frontmatter's `id` key, if it validates (§2).
+fn file_id(fm: &Frontmatter) -> Option<Id> {
+    fm.props.get("id").and_then(|v| Id::parse(v))
 }
 
 /// Read a vault `.md` file as text; `None` for anything that is not a
