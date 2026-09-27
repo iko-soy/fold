@@ -1096,6 +1096,12 @@ impl App {
             }
             at = info.parent;
         }
+        // or the node the editor is open on in one: a node of a copy's
+        // file, or a block within it
+        if device.is_none() {
+            let up = self.editor_node().map(|r| self.chain(r)).unwrap_or_default();
+            device = up.iter().rev().find_map(|&c| self.vault.tree.node(c).conflict()).map(|c| copy_device(c).to_string());
+        }
         let mut tail = vec![if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) }];
         let mode = ed.mode_name();
         if !mode.is_empty() {

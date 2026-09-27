@@ -2595,6 +2595,36 @@ fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
 }
 
 #[test]
+fn the_editor_s_border_says_so_when_opened_on_a_node_inside_a_conflict_copy() {
+    // typing there lands in the copy, which keeping ours trashes
+    let (_d, mut app) = lab();
+    app.set_edit_keys(EditKeys::Normal);
+    // ours: no warning
+    select(&mut app, "Snapshot policy");
+    press(&mut app, "e");
+    let b = frame(&mut app);
+    assert!(find(&b, "Editing Snapshot policy").is_some() && find(&b, "conflict copy").is_none(), "{}", text(&b));
+    app.handle_key(key(KeyCode::Esc));
+    // the copy's, a node of its file that is no block of its own
+    select_copy(&mut app);
+    press(&mut app, "l");
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "Snapshot policy").unwrap();
+    press(&mut app, "e");
+    let b = frame(&mut app);
+    let (_, y) = find(&b, "Editing Snapshot").unwrap_or_else(|| panic!("no editor:\n{}", text(&b)));
+    assert!(line(&b, y).contains("⚠ conflict copy from PHONE"), "{}", line(&b, y));
+    app.handle_key(key(KeyCode::Esc));
+    // a block of its own inside the copy
+    press(&mut app, "s");
+    let r = app.current().unwrap();
+    assert!(app.vault_mut().tree.node(r).is_block(), "{}", status(&mut app));
+    press(&mut app, "e");
+    let b = frame(&mut app);
+    let (_, y) = find(&b, "Editing Snapshot").unwrap_or_else(|| panic!("no editor:\n{}", text(&b)));
+    assert!(line(&b, y).contains("⚠ conflict copy from PHONE"), "{}", line(&b, y));
+}
+
+#[test]
 fn where_the_editor_s_border_is_short_its_mode_and_warning_stay_whole_left_of_its_buttons() {
     // in a copy, Vim's and Helix's border says more than fits left of ⌨
     // at 120 columns, and far more at 80
