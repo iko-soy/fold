@@ -2073,7 +2073,7 @@ fn indent_puts_nothing_into_a_conflict_copy() {
     let (d, mut app) = lab();
     select(&mut app, "Networking");
     press(&mut app, ">");
-    assert_eq!(said(&mut app), "can't indent “Networking”: the node above it is a conflict copy");
+    assert_eq!(said(&mut app), "can't indent “Networking” into a conflict copy");
     assert_eq!(selected(&app), "Networking");
     assert!(has_line(&d, "## Networking") && has_line(&d, "- [ ] Label the cables"), "{}", root(&d));
     // inside a copy, a node still goes under the one above it
@@ -2353,7 +2353,7 @@ fn a_drag_an_indent_or_an_outdent_takes_a_node_s_conflict_copy_with_it() {
     // > on a copy with nothing above its node
     app.cursor = copy_row(&app, "Label the cables");
     press(&mut app, ">");
-    assert_eq!(said(&mut app), "can't indent “Label the cables”: nothing above it to go under");
+    assert_eq!(said(&mut app), "can't indent “Label the cables”: nothing above it");
 }
 
 #[test]
@@ -2579,10 +2579,10 @@ fn moves_name_the_node_and_say_in_words_where_the_ordering_rule_put_it() {
     let before = root(&d);
     select(&mut app, "patch panel");
     press(&mut app, ">");
-    assert_eq!(said(&mut app), "can't indent “patch panel”: nothing above it to go under");
+    assert_eq!(said(&mut app), "can't indent “patch panel”: nothing above it");
     select(&mut app, "Homelab");
     press(&mut app, "<");
-    assert_eq!(said(&mut app), "can't outdent “Homelab”: it is already at the top level");
+    assert_eq!(said(&mut app), "can't outdent “Homelab”: it's at the top level");
     assert_eq!(root(&d), before);
     // out of a heading among headings, an item goes before them
     select(&mut app, "hourly, keep 24");
@@ -2698,6 +2698,36 @@ fn where_the_bar_is_short_a_message_naming_two_nodes_cuts_the_longer_name_first(
     assert!(s.starts_with(" undone: move “rack” to “Project Atlas quarterly planning a…” "), "{}", s);
 }
 
+#[test]
+fn indent_and_outdent_refusals_fit_beside_the_badges_at_80_columns() {
+    // under a conflict copy, which comes with the ⚠ count: the reason
+    // stays whole, the node's name gives way
+    let text = "# Networking\n\n- [ ] Replace the flaky switch\n- [ ] Label the cables\n";
+    let d = vault(text);
+    std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE.md"), text.replace("[ ] Replace", "[x] Replace")).unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    drop(v);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "G>");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" can't indent “Label the…” into a conflict copy  ⚠ 1 conflict "), "{}", s);
+    assert_eq!(said(&mut app), "can't indent “Label the cables” into a conflict copy");
+    // with done hidden, nothing above and the top level, name and all
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "zd");
+    select(&mut app, "Homelab");
+    press(&mut app, ">");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" can't indent “Homelab”: nothing above it  "), "{}", s);
+    assert!(s.contains(" done hidden "), "{}", s);
+    press(&mut app, "<");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" can't outdent “Homelab”: it's at the top level  "), "{}", s);
+    assert_eq!(root(&d), SAMPLE);
+}
+
 // ------------------------------------------------------------ the next step
 
 /// What the status bar says once its message has gone: the keys of what
@@ -2797,7 +2827,7 @@ fn an_error_or_refusal_stays_until_the_next_key_after_it_was_read() {
     let mut app = App::new(d.path()).unwrap();
     select(&mut app, "Homelab");
     press(&mut app, "<");
-    let refusal = "can't outdent “Homelab”: it is already at the top level";
+    let refusal = "can't outdent “Homelab”: it's at the top level";
     assert_eq!(said(&mut app), refusal);
     // a key right after, while it was being read: it stays, however long
     press(&mut app, "j");

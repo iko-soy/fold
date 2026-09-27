@@ -1224,13 +1224,13 @@ impl App {
         let first = ops::conflict_pair(&self.vault.tree, r)[0];
         let prev = sibs.iter().position(|&c| c == first).and_then(|i| i.checked_sub(1)).map(|i| sibs[i]);
         let Some(prev) = prev else {
-            self.say(format!("can't indent {}: nothing above it to go under", self.named(r)));
+            self.say(format!("can't indent {}: nothing above it", self.named(r)));
             return;
         };
         // nor into a conflict copy, which keeping ours trashes (§12.5); a
         // node in one moves within it
         if self.vault.tree.node(prev).conflict().is_some() {
-            self.say(format!("can't indent {}: the node above it is a conflict copy", self.named(r)));
+            self.say(format!("can't indent {} into a conflict copy", self.named(r)));
             return;
         }
         let prev = self.vault.key_of(prev);
@@ -1265,7 +1265,7 @@ impl App {
             Some(self.namesakes_before(r, g, self.past_copies(&kids, at + 1, r)))
         });
         let Some(grand) = grand.map(|g| self.vault.key_of(g)) else {
-            self.say(format!("can't outdent {}: it is already at the top level", self.named(r)));
+            self.say(format!("can't outdent {}: it's at the top level", self.named(r)));
             return;
         };
         let name = self.named(r);
