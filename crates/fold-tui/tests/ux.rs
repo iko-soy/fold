@@ -992,6 +992,52 @@ fn pairs_that_come_in_while_the_view_is_open_leave_it_on_the_pair_it_shows() {
     assert_eq!(pairs(&mut app), 2);
 }
 
+/// A task of its own in the homelab's Networking list, as a block.
+fn milk_block(d: &tempfile::TempDir, file: &str, task: &str) {
+    std::fs::write(d.path().join(file), format!("---\nid: {}\n---\n\n- {} Buy milk\n", LAST, task)).unwrap();
+}
+
+#[test]
+fn a_block_that_comes_in_with_its_copy_is_merged_with_it() {
+    let d = homelab(None);
+    let mut app = start(&d);
+    idle(&mut app, 300);
+    // one sync brings a block from the laptop, its embed, and the phone's
+    // copy of it
+    milk_block(&d, "worzod~buy-milk.md", "[ ]");
+    milk_block(&d, "worzod~buy-milk.sync-conflict-20260927-100000-PHONE.md", "[x]");
+    std::fs::write(d.path().join("root.md"), format!("{}![[{}]]\n", root(&d), LAST)).unwrap();
+    until_reload(&mut app);
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was left alone");
+    assert_eq!(pairs(&mut app), 1);
+    assert_eq!(app.mode_pub(), "conflict");
+}
+
+#[test]
+fn copies_a_merge_failed_on_are_merged_with_the_next_change() {
+    let d = homelab(None);
+    std::fs::write(d.path().join("root.md"), format!("{}![[{}]]\n", root(&d), LAST)).unwrap();
+    milk_block(&d, "worzod~buy-milk.md", "[ ]");
+    let mut app = start(&d);
+    idle(&mut app, 300);
+    // root.md cannot be written for now, as when the trash cannot be: the
+    // merge stops at its copy, before the one after it
+    let tmp = d.path().join(".root.md.fold-tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    phone_copy(&d);
+    milk_block(&d, "worzod~buy-milk.sync-conflict-20260927-100000-PHONE.md", "[x]");
+    until_reload(&mut app);
+    assert!(status(&mut app).contains("merge error"), "{}", status(&mut app));
+    assert_eq!(app.vault_conflict_files().unwrap().len(), 2);
+    // it can be again: the next change from outside takes both in
+    std::fs::remove_dir(&tmp).unwrap();
+    std::fs::write(d.path().join("root.md"), format!("{}- [ ] from laptop\n", root(&d))).unwrap();
+    until_reload(&mut app);
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copies were not merged");
+    assert!(has_line(&d, "- [ ] from laptop"), "{}", root(&d));
+    assert_eq!(pairs(&mut app), 3);
+}
+
 // ------------------------------------------------------------ conflict copies
 
 /// A homelab vault merged with a phone's copy of it that changed NAS's

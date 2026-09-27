@@ -507,8 +507,8 @@ impl App {
     }
 
     /// Whether a sync-conflict copy is in the vault that was not at the
-    /// last reload (§11.2): one the merge left alone stays, and is not
-    /// merged again on every change after it.
+    /// last reload (§11.2): one the merge left alone or failed on stays,
+    /// and is no change by itself; the next change tries it again.
     fn new_conflict_copy(&self) -> bool {
         let copies = self.vault.conflict_files().unwrap_or_default();
         copies.iter().any(|c| !self.conflict_copies.contains(c))
@@ -541,10 +541,11 @@ impl App {
         // vault, then may close the editor, which reads the outline, before
         // the reload is over
         self.anchor_zoom();
-        // a new sync-conflict file starts the merge flow (§11.2); what it
+        // a sync-conflict file starts the merge flow (§11.2): a new one, or
+        // one a merge left alone or failed on, which may merge now; what it
         // took in without a pair is said as any change is, from the vault
         // as the merge found it: typing saved first is not part of it
-        if self.new_conflict_copy() {
+        if self.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
             let was = tops(&self.vault);
             if !self.merge_conflict_files() {
                 self.say(changed_outside(&was, &tops(&self.vault)));

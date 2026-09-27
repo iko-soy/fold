@@ -541,6 +541,9 @@ fn dedent(line: &str, cols: usize) -> &str {
 /// Returns a list of human-readable outcomes.
 pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result<Vec<String>> {
     let mut outcomes = Vec::new();
+    // the files as they are, not as last read: a block that came in with
+    // its copy is ours to merge into, not an ignored file (§12.2)
+    vault.reload()?;
     for cfile in vault.conflict_files()? {
         let base = cfile.split(".sync-conflict-").next().unwrap().to_string() + ".md";
         let cpath = vault.dir.join(&cfile);

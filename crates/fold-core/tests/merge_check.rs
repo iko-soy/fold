@@ -470,6 +470,23 @@ fn merge_with_missing_base_keeps_theirs_frontmatter() {
 }
 
 #[test]
+fn merge_takes_a_block_that_came_in_with_its_copy_for_one() {
+    // the vault as read before a sync brought a new block, its embed and
+    // a copy of it in one go: X.md is a block on disk, not an ignored
+    // file, and its copy is merged into it (§12.2)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
+    std::fs::write(dir.path().join("racfer~t.md"), format!("---\nid: {}\n---\n\n- [ ] t\n", BID)).unwrap();
+    let c = "racfer~t.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), format!("---\nid: {}\n---\n\n- [x] t\n", BID)).unwrap();
+    let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(!dir.path().join(c).exists(), "{:?}", outcomes);
+    assert_eq!(merge::conflict_pairs(&v).len(), 1, "{}", v.tree.files[0].text);
+}
+
+#[test]
 fn merge_places_insertions_by_their_neighbours() {
     // §12.4: a node present on one side only is an insertion, placed
     // relative to its matched neighbours — `new` sits between `a` and `b`

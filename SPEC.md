@@ -1224,8 +1224,8 @@ nothing.
   a block whose span hash no longer matches is merged two-way (§5.2 step 5), then the file
   is re-parsed and the buffer re-rendered around the cursor.
 - A new `*.sync-conflict-*.md` file starts the merge flow (§12). What it merges without a
-  pair is said as above, at startup too; a copy it leaves alone is not merged again at each
-  later change.
+  pair is said as above, at startup too; a copy it leaves alone or fails on is no change by
+  itself, and is tried again with the next change.
 - A deleted file that was a block marks its embed broken; nothing is written.
 - Editing the same vault in Helix at the same time is a supported workflow.
 
@@ -1270,7 +1270,8 @@ a trash copy.
 ### 12.2 Detection
 
 The watcher (or `notes merge`, or the startup scan) finds `X.sync-conflict-*.md` next to
-`X.md`. Several conflict files for the same `X.md` are merged oldest first.
+`X.md`, as the files are then: an `X.md` that came in with its copy is merged into. Several
+conflict files for the same `X.md` are merged oldest first.
 
 Before merging, the engine compares the two files' `id` keys. If they differ, this is not a
 conflict but a **prefix collision** — two blocks that happened to get the same filename
