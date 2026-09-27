@@ -1057,11 +1057,12 @@ of other blocks in the subtree are drawn a shade dimmer — the only hints that 
 exist. *Revert* (or `:q!`) discards changes made since the last save.
 
 Text a save cannot take — its block changed on disk under it (§5.2) — stays in the editor,
-and is never dropped without a copy: *Revert* first writes the editor's whole text to the
-trash as `unsaved-<title>.md` (§11.5) and the status line names the entry, and the app
-ending any way but a quit does the same, saying where once the terminal is back. However it
-ends, but for that second signal, the app leaves the terminal as it found it, a panic's
-message printed after.
+and is never dropped without a copy unless asked twice: *Revert* first writes the editor's
+whole text to the trash as `unsaved-<title>.md` (§11.5) and the status line names the entry,
+and the app ending any way but a quit does the same, saying where once the terminal is back.
+Where the trash cannot be written, *Revert* drops nothing and says so, and a second *Revert*
+on the same text drops it. However it ends, but for that second signal, the app leaves the
+terminal as it found it, a panic's message printed after.
 
 **Keymaps.** The editor speaks one of three keymaps, over the same text, cursor, selection,
 clipboard and undo:

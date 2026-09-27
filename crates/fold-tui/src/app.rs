@@ -134,6 +134,9 @@ pub struct App {
     /// A save of the editor's text failed and none has gone through since:
     /// *Revert* keeps a copy of the text in the trash (§10.6).
     edit_refused: bool,
+    /// The editor's text as it was when *Revert* could not copy it to the
+    /// trash: *Revert* again on the same text drops it without one.
+    edit_uncopied: Option<String>,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -250,6 +253,7 @@ impl App {
             edit_return: Focus::Outline,
             edit_moved: None,
             edit_refused: false,
+            edit_uncopied: None,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -1367,6 +1371,7 @@ impl App {
         let buf = fold_core::edit::open_editor(&self.vault, target);
         self.editor = Some(editor::Editor::new(buf, self.edit_keys, self.edit_clip.clone()));
         self.edit_refused = false;
+        self.edit_uncopied = None;
         if self.mode != Mode::Edit {
             self.edit_return = self.focus;
         }
@@ -2127,7 +2132,8 @@ impl App {
     /// Drop the editor's unsaved changes (§10.6: *Revert*, `:q!`). Text a
     /// save was refused for is copied to the trash first (§11.5), and the
     /// status line names the copy; one that cannot be written drops
-    /// nothing.
+    /// nothing, but for a second *Revert* on the same text: the way out
+    /// where the trash takes nothing.
     fn discard_editor(&mut self) {
         let mut said = String::from("changes discarded");
         if let Some((name, text)) = self.editor_text().filter(|_| self.edit_refused && self.editor_dirty()) {
@@ -2136,13 +2142,17 @@ impl App {
                     let entry = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     said = format!("{}; a copy is in the trash: {}", said, entry);
                 }
+                Err(_) if self.edit_uncopied.as_ref() == Some(&text) => said = format!("{}; no copy kept", said),
                 Err(e) => {
-                    self.say(format!("error: {}; nothing discarded", e));
+                    // what to press first: the error is what the bar cuts
+                    self.say(format!("can't copy to the trash; Revert (:q!) again drops the changes — {}", e));
+                    self.edit_uncopied = Some(text);
                     return;
                 }
             }
         }
         self.edit_refused = false;
+        self.edit_uncopied = None;
         let ed = self.editor.take();
         self.mode = Mode::Normal;
         self.focus = self.edit_return;

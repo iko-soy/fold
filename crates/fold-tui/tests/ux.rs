@@ -804,6 +804,65 @@ fn ending_fold_with_text_a_save_was_refused_for_keeps_it_in_the_trash() {
     assert_eq!(root(&d), "# Scrub cadence\n\n- monthly, from the phone\n- [ ] scrub now\n");
 }
 
+/// Run the test named `test` again in a process of its own, with a trash
+/// nothing can be written to: a plain file where its directory would be
+/// (§11.5). The trash is the process's, where `$XDG_STATE_HOME` says, so
+/// the other tests keep theirs. True in that process, where the test goes
+/// on; false in this one, once it has passed there.
+fn with_trash_unwritable(test: &str) -> bool {
+    if std::env::var_os("FOLD_TEST_TRASH_UNWRITABLE").is_some() {
+        return true;
+    }
+    let state = tempfile::tempdir().unwrap();
+    std::fs::create_dir(state.path().join("fold")).unwrap();
+    std::fs::write(state.path().join("fold").join("trash"), "").unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([test, "--exact", "--nocapture"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("FOLD_TEST_TRASH_UNWRITABLE", "1")
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && said.contains("1 passed"), "{}", said);
+    false
+}
+
+#[test]
+fn reverting_text_the_trash_cannot_take_drops_it_when_asked_again() {
+    if !with_trash_unwritable("reverting_text_the_trash_cannot_take_drops_it_when_asked_again") {
+        return;
+    }
+    let d = vault("# Rotation schedule\n\nkeep 24\n");
+    let mut app = typing(&d, " hourly");
+    std::fs::write(d.path().join("root.md"), "# Rotation schedule\n\nkeep 48\n").unwrap();
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "edit");
+    // :q! finds no trash to copy the text to: it drops nothing, and says
+    // what does
+    let revert = |app: &mut App| {
+        app.handle_key(ctrl('e'));
+        press(app, "q!");
+        app.handle_key(key(KeyCode::Enter));
+    };
+    revert(&mut app);
+    assert_eq!(app.mode_pub(), "edit");
+    let s = status_line(&mut app);
+    assert!(s.contains("can't copy to the trash; Revert (:q!) again drops the changes — File exists (os error 17)"), "{}", s);
+    // text typed since is new to it: that is asked about again
+    press(&mut app, " and");
+    app.run_action(Action::EditRevert);
+    assert_eq!(app.mode_pub(), "edit");
+    assert!(status_line(&mut app).contains("can't copy to the trash"));
+    // asked again, it drops them
+    revert(&mut app);
+    assert_eq!(app.mode_pub(), "normal");
+    assert!(status_line(&mut app).contains("changes discarded; no copy kept"));
+    assert_eq!(root(&d), "# Rotation schedule\n\nkeep 48\n");
+    // and a quit ends fold
+    app.run_action(Action::Quit);
+    assert!(app.quit_requested() && app.mode_pub() == "normal");
+}
+
 // ------------------------------------------------------------ sync conflicts
 
 /// Conflict block ids that list first and last: the view lists pairs in
