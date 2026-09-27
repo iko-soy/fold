@@ -303,6 +303,91 @@ fn a_copy_merged_into_the_file_the_editor_holds_deletes_a_block_cut_there() {
     assert!(block.exists(), "undo did not put back the cut block's file");
 }
 
+/// A, its "task" a block of its own, open in the editor with that line
+/// cut and a pause after: the autosave writes A without its embed, and
+/// the block waits in transit (§5.2). With the block's file, and root.md
+/// as it was before the cut.
+fn cut_and_paused() -> (tempfile::TempDir, App, std::path::PathBuf, String) {
+    let d = vault("# A\n\n- one\n- task\n- two\n");
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let embedded = format!("# A\n\n- one\n![[{}]]\n- two\n", id.as_str());
+    assert_eq!(root(&d), embedded);
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n");
+    assert!(block.exists(), "in transit");
+    (d, app, block, embedded)
+}
+
+#[test]
+fn leaving_the_editor_after_the_autosave_deletes_a_cut_block_that_one_undo_puts_back_embedded() {
+    // §5.2, §10.10: the block is deleted with the save that wrote its
+    // embed out, so one undo never puts back its file embedded nowhere
+    let (d, mut app, block, embedded) = cut_and_paused();
+    let text = std::fs::read_to_string(&block).unwrap();
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert!(!block.exists(), "the cut block outlived the editor");
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n");
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "undone: edit “A”");
+    assert_eq!(root(&d), embedded, "undo put back the block's file embedded nowhere");
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), text);
+    // redo deletes it again, embed and file
+    press(&mut app, "U");
+    assert_eq!(root(&d), "# A\n\n- one\n- two\n");
+    assert!(!block.exists());
+}
+
+#[test]
+fn a_cut_block_deleted_after_more_saves_or_on_revert_comes_back_embedded_with_the_undo_of_its_cut() {
+    // typing saved after the cut, a second cut that lets go of the first,
+    // or Revert: whichever save deletes the block, undo puts it back with
+    // the step that cut it (§5.2, §10.10)
+    for how in ["typing", "second cut", "revert"] {
+        let (d, mut app, block, embedded) = cut_and_paused();
+        let cut = root(&d);
+        match how {
+            "typing" => {
+                app.handle_key(key(KeyCode::End));
+                press(&mut app, " more");
+                idle(&mut app, 1000);
+                assert_eq!(root(&d), "# A\n\n- one\n- two more\n");
+                app.handle_key(key(KeyCode::Esc));
+            }
+            "second cut" => {
+                app.handle_key(ctrl('k'));
+                idle(&mut app, 1000);
+                assert_eq!(root(&d), "# A\n\n- one\n");
+                app.handle_key(key(KeyCode::Esc));
+            }
+            _ => app.run_action(Action::EditRevert),
+        }
+        assert_eq!(app.mode_pub(), "normal", "{}", how);
+        assert!(!block.exists(), "{}: the cut block outlived the editor", how);
+        if how != "revert" {
+            // the later save is undone on its own, the block still gone
+            press(&mut app, "u");
+            assert_eq!(root(&d), cut, "{}", how);
+            assert!(!block.exists(), "{}: undo put back the block's file embedded nowhere", how);
+        }
+        press(&mut app, "u");
+        assert_eq!(said(&mut app), "undone: edit “A”", "{}", how);
+        assert_eq!(root(&d), embedded, "{}", how);
+        assert!(block.exists(), "{}: undo did not put back the cut block's file", how);
+    }
+}
+
 #[test]
 fn a_change_from_outside_is_taken_in_and_announced() {
     let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");

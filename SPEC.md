@@ -1192,6 +1192,9 @@ named in words, by what was done to which node — *mark “rack” done*, *dele
 *edit “NAS”* for an editor save — and undo and redo say it: *undone: mark “rack” done*,
 *undo refused: root.md changed since mark “rack” done; not overwriting*. Files the
 operation did not touch are never written by undo, so an external edit to them survives.
+A block cut in the editor and not pasted back (§5.2) is trashed in the entry of the save
+that wrote its embed out, even when a later save or *Revert* is what deletes it, so one
+undo puts back its embed and its file together.
 
 ---
 

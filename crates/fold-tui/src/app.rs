@@ -137,6 +137,11 @@ pub struct App {
     /// The editor's text as it was when *Revert* could not copy it to the
     /// trash: *Revert* again on the same text drops it without one.
     edit_uncopied: Option<String>,
+    /// The file of each block an editor save left in transit (§5.2): its
+    /// title line cut, the block it was in written without its embed. With
+    /// the op-log entry of that save, by the length of `undo` once it was
+    /// in: the save that deletes the block puts the deletion there.
+    edit_transit: Vec<(String, usize)>,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -254,6 +259,7 @@ impl App {
             edit_moved: None,
             edit_refused: false,
             edit_uncopied: None,
+            edit_transit: Vec::new(),
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -1476,9 +1482,10 @@ impl App {
     /// block cut and not pasted back cannot be pasted as itself any more,
     /// so once the save went through it is let go, and deleted (§5.2). It
     /// is saved first still in transit, so a refused save leaves the editor
-    /// as it was, its clipboard too; and the save and the deletion are one
-    /// op-log entry (§10.10), so one undo puts back the block's file and
-    /// its embed together.
+    /// as it was, its clipboard too; and the deletion goes into the op-log
+    /// entry of the save that wrote its embed out, this one or an autosave
+    /// before it (`record_edit`), so one undo puts back the block's file
+    /// and its embed together.
     fn save_editor_releasing(&mut self) -> bool {
         self.write_editor(true)
     }
@@ -1511,7 +1518,7 @@ impl App {
         self.editor = Some(ed);
         self.settle_zoom_after_save(on_editor);
         // blocks written before a refusal are an op too
-        self.record_undo(snap);
+        self.record_edit(snap);
         // the save re-parsed what it wrote: the outline cursor stays on its
         // node, so a verb that saves the editor first acts on the row clicked
         if let Some(r) = cursor.and_then(|k| self.find_exact(&k)) {
@@ -1689,7 +1696,7 @@ impl App {
             self.editor = Some(ed);
             self.settle_zoom_after_save(on_editor);
             if res.is_ok() {
-                self.record_undo(snap);
+                self.record_edit(snap);
             } else {
                 self.edit_refused = true;
             }
@@ -2242,7 +2249,7 @@ impl App {
             if let Err(e) = ed.buf.discard(&mut self.vault) {
                 said = format!("{}; error: {}", said, e);
             }
-            self.record_undo(snap);
+            self.record_edit(snap);
             self.edit_clip = ed.clip;
         }
         self.settle_zoom();
@@ -2489,6 +2496,8 @@ impl App {
 
     fn act_undo(&mut self) {
         self.settle_undo();
+        // the entries a block in transit was remembered with may go
+        self.edit_transit.clear();
         let Some(inv) = self.undo.pop() else {
             self.say("nothing to undo");
             return;
@@ -2511,6 +2520,7 @@ impl App {
 
     fn act_redo(&mut self) {
         self.settle_undo();
+        self.edit_transit.clear();
         let Some(inv) = self.redo.pop() else {
             self.say("nothing to redo");
             return;
@@ -2555,6 +2565,60 @@ impl App {
             self.redo.clear();
             self.mark_self_write();
         }
+    }
+
+    /// `record_undo` for a save of the editor, or its *Revert*: a block an
+    /// earlier save left in transit (§5.2) and this one deletes is deleted
+    /// in the entry of that save, which wrote its embed out, so one undo
+    /// puts back its file and its embed together, never the file embedded
+    /// nowhere (§10.10). The blocks this save leaves in transit are
+    /// remembered with its entry.
+    fn record_edit(&mut self, snap: ops::Snapshot) {
+        let len = self.undo.len();
+        if let Some(mut inv) = ops::Inverse::since(snap, &self.vault) {
+            let (transit, undo) = (&self.edit_transit, &mut self.undo);
+            inv.changes.retain(|c| {
+                let entry = transit.iter().find(|(p, _)| *p == c.path && c.after.is_none());
+                // that entry, and none since, left the file as it was
+                let Some(&(_, n)) = entry.filter(|&&(_, n)| n > 0 && n <= undo.len()) else { return true };
+                if undo[n - 1..].iter().any(|e| e.changes.iter().any(|x| x.path == c.path)) {
+                    return true;
+                }
+                undo[n - 1].changes.push(c.clone());
+                false
+            });
+            if !inv.changes.is_empty() {
+                self.undo.push(inv);
+            }
+            self.redo.clear();
+            self.mark_self_write();
+        }
+        let now = self.transit_files();
+        self.edit_transit.retain(|(p, _)| now.contains(p));
+        if self.undo.len() > len {
+            for p in now {
+                if !self.edit_transit.iter().any(|(q, _)| *q == p) {
+                    self.edit_transit.push((p, self.undo.len()));
+                }
+            }
+        }
+    }
+
+    /// The files of the blocks the open editor holds in transit (§5.2):
+    /// nested there, with no line left in it, embedded nowhere, and still
+    /// in the vault.
+    fn transit_files(&self) -> Vec<String> {
+        let Some(ed) = self.editor.as_ref() else { return Vec::new() };
+        let tree = &self.vault.tree;
+        ed.buf
+            .owners
+            .iter()
+            .filter(|&(o, i)| i.parent.is_some() && !ed.buf.lines.iter().any(|l| l.owner == *o))
+            .filter_map(|(_, i)| i.id.as_ref())
+            .filter(|id| tree.embed_of(id).is_none())
+            .filter_map(|id| tree.block_by_id(id))
+            .map(|r| tree.files[r.0].path.clone())
+            .collect()
     }
 
     /// Parent and siblings are found on the flattened rows rather than in
