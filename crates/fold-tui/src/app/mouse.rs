@@ -29,6 +29,11 @@ impl App {
             MouseEventKind::Down(_) => self.held_words.take(),
             _ => None,
         };
+        // a click lets a half-typed key go (§10.3): what it opens takes the
+        // next key, which no `z` or `g` before it turns into a verb
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            self.pending = None;
+        }
         self.handle_mouse_inner(m);
         self.drop_held_words(held);
         self.settle_undo();

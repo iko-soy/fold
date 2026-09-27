@@ -3303,6 +3303,50 @@ fn z_and_g_show_what_can_follow_and_a_wrong_second_key_says_so() {
 }
 
 #[test]
+fn a_click_lets_a_half_typed_key_go() {
+    // z, then a click on ⌕ Filter: what is typed next is the filter's,
+    // and its a archives nothing
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "z");
+    click_button(&mut app, Action::Filter);
+    assert_eq!(app.mode_pub(), "filter");
+    assert_eq!(said(&mut app), "↑↓ pick · Enter go · Esc close");
+    press(&mut app, "archive");
+    let s = screen(&mut app);
+    assert!(s.contains("archive"), "{}", s);
+    assert!(!s.contains("does nothing"), "{}", s);
+    assert_eq!(root(&d), SAMPLE, "a key after z and a click archived");
+    app.handle_key(key(KeyCode::Esc));
+    // + Capture: the prompt takes every letter
+    press(&mut app, "g");
+    click_button(&mut app, Action::Capture);
+    press(&mut app, "gas bill");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(root(&d).contains("\n- gas bill\n"), "{}", root(&d));
+    // ✎ Edit, over the reading pane: the editor takes the letter
+    app.set_edit_keys(EditKeys::Normal);
+    app.show_reading = true;
+    select(&mut app, "call the plumber");
+    press(&mut app, "z");
+    click_button(&mut app, Action::Edit);
+    assert_eq!(app.mode_pub(), "edit");
+    press(&mut app, "a");
+    app.handle_key(key(KeyCode::Esc));
+    assert!(root(&d).contains("\na- call the plumber\n"), "{}", root(&d));
+    // a click on a row: the next key is a key of its own
+    press(&mut app, "z");
+    let (x, y) = find(&frame(&mut app), "Networking").unwrap();
+    click_at(&mut app, x, y, MouseButton::Left);
+    assert!(!said(&mut app).starts_with("z…"), "{}", said(&mut app));
+    press(&mut app, "a");
+    assert_eq!(app.mode_pub(), "props");
+    app.handle_key(key(KeyCode::Esc));
+    assert!(root(&d).contains("## Networking\n"), "{}", root(&d));
+}
+
+#[test]
 fn keys_fold_does_not_use_say_what_to_press_instead() {
     let d = vault(SAMPLE);
     let mut app = App::new(d.path()).unwrap();

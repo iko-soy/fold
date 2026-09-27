@@ -1011,9 +1011,9 @@ the popup — closes the topmost thing.
 | `q` | quit (nothing is ever unsaved in normal mode) |
 
 A second key that follows the first in no sequence (`zq`) does nothing and says so: *zq
-does nothing · after z press p, w, d, r or a*; `Esc` lets the first key go. A few keys
-fold has no use for, where one often reaches for them, say what to press instead: `i` (*i
-does nothing here: e edits*), `o` (*n adds a node below*), `Delete` (*d deletes*),
+does nothing · after z press p, w, d, r or a*; `Esc` or a click lets the first key go. A
+few keys fold has no use for, where one often reaches for them, say what to press instead:
+`i` (*i does nothing here: e edits*), `o` (*n adds a node below*), `Delete` (*d deletes*),
 `Ctrl-Z` (*u undoes*), `Ctrl-F` (*/ finds*); any other key that does nothing says nothing.
 
 ### 10.4 Reading pane — normal mode

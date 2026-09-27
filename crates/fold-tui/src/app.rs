@@ -420,7 +420,7 @@ impl App {
     }
 
     /// A second key nothing follows the first with: said, not swallowed
-    /// (§10.3). `Esc` lets the first key go, quietly.
+    /// (§10.3). `Esc` lets the first key go, quietly, as a click does.
     fn no_sequence(&mut self, first: char, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             return;
