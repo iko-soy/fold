@@ -2763,13 +2763,13 @@ fn a_node_in_a_conflict_pair_keeps_its_spelling_until_it_is_resolved() {
     let before = root(&d);
     select(&mut app, "NAS");
     press(&mut app, "~");
-    assert_eq!(said(&mut app), "can't make “NAS” a bullet: resolve its conflict first");
+    assert_eq!(said(&mut app), "can't respell “NAS”: resolve its conflict");
     select_copy(&mut app);
     press(&mut app, "~");
-    assert_eq!(said(&mut app), "can't make “NAS” a bullet: resolve its conflict first");
+    assert_eq!(said(&mut app), "can't respell “NAS”: resolve its conflict");
     select(&mut app, "Label the cables");
     press(&mut app, "~");
-    assert_eq!(said(&mut app), "can't make “Label the cables” a heading: resolve its conflict first");
+    assert_eq!(said(&mut app), "can't respell “Label the cables”: resolve its conflict");
     assert_eq!(root(&d), before);
     assert_eq!(paired(&mut app), PAIRED);
 }
@@ -3105,6 +3105,37 @@ fn indent_and_outdent_refusals_fit_beside_the_badges_at_80_columns() {
     let s = status80(&mut app);
     assert!(s.starts_with(" can't outdent “Homelab”: it's at the top level  "), "{}", s);
     assert_eq!(root(&d), SAMPLE);
+}
+
+#[test]
+fn the_spelling_refusal_on_a_conflict_pair_fits_beside_the_badges_at_80_columns() {
+    // it comes only while a pair exists, so with the ⚠ count, and done
+    // hidden is a remembered view: the reason stays whole, and the name
+    let d = vault(SAMPLE);
+    let theirs = SAMPLE.replace("no raidz.", "no raidz, one spare.").replace("[ ] Replace the", "[x] Replace the");
+    std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE.md"), theirs).unwrap();
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    fold_core::merge::merge_sync_conflicts(&mut v, false).unwrap();
+    drop(v);
+    let before = root(&d);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "zd");
+    select(&mut app, "NAS");
+    press(&mut app, "~");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" can't respell “NAS”: resolve its conflict  "), "{}", s);
+    assert!(s.contains(" done hidden "), "{}", s);
+    select_copy(&mut app);
+    press(&mut app, "~");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" can't respell “NAS”: resolve its conflict  "), "{}", s);
+    // a long name gives way, not the reason
+    select(&mut app, "Replace the flaky switch");
+    press(&mut app, "~");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" can't respell “Replace the …”: resolve its conflict  "), "{}", s);
+    assert_eq!(said(&mut app), "can't respell “Replace the flaky switch”: resolve its conflict");
+    assert_eq!(root(&d), before);
 }
 
 // ------------------------------------------------------------ the next step

@@ -1668,7 +1668,7 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
 }
 
 /// Why `~` is refused on either side of a conflict pair (§12.5).
-pub const PAIR_SPELLING: &str = "resolve its conflict first";
+pub const PAIR_SPELLING: &str = "resolve its conflict";
 
 /// Rewrite an embed in the other form (§4.7) — heading for a section-spelled
 /// block, bare for an item — moving it to its parent's boundary if needed.

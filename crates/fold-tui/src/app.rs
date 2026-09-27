@@ -1209,7 +1209,7 @@ impl App {
         let words = format!("made {} {}", self.named(r), spelling);
         // a node in a conflict pair keeps its spelling (§12.5)
         if ops::conflict_pair(&self.vault.tree, r).len() > 1 {
-            self.say(format!("can't make {} {}: {}", self.named(r), spelling, ops::PAIR_SPELLING));
+            self.say(format!("can't respell {}: {}", self.named(r), ops::PAIR_SPELLING));
             return;
         }
         self.push_undo(&format!("make {} {}", self.named(r), spelling));
