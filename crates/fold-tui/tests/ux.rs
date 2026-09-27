@@ -1293,6 +1293,24 @@ fn move_to_leaves_conflict_copies_out_and_other_pickers_mark_them() {
 }
 
 #[test]
+fn indent_puts_nothing_into_a_conflict_copy() {
+    // the node above Networking is the copy of NAS, folded, which keeping
+    // ours trashes (§12.5)
+    let (d, mut app) = lab();
+    select(&mut app, "Networking");
+    press(&mut app, ">");
+    assert_eq!(said(&mut app), "can't indent “Networking”: the node above it is a conflict copy");
+    assert_eq!(selected(&app), "Networking");
+    assert!(has_line(&d, "## Networking") && has_line(&d, "- [ ] Label the cables"), "{}", root(&d));
+    // inside a copy, a node still goes under the one above it
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+    app.handle_key(key(KeyCode::Enter));
+    select(&mut app, "Replace fan");
+    press(&mut app, ">");
+    assert_eq!(said(&mut app), "indented “Replace fan”");
+}
+
+#[test]
 fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
     let (_d, mut app) = lab();
     app.set_edit_keys(EditKeys::Normal);

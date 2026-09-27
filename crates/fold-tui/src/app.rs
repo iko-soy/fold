@@ -1069,11 +1069,18 @@ impl App {
         let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
         // it goes under the node before it (§10.3)
         let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
-        let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| self.vault.key_of(sibs[i]));
+        let prev = sibs.iter().position(|&c| c == r).and_then(|i| i.checked_sub(1)).map(|i| sibs[i]);
         let Some(prev) = prev else {
             self.say(format!("can't indent {}: nothing above it to go under", self.named(r)));
             return;
         };
+        // nor into a conflict copy, which keeping ours trashes (§12.5); a
+        // node in one moves within it
+        if self.vault.tree.node(prev).conflict().is_some() {
+            self.say(format!("can't indent {}: the node above it is a conflict copy", self.named(r)));
+            return;
+        }
+        let prev = self.vault.key_of(prev);
         let name = self.named(r);
         let on = self.on_node(r);
         match ops::demote(&mut self.vault, s) {

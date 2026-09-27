@@ -979,7 +979,7 @@ the popup — closes the topmost thing.
 | `Ctrl-d` / `Ctrl-u` | half-page down / up |
 | `Enter` | zoom: reading pane shows the cursor node; reading pane takes focus |
 | `Backspace` | zoom out to parent |
-| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged |
+| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged. `>` is refused under a conflict copy, which keeping ours trashes (§12.5) |
 | `~` | toggle spelling, section ↔ item (subtree unchanged). The node moves to its parent's boundary (§3.1): an item respelled as a section becomes the first section child, a section respelled as an item the last item child, so no sibling changes parent |
 | `J` / `K` | move node down / up past the next / previous sibling node; text children stay put. An item never moves below a section sibling, nor a section above an item: the move is refused with a message |
 | `n` / `N` | new sibling after cursor / new last child, spelled like the cursor node / like the last child node (a section if the parent has section children): inserts an empty node and opens it with `e` |
@@ -1336,7 +1336,8 @@ before it, and the status line counts them. Resolving a pair:
 
 Unresolved pairs are ordinary blocks; they sync to every device and are visible in any
 editor, and can be lived with indefinitely. The app marks each copy `⚠` and folds it,
-leaves its tasks out of the counts, and offers it as no *Move to…* destination (§10.1).
+leaves its tasks out of the counts, and offers it as no *Move to…* destination; `>` puts
+nothing under it (§10.1, §10.3).
 
 ### 12.6 History (outside the app)
 
