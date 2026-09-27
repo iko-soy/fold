@@ -724,6 +724,17 @@ impl EditBuffer {
         };
         let (file, node) = self.locate(vault, &info).ok_or_else(|| not_found(&info))?;
         let path = vault.tree.files[file].path.clone();
+        // a block file renamed since (`fold check --fix`, another program)
+        // is checked against the text read under its old name: no hash
+        // under the new one is not a file unchanged
+        if info.path != path {
+            if let Some(h) = self.base_hashes.get(&info.path).cloned() {
+                self.base_hashes.insert(path.clone(), h);
+            }
+            if let Some(i) = self.owners.get_mut(&owner) {
+                i.path = path.clone();
+            }
+        }
         let on_disk = std::fs::read_to_string(vault.dir.join(&path)).unwrap_or_default();
         let Some(base) = self.base_hashes.get(&path).filter(|h| **h != hash(&on_disk)) else {
             return Ok(());

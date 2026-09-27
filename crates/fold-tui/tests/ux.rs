@@ -598,6 +598,48 @@ fn a_change_from_outside_while_editing_saves_the_editor_first_and_says_both() {
 }
 
 #[test]
+fn a_block_file_renamed_outside_fold_is_still_not_overwritten_over_a_change_there() {
+    // `fold check --fix` renames the file of "task", a block the editor
+    // on A shows, its text as it was; the phone then adds to it while the
+    // editor has typing unsaved, typed before the rename or after: the
+    // save is refused as it would be under the old name (§5.2 step 5),
+    // never written over the phone's line once the vault has read it
+    for typed_first in [false, true] {
+        let d = vault("# A\n\n- one\n- task\n- two\n");
+        let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+        let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+        let id = fold_core::ops::make_block(&mut v, t).unwrap();
+        let old = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+        drop(v);
+        let renamed = old.with_file_name(old.file_name().unwrap().to_string_lossy().replace("~task.md", "~task-renamed.md"));
+        let mut app = start(&d);
+        app.set_edit_keys(EditKeys::Normal);
+        app.handle_key(key(KeyCode::Char('e')));
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::End));
+        if !typed_first {
+            std::fs::rename(&old, &renamed).unwrap();
+            until_reload(&mut app);
+            assert_eq!(app.mode_pub(), "edit");
+        }
+        press(&mut app, " XYZ");
+        if typed_first {
+            std::fs::rename(&old, &renamed).unwrap();
+        }
+        let theirs = std::fs::read_to_string(&renamed).unwrap() + "  - phone child\n";
+        std::fs::write(&renamed, &theirs).unwrap();
+        until_reload(&mut app);
+        // the autosave, some pauses on
+        idle(&mut app, 1600);
+        assert_eq!(std::fs::read_to_string(&renamed).unwrap(), theirs, "typed first: {}", typed_first);
+        assert!(said(&mut app).contains("changed on disk; not overwriting"), "typed first: {}: {}", typed_first, said(&mut app));
+        assert_eq!(app.mode_pub(), "edit");
+    }
+}
+
+#[test]
 fn where_the_bar_is_short_what_came_in_gives_way_to_the_typing_saved_for_it() {
     // 80×24 while editing: the EDIT badge leaves 53 columns, and with done
     // hidden 40
