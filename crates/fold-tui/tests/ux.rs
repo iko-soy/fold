@@ -497,6 +497,41 @@ fn a_copy_merged_without_a_pair_is_announced_as_what_came_in() {
 }
 
 #[test]
+fn a_new_copy_that_changes_nothing_is_not_announced() {
+    // §11.2: a copy the same as its file, which the merge trashes, and the
+    // copy of an ignored file (notes.md has no id), which it leaves alone,
+    // bring nothing in: the greeting stays, as it does at startup
+    let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+    std::fs::write(d.path().join("notes.md"), "mine\n").unwrap();
+    let mut app = start(&d);
+    idle(&mut app, 300);
+    let rows = |app: &App| app.rows().iter().map(|r| app.title_of(r.nref)).collect::<Vec<_>>();
+    let was = rows(&app);
+    assert!(said(&mut app).ends_with("? help"), "{}", said(&mut app));
+    std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE.md"), root(&d)).unwrap();
+    until_reload(&mut app);
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was not merged");
+    assert_eq!(rows(&app), was);
+    assert!(said(&mut app).ends_with("? help"), "{}", said(&mut app));
+    std::fs::write(d.path().join("notes.sync-conflict-20260927-100000-PHONE.md"), "theirs\n").unwrap();
+    until_reload(&mut app);
+    assert_eq!(rows(&app), was);
+    assert!(said(&mut app).ends_with("? help"), "{}", said(&mut app));
+    // nor, while typing, is a save said to have made way for it
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(key(KeyCode::Char('!')));
+    let editing = said(&mut app);
+    std::fs::write(d.path().join("notes.sync-conflict-20260927-110000-LAPTOP.md"), "theirs too\n").unwrap();
+    until_reload(&mut app);
+    assert_eq!(app.mode_pub(), "edit");
+    let s = said(&mut app);
+    assert!(!s.contains("changed outside") && !s.contains("saved first"), "{}", s);
+    assert_eq!(s, editing);
+}
+
+#[test]
 fn a_copy_merged_at_startup_without_a_pair_is_announced_as_what_came_in() {
     let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
     std::fs::write(

@@ -552,9 +552,7 @@ impl App {
         self.save_editor();
         let edit = self.editor_key().map(|k| (k, self.editor_files()));
         let mut saved = std::mem::replace(&mut self.status, status);
-        if saved.is_empty() && typed && !self.editor_dirty() {
-            saved = "your typing was saved first".into();
-        }
+        let typed = saved.is_empty() && typed && !self.editor_dirty();
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
         // vault, then may close the editor, which reads the outline, before
@@ -563,11 +561,18 @@ impl App {
         // a sync-conflict file starts the merge flow (§11.2): a new one, or
         // one a merge left alone or failed on, which may merge now; what it
         // took in without a pair is said as any change is, from the vault
-        // as the merge found it: typing saved first is not part of it
+        // as the merge found it: typing saved first is not part of it. A
+        // copy that brings nothing in, one left alone or the same as its
+        // file, says nothing, as at startup
+        let mut came_in = true;
         if self.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
             let was = tops(&self.vault);
             if !self.merge_conflict_files() {
-                self.say(changed_outside(&was, &tops(&self.vault)));
+                let now = tops(&self.vault);
+                came_in = !same_tops(&was, &now);
+                if came_in {
+                    self.say(changed_outside(&was, &now));
+                }
             }
         } else {
             match self.vault.reload() {
@@ -578,8 +583,15 @@ impl App {
         // a change to a file it holds re-renders it (below): its cut blocks
         // are deleted first, before the zoom and the cursor are found again
         let edit = edit.filter(|(_, files)| *files != self.editor_files() && self.drop_cut_blocks());
+        // that the save took the typing is said beside what came in; with
+        // nothing come in it is an editor's save as any, which says nothing,
+        // and a refused one says why on its own
+        if typed && came_in {
+            saved = "your typing was saved first".into();
+        }
         if !saved.is_empty() {
-            self.say(format!("{} · {}", self.status, saved));
+            let msg = if came_in { format!("{} · {}", self.status, saved) } else { saved };
+            self.say(msg);
         }
         self.conflict_copies = self.vault.conflict_files().unwrap_or_default();
         self.settle_zoom();
@@ -699,7 +711,7 @@ impl App {
         let was = tops(&self.vault);
         if !self.merge_conflict_files() {
             let now = tops(&self.vault);
-            if was.iter().map(|t| (&t.key, t.text)).ne(now.iter().map(|t| (&t.key, t.text))) {
+            if !same_tops(&was, &now) {
                 self.say(changed_outside(&was, &now));
             }
         }
@@ -3601,6 +3613,12 @@ fn tops(vault: &Vault) -> Vec<Top> {
             Top { key: vault.key_of(top), title: tree.node(top).title.clone(), items, sections, text: text.finish() }
         })
         .collect()
+}
+
+/// Whether two outlines' top-level nodes are the same, text and all:
+/// nothing came in (§11.2).
+fn same_tops(before: &[Top], after: &[Top]) -> bool {
+    before.iter().map(|t| (&t.key, t.text)).eq(after.iter().map(|t| (&t.key, t.text)))
 }
 
 /// What a reload took in, in outline terms (§11.2): each top-level node
