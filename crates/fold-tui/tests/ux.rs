@@ -3483,11 +3483,11 @@ fn a_verb_run_while_editing_names_the_pointer_s_next_step_not_a_key_the_editor_t
     press(&mut app, "e");
     // every key is text here (§10.6): the step is a row's menu, or ↶ Undo
     right_click(&mut app, "Networking", Action::PasteAfter);
-    assert_eq!(said(&mut app), "nothing copied yet · right-click a row, then choose Copy");
+    assert_eq!(said(&mut app), "nothing copied yet · right-click, Copy");
     right_click(&mut app, "Networking", Action::ToggleDone);
-    assert_eq!(said(&mut app), "“Networking” isn't a task · right-click a row, then choose Task on / off");
+    assert_eq!(said(&mut app), "“Networking” isn't a task · right-click, Task on / off");
     right_click(&mut app, "Networking", Action::Copy);
-    assert_eq!(said(&mut app), "copied “Networking” · right-click a row, then choose Paste after");
+    assert_eq!(said(&mut app), "copied “Networking” · right-click, Paste after");
     right_click(&mut app, "VLANs: 10 home", Action::Delete);
     assert_eq!(said(&mut app), "deleted “VLANs: 10 home, 20 iot, 30 guest” · click ↶ Undo");
     assert_eq!(app.mode_pub(), "edit");
@@ -3499,7 +3499,7 @@ fn a_verb_run_while_editing_names_the_pointer_s_next_step_not_a_key_the_editor_t
     click_button(&mut app, Action::Palette);
     press(&mut app, "Copy");
     app.handle_key(key(KeyCode::Enter));
-    assert!(said(&mut app).ends_with(" · right-click a row, then choose Paste after"), "{}", said(&mut app));
+    assert!(said(&mut app).ends_with(" · right-click, Paste after"), "{}", said(&mut app));
     // the editor done, the keys are the outline's again
     app.handle_key(key(KeyCode::Esc));
     select(&mut app, "Networking");
@@ -3508,6 +3508,41 @@ fn a_verb_run_while_editing_names_the_pointer_s_next_step_not_a_key_the_editor_t
     select(&mut app, "rack");
     press(&mut app, "d");
     assert_eq!(said(&mut app), "deleted “rack” · u undoes");
+}
+
+#[test]
+fn at_80_columns_the_editor_s_pointer_steps_keep_the_node_and_the_item_to_choose() {
+    // 80×24 while editing: EDIT and ✓ saved leave 62 columns once the file
+    // gives way, 53 beside it, and with done hidden 49 (§10.1)
+    for hide in [false, true] {
+        let d = vault(SAMPLE);
+        let mut app = App::new(d.path()).unwrap();
+        select(&mut app, "NAS");
+        if hide {
+            press(&mut app, "zd");
+        }
+        press(&mut app, "e");
+        right_click(&mut app, "Networking", Action::PasteAfter);
+        let s = status80(&mut app);
+        assert!(s.starts_with("  EDIT  nothing copied yet · right-click, Copy  "), "{}", s);
+        assert!(s.ends_with("  root.md  ✓ saved "), "{}", s);
+        right_click(&mut app, "Networking", Action::Copy);
+        let s = status80(&mut app);
+        assert!(s.starts_with("  EDIT  copied “Networking” · right-click, Paste after  "), "{}", s);
+        assert!(s.ends_with(if hide { "  done hidden  ✓ saved " } else { "  root.md  ✓ saved " }), "{}", s);
+        // the longest: the file gives way, and with done hidden the name
+        // is cut, never the item to choose
+        right_click(&mut app, "Networking", Action::ToggleDone);
+        let s = status80(&mut app);
+        if hide {
+            assert!(s.starts_with("  EDIT  “Netw…” isn't a task · right-click, Task on / off  done hidden "), "{}", s);
+        } else {
+            assert!(s.starts_with("  EDIT  “Networking” isn't a task · right-click, Task on / off  "), "{}", s);
+            assert!(s.ends_with("   ✓ saved "), "{}", s);
+        }
+        assert_eq!(root(&d), SAMPLE);
+        assert_eq!(app.mode_pub(), "edit");
+    }
 }
 
 #[test]

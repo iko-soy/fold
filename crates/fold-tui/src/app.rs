@@ -1057,13 +1057,14 @@ impl App {
     /// the key, would act on the outline's selection: there, a node's
     /// verb is in the menu of the line's node. In the editor every key is
     /// text (§10.6): the step is the pointer's, a row's menu or the top
-    /// bar's button.
+    /// bar's button, in few enough words that at 80 columns the node and
+    /// the item to choose stay whole beside them.
     fn next_step(&self, a: Action, does: &str) -> String {
         let on_node = action::NODE_MENU.contains(&Some(a));
         if self.mode == Mode::Edit {
             return match a.icon() {
                 Some(icon) if !on_node => format!("click {} {}", icon, a.label()),
-                _ => format!("right-click a row, then choose {}", a.label()),
+                _ => format!("right-click, {}", a.label()),
             };
         }
         match a.key() {
