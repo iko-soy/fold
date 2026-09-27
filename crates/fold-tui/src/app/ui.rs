@@ -210,20 +210,40 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
-/// Cut a message to `w` columns: the node it names, quoted, gives way
-/// first, down to `…`, so the words around it stay whole where that is
-/// enough; then its end. Where the words before the name leave no room
-/// for it, the end alone is cut.
+/// Cut a message to `w` columns: the nodes it names, quoted, give way
+/// first, the longest down to the next, and all down to `…`, so the
+/// words around them stay whole where that is enough; then its end.
+/// Where the words before a name leave no room for it, it and what
+/// follows go with the end.
 fn fit_named(s: &str, w: usize) -> String {
     let over = s.width().saturating_sub(w);
-    let name = s.find('“').map(|i| i + '“'.len_utf8()).and_then(|a| s[a..].find('”').map(|n| (a, a + n)));
-    match name {
-        Some((a, b)) if over > 0 && s[a..b].width() > 1 && s[..a].width() + 3 <= w => {
-            let keep = s[a..b].width().saturating_sub(over).max(1);
-            fit(&format!("{}{}{}", &s[..a], fit(&s[a..b], keep), &s[b..]), w)
-        }
-        _ => fit(s, w),
+    if over == 0 {
+        return s.to_string();
     }
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(a) = s[from..].find('“').map(|i| from + i + '“'.len_utf8()) {
+        let Some(n) = s[a..].find('”') else { break };
+        names.push((a, a + n));
+        from = a + n;
+    }
+    // the most columns a name keeps: the fewest names cut, by the least
+    let widths: Vec<usize> = names.iter().map(|&(a, b)| s[a..b].width()).collect();
+    let cut = |keep: usize| widths.iter().map(|n| n.saturating_sub(keep)).sum::<usize>();
+    let top = widths.iter().copied().max().unwrap_or(0);
+    let keep = (1..top).rev().find(|&k| cut(k) >= over).unwrap_or(1);
+    let mut out = String::new();
+    let mut last = 0;
+    for &(a, b) in &names {
+        if out.width() + s[last..a].width() + 3 > w {
+            break;
+        }
+        out.push_str(&s[last..a]);
+        out.push_str(&fit(&s[a..b], keep));
+        last = b;
+    }
+    out.push_str(&s[last..]);
+    fit(&out, w)
 }
 
 /// The editor's border title in `w` columns: *Editing*, the block's

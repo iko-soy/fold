@@ -2677,6 +2677,27 @@ fn the_editor_s_own_saves_say_nothing_and_ctrl_s_says_saved() {
     assert_eq!(said(&mut app), "saved");
 }
 
+#[test]
+fn where_the_bar_is_short_a_message_naming_two_nodes_cuts_the_longer_name_first() {
+    // 80×24: the long destination gives way, not the node that moved nor
+    // the words after it
+    let title = "Project Atlas quarterly planning and review notes";
+    let d = vault(&format!("# Networking\n\n- [ ] Label the cables\n  - [ ] rack\n\n# {}\n\n- [ ] Draft the RFC\n\n## Milestones\n", title));
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "rack");
+    press(&mut app, "r");
+    press(&mut app, "Project Atlas");
+    app.handle_key(key(KeyCode::Enter));
+    let s = status80(&mut app);
+    assert!(s.starts_with(" moved “rack” to “Project Atla…” — placed before the sections "), "{}", s);
+    // wider, it is all there
+    assert_eq!(said(&mut app), format!("moved “rack” to “{}” — placed before the sections", title));
+    // the undo names both too
+    press(&mut app, "u");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" undone: move “rack” to “Project Atlas quarterly planning a…” "), "{}", s);
+}
+
 // ------------------------------------------------------------ the next step
 
 /// What the status bar says once its message has gone: the keys of what

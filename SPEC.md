@@ -870,8 +870,8 @@ Four regions, each of them live under the pointer:
   choose Paste after*; in the editor, where every key is text (§10.6), it is the
   pointer's: *copied “NAS” · right-click a row, then choose Paste after*, *deleted “rack”
   · click ↶ Undo* — and names no file or id (§1, 3b), but for undo or redo refusing
-  (§10.10); where the bar is short, the name is cut
-  down before the words around it. Once a message is some 5 s old and a key
+  (§10.10); where the bar is short, the names are cut down, the longest first, before
+  the words around them. Once a message is some 5 s old and a key
   or click has come since, the next step takes its place: the keys of what is on screen —
   *n new · e edit · x done · m menu · / find · ? help* in the outline, *e edit · Enter
   zoom/follow · Tab outline* in the reading pane, *Esc done · Ctrl-S save · Ctrl-Z undo* in
