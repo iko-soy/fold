@@ -3,8 +3,9 @@
 //! when rows come and go (§8.5), keys on a selection the wheel left out
 //! of view (§10.1), editor text no save can take when fold ends or
 //! reverts (§10.6), sync conflicts that come in while you work (§10.7),
-//! the conflict copies they leave in the outline (§10.1, §12.5), and
-//! what the status line says a verb did (§10.1).
+//! the conflict copies they leave in the outline (§10.1, §12.5), what
+//! the status line says a verb did (§10.1), and the next step it shows
+//! once that is old, or a key is half typed or does nothing (§10.1).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fold_tui::app::{node_menu_index, Action, App, EditKeys, Hit};
@@ -1196,4 +1197,259 @@ fn the_editor_s_own_saves_say_nothing_and_ctrl_s_says_saved() {
     app.handle_key(ctrl('s'));
     assert_eq!(root(&d), "# Inbox!?.\n\nnotes\n");
     assert_eq!(said(&mut app), "saved");
+}
+
+// ------------------------------------------------------------ the next step
+
+/// What the status bar says once its message has gone: the keys of what
+/// is on screen (§10.1).
+const OUTLINE_KEYS: &str = "n new · e edit · x done · m menu · / find · ? help";
+const READING_KEYS: &str = "e edit · Enter zoom/follow · Tab outline";
+const EDITOR_KEYS: &str = "Esc done · Ctrl-S save · Ctrl-Z undo";
+const VIM_KEYS: &str = "i insert · :wq done · :q! revert";
+const VIM_INSERT_KEYS: &str = "Esc normal mode · :wq done · :q! revert";
+const PROPS_KEYS: &str = "n add · Enter change · d delete · Esc close";
+
+#[test]
+fn a_message_gives_way_to_the_keys_once_it_is_old_and_something_was_done_since() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "y");
+    assert_eq!(said(&mut app), "copied “NAS” · p pastes");
+    // a key since, but the message is new: it stays
+    press(&mut app, "j");
+    assert_eq!(said(&mut app), "copied “NAS” · p pastes");
+    // five seconds on, with no key since the key: its time is over
+    std::thread::sleep(Duration::from_millis(5100));
+    assert_eq!(said(&mut app), OUTLINE_KEYS);
+}
+
+#[test]
+fn a_message_no_key_came_after_stays_until_one_does() {
+    // for someone who looked away: the message waits for them
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Draft the RFC");
+    press(&mut app, "x");
+    std::thread::sleep(Duration::from_millis(5100));
+    assert_eq!(said(&mut app), "done: “Draft the RFC”");
+    press(&mut app, "k");
+    assert_eq!(said(&mut app), OUTLINE_KEYS);
+    // the greeting is a message like any other
+    let mut app = App::new(d.path()).unwrap();
+    assert!(said(&mut app).contains("right-click for actions"), "{}", said(&mut app));
+}
+
+#[test]
+fn an_error_or_refusal_stays_until_the_next_key_after_it_was_read() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Homelab");
+    press(&mut app, "<");
+    let refusal = "can't outdent “Homelab”: it is already at the top level";
+    assert_eq!(said(&mut app), refusal);
+    // a key right after, while it was being read: it stays, however long
+    press(&mut app, "j");
+    std::thread::sleep(Duration::from_millis(5100));
+    assert_eq!(said(&mut app), refusal);
+    // the next key gets it out of the way
+    press(&mut app, "k");
+    assert_eq!(said(&mut app), OUTLINE_KEYS);
+}
+
+#[test]
+fn each_mode_shows_its_own_keys() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    // the outline's greeting does not follow into the editor, where ?
+    // types a ?
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    let s = said(&mut app);
+    assert!(s == EDITOR_KEYS || s == VIM_KEYS, "{}", s);
+    app.handle_key(key(KeyCode::Esc));
+    // once a message has gone, the keys of what is on screen
+    app.set_edit_keys(EditKeys::Normal);
+    app.say("");
+    assert_eq!(said(&mut app), OUTLINE_KEYS);
+    press(&mut app, "e");
+    assert_eq!(said(&mut app), EDITOR_KEYS);
+    app.handle_key(key(KeyCode::Esc));
+    // in Vim and Helix, Esc never leaves the editor
+    for keys in [EditKeys::Vim, EditKeys::Helix] {
+        app.set_edit_keys(keys);
+        press(&mut app, "e");
+        app.say("");
+        assert_eq!(said(&mut app), VIM_KEYS);
+        press(&mut app, "i");
+        assert_eq!(said(&mut app), VIM_INSERT_KEYS);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(said(&mut app), VIM_KEYS);
+        press(&mut app, ":wq");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode_pub(), "normal");
+        assert_eq!(said(&mut app), OUTLINE_KEYS);
+    }
+    press(&mut app, "a");
+    assert_eq!(said(&mut app), PROPS_KEYS);
+    app.handle_key(key(KeyCode::Esc));
+    app.show_reading = true;
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(said(&mut app), READING_KEYS);
+    assert_eq!(root(&d), SAMPLE);
+}
+
+#[test]
+fn the_conflict_view_shows_its_keys_while_it_has_a_pair_to_resolve() {
+    let (_d, mut app) = lab();
+    app.run_action(Action::ResolveConflicts);
+    app.say("");
+    assert_eq!(said(&mut app), "o ours · t theirs · b both · n next · Esc close");
+    press(&mut app, "tt");
+    assert_eq!(pairs(&mut app), 0);
+    app.say("");
+    assert_eq!(said(&mut app), "Esc close");
+}
+
+#[test]
+fn z_and_g_show_what_can_follow_and_a_wrong_second_key_says_so() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "z");
+    assert_eq!(said(&mut app), "z… p pane · w wrap · d hide done · r raw · a archive");
+    // zq quits nothing, and says so
+    press(&mut app, "q");
+    assert!(!app.quit_requested());
+    assert_eq!(said(&mut app), "zq does nothing · after z press p, w, d, r or a");
+    press(&mut app, "g");
+    assert_eq!(said(&mut app), "g… g top");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(said(&mut app), "g Enter does nothing · after g press g");
+    // Esc lets the first key go, quietly
+    press(&mut app, "z");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(said(&mut app), "g Enter does nothing · after g press g");
+    // zd's words say what it would do now
+    press(&mut app, "zd");
+    press(&mut app, "z");
+    assert_eq!(said(&mut app), "z… p pane · w wrap · d show done · r raw · a archive");
+    app.handle_key(key(KeyCode::Esc));
+    // [[ and ]] in the reading pane
+    app.show_reading = true;
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "]");
+    assert_eq!(said(&mut app), "]… ] next heading");
+    assert_eq!(root(&d), SAMPLE);
+}
+
+#[test]
+fn keys_fold_does_not_use_say_what_to_press_instead() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "i");
+    assert_eq!(said(&mut app), "i does nothing here: e edits");
+    press(&mut app, "o");
+    assert_eq!(said(&mut app), "o does nothing here: n adds a node below");
+    app.handle_key(key(KeyCode::Delete));
+    assert_eq!(said(&mut app), "Delete does nothing here: d deletes");
+    app.handle_key(ctrl('z'));
+    assert_eq!(said(&mut app), "Ctrl-Z does nothing here: u undoes");
+    app.handle_key(ctrl('f'));
+    assert_eq!(said(&mut app), "Ctrl-F does nothing here: / finds");
+    assert_eq!(root(&d), SAMPLE);
+    assert_eq!(app.mode_pub(), "normal");
+    // F1 is help, from the outline, the reading pane and the editor, where
+    // ? types a ?
+    app.handle_key(key(KeyCode::F(1)));
+    assert_eq!(app.mode_pub(), "help");
+    app.handle_key(key(KeyCode::Esc));
+    app.show_reading = true;
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "i");
+    assert_eq!(said(&mut app), "i does nothing here: e edits");
+    app.handle_key(ctrl('f'));
+    assert_eq!(said(&mut app), "Ctrl-F does nothing here: / searches");
+    app.handle_key(key(KeyCode::Delete));
+    assert_eq!(said(&mut app), "Delete does nothing here: Tab, then d deletes");
+    app.handle_key(key(KeyCode::F(1)));
+    assert_eq!(app.mode_pub(), "help");
+    app.handle_key(key(KeyCode::Esc));
+    app.set_edit_keys(EditKeys::Normal);
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::F(1)));
+    assert_eq!(app.mode_pub(), "help");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "edit");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), SAMPLE);
+}
+
+#[test]
+fn undo_and_redo_say_in_words_what_they_undid() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Draft the RFC");
+    press(&mut app, "xu");
+    assert_eq!(said(&mut app), "undone: mark “Draft the RFC” done");
+    press(&mut app, "U");
+    assert_eq!(said(&mut app), "redone: mark “Draft the RFC” done");
+    press(&mut app, "xu");
+    assert_eq!(said(&mut app), "undone: reopen “Draft the RFC”");
+    press(&mut app, "U");
+    assert_eq!(said(&mut app), "redone: reopen “Draft the RFC”");
+    select(&mut app, "Homelab");
+    press(&mut app, "du");
+    assert_eq!(said(&mut app), "undone: delete “Homelab”");
+    select(&mut app, "rack");
+    press(&mut app, ">u");
+    assert_eq!(said(&mut app), "undone: indent “rack”");
+    select(&mut app, "rack");
+    press(&mut app, "tu");
+    assert_eq!(said(&mut app), "undone: remove the checkbox from “rack”");
+    select(&mut app, "call the plumber");
+    press(&mut app, "r");
+    press(&mut app, "Project Atlas");
+    app.handle_key(key(KeyCode::Enter));
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "undone: move “call the plumber” to “Project Atlas”");
+    // the editor's saves, by the node written
+    app.set_edit_keys(EditKeys::Normal);
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, " box");
+    app.handle_key(key(KeyCode::Esc));
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "undone: edit “NAS”");
+    // the reading pane's x, as the outline's
+    app.show_reading = true;
+    select(&mut app, "Project Atlas");
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "jjxu");
+    assert_eq!(said(&mut app), "undone: mark “Draft the RFC” done");
+    assert_eq!(root(&d), SAMPLE);
+    // a refusal names the file, and the step in words (§10.10)
+    app.handle_key(key(KeyCode::Tab));
+    select(&mut app, "rack");
+    press(&mut app, "x");
+    std::fs::write(d.path().join("root.md"), root(&d).replace("VLANs", "VLAN")).unwrap();
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "undo refused: root.md changed since mark “rack” done; not overwriting");
+}
+
+#[test]
+fn a_hint_too_long_for_the_bar_loses_whole_parts_and_keeps_the_way_to_help() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    press(&mut app, "zd");
+    app.say("");
+    // 80 columns, with done hidden, the file and the save state on the right
+    let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    let b = t.backend().buffer().clone();
+    let bar: String = (0..80).map(|x| b[(x, 23)].symbol()).collect();
+    assert!(bar.contains("n new · e edit · x done · m menu · ? help  "), "{}", bar);
+    assert!(bar.contains("done hidden") && !bar.contains('…'), "{}", bar);
 }

@@ -865,7 +865,17 @@ Four regions, each of them live under the pointer:
   names the node it acted on, in the menus' words, with the next key where one helps —
   *deleted “Homelab” (12 nodes) · u undoes*, *moved “rack” to “NAS” — placed before the
   sections* when the ordering rule chose the place (§3.1) — and names no file or id (§1,
-  3b), but for undo or redo refusing (§10.10).
+  3b), but for undo or redo refusing (§10.10). Once a message is some 5 s old and a key
+  or click has come since, the next step takes its place: the keys of what is on screen —
+  *n new · e edit · x done · m menu · / find · ? help* in the outline, *e edit · Enter
+  zoom/follow · Tab outline* in the reading pane, *Esc done · Ctrl-S save · Ctrl-Z undo* in
+  the editor (*i insert · :wq done · :q! revert* in Vim and Helix, where `Esc` never
+  leaves), *n add · Enter change · d delete · Esc close* in the property form, and each
+  popup's own — cut down by whole parts where they don't fit. An error or a refusal
+  (*error: …*, *can't …*, *… refused: …*) stays until a key or click that comes once it
+  is that old. The greeting is the outline's, and gives way at once to the editor's or a
+  popup's keys. While a key sequence is half typed, the bar says what can follow it:
+  *z… p pane · w wrap · d hide done · r raw · a archive*.
 
 The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
 bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor
@@ -981,9 +991,15 @@ the popup — closes the topmost thing.
 | `c` / `C` | capture to the inbox as bullet / as task |
 | `/` | filter box (§10.5) |
 | `m` | the node menu (§10.1) |
-| `:` | command palette (§10.8); `?` help |
+| `:` | command palette (§10.8); `?` or `F1` help |
 | `u` / `U` | undo / redo |
 | `q` | quit (nothing is ever unsaved in normal mode) |
+
+A second key that follows the first in no sequence (`zq`) does nothing and says so: *zq
+does nothing · after z press p, w, d, r or a*; `Esc` lets the first key go. A few keys
+fold has no use for, where one often reaches for them, say what to press instead: `i` (*i
+does nothing here: e edits*), `o` (*n adds a node below*), `Delete` (*d deletes*),
+`Ctrl-Z` (*u undoes*), `Ctrl-F` (*/ finds*); any other key that does nothing says nothing.
 
 ### 10.4 Reading pane — normal mode
 
@@ -997,7 +1013,7 @@ the popup — closes the topmost thing.
 | `o` | open external link under cursor (`xdg-open` / `open`) |
 | `[[` / `]]` | previous / next heading |
 | `/` | in-block search; `n` / `N` next / previous match |
-| `:` `?` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor |
+| `:` `?` `F1` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor; `i`, `Delete`, `Ctrl-Z` and `Ctrl-F` (*/ searches*) say what to press instead |
 
 ### 10.5 Filter box
 
@@ -1068,6 +1084,7 @@ All three take `:` commands — `:w` save, `:q` / `:wq` / `:x` done, `:q!` / `:e
 selects, a double-click selects a word, the wheel scrolls, and text pasted into the
 terminal is inserted as typed. Copying also sets the system clipboard (OSC 52). Undo
 inside the editor is the editor's own; each save is still one entry in the op log (§10.10).
+`F1` shows the help, `?` being text here.
 
 The keymap is `$FOLD_KEYS` (`normal`, `vim`, `helix`), or `--keys`; the *Editor keys*
 action, or the `⌨` label in the editor's border, switches it, and the choice is remembered
@@ -1163,7 +1180,10 @@ before and after, where *absent* stands for a file the operation created or dele
 a block, trashing one). An operation that changed nothing leaves no entry, so it does not
 clear the redo stack. Undo checks every touched file against its *after* text, and redo
 against its *before* text; if any differs — another editor or a sync changed it since — it
-refuses with a message naming the file, writes nothing, and keeps the entry. Files the
+refuses with a message naming the file, writes nothing, and keeps the entry. An entry is
+named in words, by what was done to which node — *mark “rack” done*, *delete “Homelab”*,
+*edit “NAS”* for an editor save — and undo and redo say it: *undone: mark “rack” done*,
+*undo refused: root.md changed since mark “rack” done; not overwriting*. Files the
 operation did not touch are never written by undo, so an external edit to them survives.
 
 ---

@@ -293,7 +293,7 @@ impl App {
         };
         let dest = self.vault.key_of(dest);
         let on = self.on_node(r);
-        self.push_undo("move");
+        self.push_undo(&format!("move {} {} {}", name, if how == Drop::Into { "into" } else { "before" }, self.named(rt)));
         match ops::move_node(&mut self.vault, r, target, how) {
             Ok(moved) => {
                 self.say(super::with_rule_note(&format!("moved {}", name), moved, kind));
@@ -379,7 +379,7 @@ impl App {
     fn toggle_doc_line(&mut self, i: usize) {
         if let Some(r) = self.doc_line_node(i) {
             if self.vault.tree.node(self.vault.tree.resolved_child(r)).task.is_some() {
-                self.toggle_read_task(r, "toggle");
+                self.toggle_read_task(r);
             }
         }
     }

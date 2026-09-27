@@ -74,6 +74,9 @@ pub struct FlatRow {
 pub(crate) const HINT: &str = "double-click to zoom · right-click for actions · drag to move · ? help";
 pub(crate) const HINT_SHORT: &str = "right-click for actions · ? help";
 
+/// How long a message stays up once something else was done (§10.1).
+const MESSAGE_LIFE: Duration = Duration::from_secs(5);
+
 pub struct App {
     pub(crate) vault: Vault,
     mode: Mode,
@@ -322,6 +325,118 @@ impl App {
         self.status_time = Instant::now();
     }
 
+    /// What the status bar says on its left (§10.1), and whether it is a
+    /// hint, which the bar shortens by whole parts: while a key sequence is
+    /// half typed, what can follow it; else the last message, until it is
+    /// stale; then the keys of what is on screen. The greeting is the
+    /// outline's: over anything else, that thing's keys.
+    pub(crate) fn status_left(&self) -> (String, bool) {
+        if let Some(p) = self.pending {
+            let follows: Vec<String> = self.follows(p).iter().map(|(k, what)| format!("{} {}", k, what)).collect();
+            return (format!("{}… {}", p, follows.join(" · ")), true);
+        }
+        let over = self.mode != Mode::Normal || self.prompt.is_some() || self.ui.menu.is_some();
+        if self.stale() || (self.status == HINT && over) {
+            return (self.keys_hint().to_string(), true);
+        }
+        (self.status.clone(), false)
+    }
+
+    /// Whether the message has had its time (§10.1): some 5 s old, with a
+    /// key or click since. An error or a refusal waits for a key or click
+    /// that came once it was that old: one pressed while reading it does
+    /// not take it away.
+    fn stale(&self) -> bool {
+        let old = self.status_time + MESSAGE_LIFE;
+        match self.last_input {
+            _ if self.status.is_empty() => true,
+            None => false,
+            Some(t) if lasting(&self.status) => t >= old,
+            Some(t) => t > self.status_time && Instant::now() >= old,
+        }
+    }
+
+    /// The keys of what is on screen (§10.1): the topmost popup's, else the
+    /// mode's; the editor's by its keymap and mode.
+    fn keys_hint(&self) -> &'static str {
+        if self.ui.menu.is_some() {
+            return "↑↓ choose · Enter run · Esc close";
+        }
+        if let Some(p) = &self.prompt {
+            return match p.action {
+                PromptAction::Refile | PromptAction::GoTo => "↑↓ pick · Enter ok · Esc cancel",
+                _ => "Enter ok · Esc cancel",
+            };
+        }
+        match self.mode {
+            Mode::Normal if self.focus == Focus::Reading => "e edit · Enter zoom/follow · Tab outline",
+            Mode::Normal => "n new · e edit · x done · m menu · / find · ? help",
+            // in Vim and Helix, Esc never leaves (§10.6)
+            Mode::Edit => match self.editor.as_ref().map(|e| (e.keys, e.mode)) {
+                Some((editor::Keys::Normal, _)) | None => "Esc done · Ctrl-S save · Ctrl-Z undo",
+                Some((_, editor::Mode::Normal)) => "i insert · :wq done · :q! revert",
+                Some(_) => "Esc normal mode · :wq done · :q! revert",
+            },
+            Mode::Props => "n add · Enter change · d delete · Esc close",
+            Mode::Filter => "↑↓ pick · Enter go · Esc close",
+            Mode::Picker => "↑↓ pick · Enter run · Esc close",
+            Mode::Conflict if fold_core::merge::conflict_pairs(&self.vault).is_empty() => "Esc close",
+            Mode::Conflict => "o ours · t theirs · b both · n next · Esc close",
+            Mode::Help => "Esc close",
+        }
+    }
+
+    /// What can follow the first key of a sequence (§10.3): each second
+    /// key, and what it does, in the status bar's words.
+    fn follows(&self, first: char) -> Vec<(char, &'static str)> {
+        match first {
+            'z' => vec![('p', "pane"), ('w', "wrap"), ('d', if self.hide_done { "show done" } else { "hide done" }), ('r', "raw"), ('a', "archive")],
+            'g' => vec![('g', "top")],
+            '[' => vec![('[', "previous heading")],
+            ']' => vec![(']', "next heading")],
+            _ => Vec::new(),
+        }
+    }
+
+    /// A second key nothing follows the first with: said, not swallowed
+    /// (§10.3). `Esc` lets the first key go, quietly.
+    fn no_sequence(&mut self, first: char, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            return;
+        }
+        let seq = match key.code {
+            KeyCode::Char(c) if c != ' ' && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => format!("{}{}", first, c),
+            _ => format!("{} {}", first, key_name(key)),
+        };
+        let keys: Vec<String> = self.follows(first).iter().map(|(k, _)| k.to_string()).collect();
+        let keys = match keys.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} or {}", rest.join(", "), last),
+            None => String::new(),
+        };
+        self.say(format!("{} does nothing · after {} press {}", seq, first, keys));
+    }
+
+    /// A key fold has no use for, where one often reaches for it (§10.3):
+    /// what to press instead. Any other key that does nothing says nothing.
+    fn misfire(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let reading = self.focus == Focus::Reading;
+        let instead = match key.code {
+            KeyCode::Char('z') if ctrl => "u undoes",
+            KeyCode::Char('f') if ctrl && reading => "/ searches",
+            KeyCode::Char('f') if ctrl => "/ finds",
+            _ if ctrl => return,
+            KeyCode::Char('i') => "e edits",
+            // the reading pane's o opens a link
+            KeyCode::Char('o') => "n adds a node below",
+            KeyCode::Delete if reading => "Tab, then d deletes",
+            KeyCode::Delete => "d deletes",
+            _ => return,
+        };
+        self.say(format!("{} does nothing here: {}", key_name(key), instead));
+    }
+
     /// What the main loop does between events: the editor's autosave, then
     /// a debounced reload. True when it reloaded.
     pub fn tick(&mut self) -> bool {
@@ -558,8 +673,7 @@ impl App {
 
     /// A node as the status bar names it: its title, quoted.
     fn named(&self, r: NRef) -> String {
-        let title = &self.vault.tree.node(self.vault.tree.resolved_child(r)).title;
-        format!("“{}”", if title.is_empty() { "(untitled)" } else { title.as_str() })
+        quoted(&self.vault.tree.node(self.vault.tree.resolved_child(r)).title)
     }
 
     /// The conflict blocks of the unresolved pairs, by id (§12.5).
@@ -755,12 +869,12 @@ impl App {
 
     fn act_toggle_task(&mut self) {
         let Some(r) = self.subject() else { return };
-        let Some(words) = self.done_words(r) else {
+        let Some((words, step)) = self.done_words(r) else {
             // nothing changes, and nothing is left to undo
             self.say(format!("{} isn't a task · t makes it one", self.named(r)));
             return;
         };
-        self.push_undo("act_toggle_task");
+        self.push_undo(&step);
         let key = self.vault.key_of(r);
         match ops::toggle_task(&mut self.vault, r) {
             Ok(()) => {
@@ -773,22 +887,24 @@ impl App {
         }
     }
 
-    /// What `x` does to `r`, in the status bar's words (§10.1); `None`
-    /// when it is no task.
-    fn done_words(&self, r: NRef) -> Option<String> {
+    /// What `x` does to `r`, in the status bar's words (§10.1), and as
+    /// its op-log entry names it (§10.10); `None` when it is no task.
+    fn done_words(&self, r: NRef) -> Option<(String, String)> {
+        let name = self.named(r);
         Some(match self.vault.tree.node(self.vault.tree.resolved_child(r)).task? {
-            TaskState::Open => format!("done: {}", self.named(r)),
-            TaskState::Done => format!("reopened: {}", self.named(r)),
+            TaskState::Open => (format!("done: {}", name), format!("mark {} done", name)),
+            TaskState::Done => (format!("reopened: {}", name), format!("reopen {}", name)),
         })
     }
 
     fn act_toggle_taskness(&mut self) {
         let Some(r) = self.subject() else { return };
-        let words = match self.vault.tree.node(self.vault.tree.resolved_child(r)).task {
-            Some(_) => format!("removed the checkbox from {}", self.named(r)),
-            None => format!("made {} a task", self.named(r)),
+        let name = self.named(r);
+        let (words, step) = match self.vault.tree.node(self.vault.tree.resolved_child(r)).task {
+            Some(_) => (format!("removed the checkbox from {}", name), format!("remove the checkbox from {}", name)),
+            None => (format!("made {} a task", name), format!("make {} a task", name)),
         };
-        self.push_undo("act_toggle_taskness");
+        self.push_undo(&step);
         let key = self.vault.key_of(r);
         match ops::toggle_taskness(&mut self.vault, r) {
             Ok(()) => {
@@ -804,7 +920,7 @@ impl App {
     fn act_make_block(&mut self) {
         let Some(r) = self.subject() else { return };
         let name = self.named(r);
-        self.push_undo("act_make_block");
+        self.push_undo(&format!("give {} its own file", name));
         let on = self.on_node(r);
         match ops::make_block(&mut self.vault, r) {
             Ok(id) => {
@@ -840,9 +956,9 @@ impl App {
 
     fn act_delete(&mut self) {
         let Some(r) = self.subject() else { return };
-        self.push_undo("act_delete");
         self.copy(r);
         let name = self.copied.0.clone();
+        self.push_undo(&format!("delete {}", name));
         match ops::delete_subtree(&mut self.vault, r) {
             Ok(1) => self.refresh_after(&format!("deleted {} · u undoes", name)),
             Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · u undoes", name, n)),
@@ -868,9 +984,9 @@ impl App {
             return;
         }
         let Some(r) = self.subject() else { return };
-        self.push_undo("act_paste");
         let text = self.register.clone();
         let (name, kind) = self.copied.clone();
+        self.push_undo(&format!("paste {}", name));
         match ops::paste(&mut self.vault, r, &text, after) {
             Ok(moved) => self.refresh_after(&with_rule_note(&format!("pasted {}", name), moved, kind)),
             Err(e) => self.say(format!("error: {}", e)),
@@ -879,7 +995,7 @@ impl App {
 
     fn act_move(&mut self, down: bool) {
         let Some(r) = self.subject() else { return };
-        self.push_undo("act_move");
+        self.push_undo(&format!("move {} {}", self.named(r), if down { "down" } else { "up" }));
         let key = self.vault.key_of(r);
         match ops::move_sibling(&mut self.vault, r, down) {
             Ok(()) => {
@@ -893,11 +1009,12 @@ impl App {
 
     fn act_spelling(&mut self) {
         let Some(r) = self.subject() else { return };
-        let (words, kind) = match self.vault.tree.node(self.vault.tree.resolved_child(r)).kind {
-            Kind::Section => (format!("made {} a bullet", self.named(r)), Kind::Item),
-            _ => (format!("made {} a heading", self.named(r)), Kind::Section),
+        let (spelling, kind) = match self.vault.tree.node(self.vault.tree.resolved_child(r)).kind {
+            Kind::Section => ("a bullet", Kind::Item),
+            _ => ("a heading", Kind::Section),
         };
-        self.push_undo("act_spelling");
+        let words = format!("made {} {}", self.named(r), spelling);
+        self.push_undo(&format!("make {} {}", self.named(r), spelling));
         let key = self.vault.key_of(r);
         match ops::toggle_spelling(&mut self.vault, r) {
             Ok(moved) => {
@@ -912,8 +1029,8 @@ impl App {
 
     fn act_demote(&mut self) {
         let Some(s) = self.subject() else { return };
-        self.push_undo("act_demote");
         let r = self.vault.tree.resolved_child(s);
+        self.push_undo(&format!("indent {}", self.named(r)));
         let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
         // it goes under the node before it (§10.3)
         let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
@@ -940,8 +1057,8 @@ impl App {
 
     fn act_promote(&mut self) {
         let Some(s) = self.subject() else { return };
-        self.push_undo("act_promote");
         let r = self.vault.tree.resolved_child(s);
+        self.push_undo(&format!("outdent {}", self.named(r)));
         let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
         // it goes beside its parent, right after it, under the parent's
         // parent (§10.3)
@@ -974,7 +1091,7 @@ impl App {
     fn act_archive(&mut self) {
         let Some(r) = self.subject() else { return };
         let (name, kind) = (self.named(r), self.vault.tree.node(self.vault.tree.resolved_child(r)).kind);
-        self.push_undo("act_archive");
+        self.push_undo(&format!("archive {}", name));
         match ops::archive(&mut self.vault, r) {
             Ok(moved) => self.refresh_after(&with_rule_note(&format!("archived {}", name), moved, kind)),
             Err(e) => self.say(format!("error: {}", e)),
@@ -982,9 +1099,9 @@ impl App {
     }
 
     fn act_clear_done(&mut self) {
-        self.push_undo("act_clear_done");
         let zoom = self.zoom();
         let under = zoom.map(|z| format!(" under {}", self.named(z))).unwrap_or_default();
+        self.push_undo(&format!("clear done tasks{}", under));
         let target = zoom.unwrap_or(self.vault.tree.root);
         match ops::clear_done(&mut self.vault, target) {
             Ok(0) => self.refresh_after(&format!("no done tasks to clear{}", under)),
@@ -996,10 +1113,10 @@ impl App {
 
     /// *Move to…* (§6.5): the prompt's moving node goes under `dest`.
     fn refile_to(&mut self, r: NRef, dest: NRef) {
-        self.push_undo("move to");
         let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
         let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
         let words = format!("moved {} to {}", self.named(rr), self.named(dest));
+        self.push_undo(&format!("move {} to {}", self.named(rr), self.named(dest)));
         let on = self.on_node(rr);
         match ops::refile(&mut self.vault, r, dest) {
             Ok(moved) => {
@@ -1062,7 +1179,7 @@ impl App {
 
     fn act_new_node(&mut self, child: bool) {
         let Some(r) = self.subject() else { return };
-        self.push_undo("new node");
+        self.push_undo(&format!("add a node {} {}", if child { "under" } else { "after" }, self.named(r)));
         let res = if child {
             match ops::append_child_public(&mut self.vault, r, "") {
                 Ok(nr) => {
@@ -1262,7 +1379,7 @@ impl App {
         // what another program changed beside the edited blocks is taken in
         // before the snapshot, so undoing this save leaves it be
         ed.buf.rebase_dirty(&mut self.vault);
-        let snap = ops::Snapshot::take(&self.vault, "edit");
+        let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(&ed, None)));
         let mut res = ed.buf.save_all(&mut self.vault);
         if let Some(n) = res.as_ref().ok().copied().filter(|_| release) {
             ed.release_clip();
@@ -1445,7 +1562,7 @@ impl App {
             let on_editor = self.anchor_zoom_for_save();
             let mut ed = self.editor.take().unwrap();
             ed.buf.rebase_dirty(&mut self.vault);
-            let snap = ops::Snapshot::take(&self.vault, "edit");
+            let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(&ed, Some(&before))));
             let res = ed.buf.splice(&mut self.vault, before);
             self.editor = Some(ed);
             self.settle_zoom_after_save(on_editor);
@@ -1523,7 +1640,7 @@ impl App {
             return;
         }
         let edit = self.editor_before_write("outline verb");
-        self.push_undo("delete property");
+        self.push_undo(&format!("remove {} from {}", k, self.named(t)));
         match ops::set_frontmatter_key(&mut self.vault, t.0, &k, None) {
             Ok(()) => self.say(format!("{} removed", k)),
             Err(e) => self.say(format!("error: {}", e)),
@@ -1613,7 +1730,7 @@ impl App {
                 Err(e) => self.say(e),
             },
             PromptAction::CaptureText(task) => {
-                self.push_undo("capture");
+                self.push_undo(&format!("capture {}", quoted(p.text.trim())));
                 match ops::capture(&mut self.vault, &p.text, task) {
                     Ok(r) => {
                         self.reveal(r);
@@ -1631,7 +1748,7 @@ impl App {
                         self.prompt = Some(p);
                         return;
                     }
-                    self.push_undo("set property");
+                    self.push_undo(&format!("set {} of {}", k, self.named(t)));
                     let on = self.on_node(t);
                     match ops::set_property(&mut self.vault, t, &k, &p.text) {
                         Ok(block) => {
@@ -1918,7 +2035,7 @@ impl App {
                     let doc = self.reading_doc();
                     self.jump_heading(&doc, if p == ']' { 1 } else { -1 });
                 }
-                _ => {}
+                _ => self.no_sequence(p, key),
             }
             return;
         }
@@ -1948,13 +2065,15 @@ impl App {
             }
             Mode::Filter => self.key_filter(key),
             Mode::Picker => self.key_palette(key),
+            // help as from the top bar's ?, which the editor types (§10.8)
+            Mode::Edit if key.code == KeyCode::F(1) => self.run_action(Action::Help),
             // the keymap decides what Ctrl-c means (copy, or Vim's escape)
             Mode::Edit => self.key_edit(key),
             Mode::Props => self.key_props(key),
             Mode::Help => {
                 if matches!(
                     key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::F(1)
                 ) {
                     self.mode = self.base_mode();
                 }
@@ -1992,7 +2111,7 @@ impl App {
             // a block a save took out of its parent (cut and not pasted
             // back, or deleted) cannot be pasted back as itself any more:
             // it is deleted now, as on leaving any other way (§5.2)
-            let snap = ops::Snapshot::take(&self.vault, "revert");
+            let snap = ops::Snapshot::take(&self.vault, &format!("revert {}", edited(&ed, None)));
             if let Err(e) = ed.buf.discard(&mut self.vault) {
                 said = format!("{}; error: {}", said, e);
             }
@@ -2136,7 +2255,7 @@ impl App {
             KeyCode::Char('u') if ctrl => {
                 self.cursor = self.cursor.saturating_sub(half);
             }
-            _ if ctrl => {}
+            _ if ctrl => self.misfire(key),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab => {
                 self.show_reading = true;
@@ -2226,13 +2345,13 @@ impl App {
             KeyCode::Char('C') => self.run_action(Action::CaptureTask),
             KeyCode::Char('/') => self.run_action(Action::Filter),
             KeyCode::Char(':') => self.run_action(Action::Palette),
-            KeyCode::Char('?') => self.run_action(Action::Help),
+            KeyCode::Char('?') | KeyCode::F(1) => self.run_action(Action::Help),
             KeyCode::Char('u') => self.act_undo(),
             KeyCode::Char('U') => self.act_redo(),
             KeyCode::Char('e') => self.act_edit(),
             KeyCode::Char('a') => self.act_props(),
             KeyCode::Char('r') => self.run_action(Action::Refile),
-            _ => {}
+            _ => self.misfire(key),
         }
     }
 
@@ -2379,7 +2498,7 @@ impl App {
                             self.read_cursor = 0;
                             self.scroll_reading = 0;
                         } else if n.task.is_some() {
-                            self.toggle_read_task(r, "reading-pane edit");
+                            self.toggle_read_task(r);
                         }
                     }
                     Some(LineRef::Embed(e)) => {
@@ -2404,7 +2523,7 @@ impl App {
             }
             KeyCode::Char('x') => {
                 if let Some(r) = self.read_node() {
-                    self.toggle_read_task(r, "reading-pane edit");
+                    self.toggle_read_task(r);
                 }
             }
             KeyCode::Char('e') => {
@@ -2431,11 +2550,11 @@ impl App {
                 self.run_action(Action::NodeMenu);
                 self.action_target = None;
             }
-            KeyCode::Char(':' | '?' | 'c' | 'C' | 'u' | 'U') => {
+            KeyCode::Char(':' | '?' | 'c' | 'C' | 'u' | 'U') | KeyCode::F(1) => {
                 let rows = self.rows();
                 self.key_outline(key, rows);
             }
-            _ => {}
+            _ => self.misfire(key),
         }
     }
 
@@ -2476,14 +2595,13 @@ impl App {
     }
 
     /// Check or uncheck a task from the reading pane (§10.4), keeping the
-    /// cursor, and say which by name as `x` in the outline does; `desc`
-    /// names the op-log entry.
-    fn toggle_read_task(&mut self, r: NRef, desc: &str) {
-        let Some(words) = self.done_words(r) else {
+    /// cursor, and say which by name as `x` in the outline does.
+    fn toggle_read_task(&mut self, r: NRef) {
+        let Some((words, step)) = self.done_words(r) else {
             self.say(format!("{} isn't a task", self.named(r)));
             return;
         };
-        self.push_undo(desc);
+        self.push_undo(&step);
         match ops::toggle_task(&mut self.vault, r) {
             Ok(()) => self.say(words),
             Err(e) => self.say(format!("error: {}", e)),
@@ -2983,7 +3101,7 @@ pub fn help_text() -> Vec<Line<'static>> {
         ("J/K > < ~", "move · indent · outdent · heading ↔ bullet"),
         ("r y d p/P", "move to… · copy · delete · paste after / before"),
         ("s za zd zr zw zp", "make block · archive · hide done · raw source · wrap lines · reading pane"),
-        ("/ : ?", "filter · command palette · this help"),
+        ("/ : ? F1", "filter · command palette · this help (F1 in the editor too)"),
         ("u/U q", "undo / redo · quit (everything is always saved)"),
         ("Tab", "switch panes · in the text: [[ ]] headings, / search, o link"),
         ("", ""),
@@ -3015,9 +3133,55 @@ pub fn help_text() -> Vec<Line<'static>> {
         .collect()
 }
 
+/// What an editor save's op-log entry names (§10.10), *edit “ZFS
+/// layout”*: the block it writes when it writes one, else the node the
+/// editor is open on.
+fn edited(ed: &editor::Editor, owner: Option<&fold_core::edit::Owner>) -> String {
+    let one = owner.or(match ed.buf.dirty.as_slice() {
+        [o] => Some(o),
+        _ => None,
+    });
+    let info = one.and_then(|o| ed.buf.owners.get(o)).or_else(|| ed.buf.owners.values().find(|i| i.parent.is_none()));
+    quoted(info.map_or("", |i| i.title.as_str()))
+}
+
+/// A title as the status bar names it: quoted.
+fn quoted(title: &str) -> String {
+    format!("“{}”", if title.is_empty() { "(untitled)" } else { title })
+}
+
 /// The status bar's count of unresolved pairs (§10.1), as its ⚠ reads.
 fn conflict_count(n: usize) -> String {
     format!("⚠ {} conflict{}", n, if n == 1 { "" } else { "s" })
+}
+
+/// An error or a refusal, which the status bar keeps until the next key
+/// after it was read (§10.1).
+fn lasting(msg: &str) -> bool {
+    msg.starts_with("error:") || msg.starts_with("can't ") || [" error:", " refused:", " failed:"].iter().any(|w| msg.contains(w))
+}
+
+/// A key as the status bar names it: *q*, *Enter*, *Ctrl-Z*.
+fn key_name(key: KeyEvent) -> String {
+    let name = match key.code {
+        KeyCode::Char(' ') => "Space".into(),
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => c.to_uppercase().to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::F(n) => format!("F{}", n),
+        KeyCode::Up => "↑".into(),
+        KeyCode::Down => "↓".into(),
+        KeyCode::Left => "←".into(),
+        KeyCode::Right => "→".into(),
+        KeyCode::BackTab => "Shift-Tab".into(),
+        KeyCode::PageUp => "PgUp".into(),
+        KeyCode::PageDown => "PgDn".into(),
+        code => format!("{:?}", code),
+    };
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        format!("Ctrl-{}", name)
+    } else {
+        name
+    }
 }
 
 fn key_of(c: char) -> KeyEvent {

@@ -205,6 +205,17 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// Shorten a hint of `·`-separated parts to `w` columns by whole parts:
+/// the first and the last (the way on, as *? help* or *Esc close*) stay,
+/// those before the last go first.
+fn fit_parts(s: &str, w: usize) -> String {
+    let mut parts: Vec<&str> = s.split(" · ").collect();
+    while parts.join(" · ").width() > w && parts.len() > 2 {
+        parts.remove(parts.len() - 2);
+    }
+    parts.join(" · ")
+}
+
 /// A title as drawn: the terminal drops a tab, so it shows as the spaces
 /// to its next stop, counted from the title's start (raw text is never
 /// hidden, §10.9).
@@ -553,8 +564,15 @@ impl App {
         let rw: u16 = right.iter().map(|(t, _, _)| t.width() as u16).sum();
         let mut rx = (area.x + area.width).saturating_sub(rw);
         let msg_room = rx.saturating_sub(x + 1);
-        let msg = if self.status == super::HINT && super::HINT.width() > msg_room as usize { super::HINT_SHORT } else { self.status.as_str() };
-        put(buf, x, area.y, &fit(msg, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
+        let (msg, hint) = self.status_left();
+        let msg = if hint {
+            fit_parts(&msg, msg_room as usize)
+        } else if msg == super::HINT && super::HINT.width() > msg_room as usize {
+            super::HINT_SHORT.to_string()
+        } else {
+            msg
+        };
+        put(buf, x, area.y, &fit(&msg, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
         for (t, style, a) in right {
             let w = t.width() as u16;
             let r = Rect { x: rx, y: area.y, width: w, height: 1 };

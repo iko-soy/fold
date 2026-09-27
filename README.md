@@ -57,7 +57,8 @@ The TUI is mouse-first, and every action also has a key.
 
 Keys, in the outline: `j`/`k` move, `h`/`l` fold, `Enter` zooms, `e` edits, `x` checks a
 task, `n`/`N` add a sibling or child, `J`/`K` move a node, `>`/`<` indent, `r` moves a
-subtree elsewhere, `u`/`U` undo and redo, `?` shows everything. Everything is saved as you
+subtree elsewhere, `u`/`U` undo and redo, `?` (or `F1`) shows everything. The status bar
+says what a key did, then which keys come next where you are. Everything is saved as you
 go; `q` quits. The view — the pane, folds, zoom, wrapping, the editor's keys — is remembered
 per vault for next time.
 
