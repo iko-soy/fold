@@ -533,8 +533,8 @@ impl App {
 
     /// Reload after an external change (§11.2): editor saves first, then
     /// re-parse, cursor re-attached by id, key, deepest surviving step, and
-    /// the editor re-rendered if a file it holds changed. A new
-    /// sync-conflict file starts the merge flow (§12).
+    /// the editor re-rendered if what it shows changed. A new sync-conflict
+    /// file starts the merge flow (§12).
     pub fn reload_external(&mut self) {
         // what popups show is held by key: the editor's save and the reload
         // re-parse files, renumbering their nodes. A closed property form's
@@ -549,7 +549,7 @@ impl App {
         let status = std::mem::take(&mut self.status);
         let typed = self.editor_dirty();
         // a block cut in the editor stays in transit across the save: a
-        // change to no file the editor holds leaves it as it is (§5.2)
+        // change to nothing it shows leaves it as it is (§5.2)
         self.save_editor();
         let edit = self.editor_key().map(|k| (k, self.editor_files()));
         let mut saved = std::mem::replace(&mut self.status, status);
@@ -581,9 +581,13 @@ impl App {
                 Err(e) => self.say(format!("reload error: {}", e)),
             }
         }
-        // a change to a file it holds re-renders it (below): its cut blocks
-        // are deleted first, before the zoom and the cursor are found again
-        let edit = edit.filter(|(_, files)| *files != self.editor_files() && self.drop_cut_blocks());
+        // a change to what it shows re-renders it (below): its cut blocks
+        // are deleted first, before the zoom and the cursor are found again.
+        // One elsewhere in a file it holds, as to another node of root.md,
+        // is taken in where it is
+        let edit = edit.filter(|(key, files)| {
+            *files != self.editor_files() && !self.editor_takes_in(key) && self.drop_cut_blocks()
+        });
         // that the save took the typing is said beside what came in; with
         // nothing come in it is an editor's save as any, which says nothing,
         // and a refused one says why on its own
@@ -637,7 +641,17 @@ impl App {
         ed.buf.owners.values().map(|i| file(i).map(|f| tree.files[f].text.clone())).collect()
     }
 
-    /// Before the editor is re-rendered over files a reload changed
+    /// After a reload changed a file the editor holds (§11.2): where its
+    /// node renders as the buffer shows it, line for line, the buffer takes
+    /// in the files as they are and stays, a block cut there still to paste
+    /// (§5.2). False where the node is gone or what it shows changed.
+    fn editor_takes_in(&mut self, key: &NodeKey) -> bool {
+        let Some(r) = self.find_exact(key) else { return false };
+        let now = fold_core::edit::open_editor(&self.vault, r);
+        self.editor.as_mut().is_some_and(|ed| ed.buf.take_in(now))
+    }
+
+    /// Before the editor is re-rendered over text a reload changed
     /// (§11.2): a block cut there and not pasted back cannot be pasted as
     /// itself any more, and is deleted as on a Revert (§5.2), one op
     /// (§10.10). True when the editor can be re-rendered: text a refused

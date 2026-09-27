@@ -797,6 +797,48 @@ impl EditBuffer {
         }
     }
 
+    /// A reload that changed a file this buffer holds but not what it
+    /// shows (§11.2): `now`, the buffer the same node renders to from the
+    /// files as they are, has the same lines, each owned by the same block
+    /// (by id; the edited node's own by being it), nested as here. Where
+    /// each of those blocks is and the hash of its file are taken from
+    /// `now`, so its next save finds the file as it was read; the rest
+    /// stays as it is: the tags the editor's undo steps and clipboard hold,
+    /// and a block cut and not pasted back, still in transit (§5.2). False,
+    /// and nothing taken in, where a line or its block differs, or while
+    /// text is unsaved, whose save must still see the change (§5.2 step 5).
+    pub fn take_in(&mut self, now: EditBuffer) -> bool {
+        if !self.dirty.is_empty() || self.lines.len() != now.lines.len() {
+            return false;
+        }
+        let mut to_now: BTreeMap<Owner, Owner> = BTreeMap::new();
+        for (a, b) in self.lines.iter().zip(&now.lines) {
+            let (Some(ai), Some(bi)) = (self.owners.get(&a.owner), now.owners.get(&b.owner)) else {
+                return false;
+            };
+            let same = a.text == b.text && ai.id == bi.id && ai.parent.is_none() == bi.parent.is_none();
+            if !same || *to_now.entry(a.owner).or_insert(b.owner) != b.owner {
+                return false;
+            }
+        }
+        // and each nested in the same block as there
+        let nested = |a: &Owner| self.owners[a].parent.map(|p| to_now.get(&p).copied());
+        if to_now.iter().any(|(a, b)| nested(a) != now.owners[b].parent.map(Some)) {
+            return false;
+        }
+        for (a, b) in to_now {
+            let info = OwnerInfo {
+                parent: self.owners[&a].parent,
+                ..now.owners[&b].clone()
+            };
+            if let Some(h) = now.base_hashes.get(&info.path) {
+                self.base_hashes.insert(info.path.clone(), h.clone());
+            }
+            self.owners.insert(a, info);
+        }
+        true
+    }
+
     /// Splice every dirty block (§10.6: a commit may write several files,
     /// one splice per dirty block). Each block is written by its own splice
     /// (§5.2): one that is refused stays dirty, the others are still

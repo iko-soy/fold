@@ -777,6 +777,45 @@ fn a_held_block_still_in_the_buffer_is_not_in_transit() {
 }
 
 #[test]
+fn a_reload_that_leaves_the_text_as_it_was_keeps_a_block_in_transit() {
+    // §11.2: the phone adds a node above A in root.md and the vault re-reads
+    // it: the buffer on A takes in where A is now and the file's hash, its
+    // cut block still in transit, so the paste embeds the block again. A
+    // change to A's own text is not taken in: the editor is re-rendered
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n- two\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block_path = d.path().join(&v.tree.files[1].path);
+    let block_before = v.tree.files[1].text.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    let cut = buf.lines[i].clone();
+    buf.delete_line(i);
+    buf.hold(vec![cut.owner]);
+    buf.save_all(&mut v).unwrap();
+    let theirs = "# Inbox\n\n- [ ] from phone\n\n# A\n\n- one\n- two\n";
+    std::fs::write(d.path().join("root.md"), theirs).unwrap();
+    v.reload().unwrap();
+    let a = v.find_by_path(&["A".into()]).unwrap();
+    assert!(buf.take_in(open_editor(&v, a)));
+    // pasted below "- two" with its tag
+    let two = buf.lines.iter().position(|l| l.text == "- two").unwrap();
+    buf.lines.insert(two + 1, cut.clone());
+    buf.mark_dirty(cut.owner);
+    buf.mark_dirty(buf.lines[0].owner);
+    buf.save_all(&mut v).unwrap();
+    let embedded = format!("{}![[{}]]\n", theirs, id.as_str());
+    assert_eq!(std::fs::read_to_string(d.path().join("root.md")).unwrap(), embedded);
+    assert_eq!(std::fs::read_to_string(&block_path).unwrap(), block_before);
+    // A's own text changed: nothing taken in
+    std::fs::write(d.path().join("root.md"), embedded.replace("- one", "- one, from Helix")).unwrap();
+    v.reload().unwrap();
+    let a = v.find_by_path(&["A".into()]).unwrap();
+    assert!(!buf.take_in(open_editor(&v, a)));
+}
+
+#[test]
 fn review_external_edit_of_the_zoomed_node_never_lands_on_an_identical_one() {
     // §5.2 step 5: the zoomed item's own text changed on disk (another
     // device edited it) while it was edited here. Its old bytes still occur

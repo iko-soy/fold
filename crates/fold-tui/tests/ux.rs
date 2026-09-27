@@ -259,9 +259,52 @@ fn cut_then_the_phone_writes_the_inbox(copy: bool) {
 }
 
 #[test]
-fn a_copy_merged_into_the_file_the_editor_holds_deletes_a_block_cut_there() {
-    // §5.2, §11.2: the merge changes A's file, so the editor is re-rendered
-    // and the cut line can no longer be pasted as the block: it is deleted,
+fn a_change_from_outside_to_another_node_of_the_editor_s_file_keeps_a_cut_block_to_paste() {
+    // §5.2, §11.2: the phone adds to the Inbox in root.md, the file the
+    // editor on A is in, after A or before it: what the editor shows is as
+    // it was, so a block cut there is still moved once pasted
+    for inbox_first in [false, true] {
+        let (a, inbox) = ("# A\n\n- one\n- task\n- two\n", "# Inbox\n\n- [ ] a\n");
+        let text = if inbox_first { format!("{}\n{}", inbox, a) } else { format!("{}\n{}", a, inbox) };
+        let d = vault(&text);
+        let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+        let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+        let id = fold_core::ops::make_block(&mut v, t).unwrap();
+        let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+        drop(v);
+        let embed = format!("![[{}]]", id.as_str());
+        let before = std::fs::read_to_string(&block).unwrap();
+        let mut app = start(&d);
+        select(&mut app, "A");
+        app.set_edit_keys(EditKeys::Normal);
+        app.handle_key(key(KeyCode::Char('e')));
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(ctrl('k'));
+        idle(&mut app, 1000);
+        assert_eq!(root(&d), text.replace("- task\n", ""), "inbox first: {}", inbox_first);
+        // the phone adds to the Inbox
+        let phone = text.replace("- task\n", "").replace("- [ ] a\n", "- [ ] a\n- [ ] from phone\n");
+        std::fs::write(d.path().join("root.md"), &phone).unwrap();
+        until_reload(&mut app);
+        assert!(app.rows().iter().any(|r| app.title_of(r.nref) == "from phone"));
+        assert!(block.exists(), "inbox first: {}: the cut block was deleted", inbox_first);
+        assert_eq!(app.mode_pub(), "edit");
+        // paste it above "- one"
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(ctrl('v'));
+        app.handle_key(key(KeyCode::Esc));
+        let moved = phone.replace("- one\n", &format!("{}\n- one\n", embed));
+        assert_eq!(root(&d), moved, "inbox first: {}", inbox_first);
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), before, "inbox first: {}", inbox_first);
+    }
+}
+
+#[test]
+fn a_copy_merged_into_the_node_the_editor_shows_deletes_a_block_cut_there() {
+    // §5.2, §11.2: the merge changes A, so the editor is re-rendered and
+    // the cut line can no longer be pasted as the block: it is deleted,
     // never left in a file embedded nowhere
     let d = vault("# A\n\n- one\n- task\n- two\n\n# B\n\nb\n");
     let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
@@ -281,7 +324,7 @@ fn a_copy_merged_into_the_file_the_editor_holds_deletes_a_block_cut_there() {
     assert!(block.exists(), "in transit");
     std::fs::write(
         d.path().join("root.sync-conflict-20260927-100000-PHONE.md"),
-        "# A\n\n- one\n- two\n\n# B\n\nb\n- from phone\n",
+        "# A\n\n- one\n- two\n- from phone\n\n# B\n\nb\n",
     )
     .unwrap();
     until_reload(&mut app);
