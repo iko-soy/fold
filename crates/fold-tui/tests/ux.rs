@@ -34,7 +34,7 @@ fn vault(root: &str) -> tempfile::TempDir {
 fn start(d: &tempfile::TempDir) -> App {
     let mut app = App::new(d.path()).unwrap();
     app.start_watcher();
-    app.vault_conflict_files().unwrap();
+    app.merge_on_startup();
     app
 }
 
@@ -207,6 +207,77 @@ fn a_change_from_outside_while_editing_saves_the_editor_first_and_says_both() {
     // the typing is not what came from outside
     let s = status_line(&mut app);
     assert!(s.contains("↻ changed outside fold: Inbox (+1 item) · your typing was saved first"), "{}", s);
+}
+
+/// The main loop until it has run a reload, for up to 5 s.
+fn until_reload(app: &mut App) {
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+        if app.tick() {
+            return;
+        }
+    }
+    panic!("the change was not taken in");
+}
+
+#[test]
+fn a_change_from_outside_beside_a_copy_the_merge_left_alone_is_announced() {
+    // notes.md has no id: the copy of an ignored file, which the merge
+    // leaves alone (§12.2), is in the vault for good
+    let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+    std::fs::write(d.path().join("notes.md"), "mine\n").unwrap();
+    std::fs::write(d.path().join("notes.sync-conflict-20260926-150000-PHONE.md"), "theirs\n").unwrap();
+    let mut app = start(&d);
+    // nothing came in: the greeting stays
+    assert!(status_line(&mut app).contains("? help"), "{}", status_line(&mut app));
+    idle(&mut app, 300);
+    for task in ["from phone", "from laptop"] {
+        let text = root(&d);
+        std::fs::write(d.path().join("root.md"), format!("{}- [ ] {}\n", text, task)).unwrap();
+        until_reload(&mut app);
+        assert!(app.rows().iter().any(|r| app.title_of(r.nref) == task));
+        let s = status_line(&mut app);
+        assert!(s.contains("↻ changed outside fold: Inbox (+1 item)"), "{}", s);
+        assert!(!s.contains("notes") && !s.contains("merged"), "{}", s);
+    }
+}
+
+#[test]
+fn a_copy_merged_without_a_pair_is_announced_as_what_came_in() {
+    let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+    let mut app = start(&d);
+    idle(&mut app, 300);
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260927-100000-PHONE.md"),
+        "# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n- [ ] from phone\n",
+    )
+    .unwrap();
+    until_reload(&mut app);
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was not merged");
+    assert!(root(&d).contains("- [ ] from phone\n"), "{}", root(&d));
+    assert_eq!(pairs(&mut app), 0);
+    assert_eq!(app.mode_pub(), "normal");
+    let s = status_line(&mut app);
+    assert!(s.contains("↻ changed outside fold: Inbox (+1 item)"), "{}", s);
+    assert!(!s.contains("sync-conflict") && !s.contains("pair"), "{}", s);
+}
+
+#[test]
+fn a_copy_merged_at_startup_without_a_pair_is_announced_as_what_came_in() {
+    let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
+    std::fs::write(
+        d.path().join("root.sync-conflict-20260927-100000-PHONE.md"),
+        "# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n- [ ] from phone\n",
+    )
+    .unwrap();
+    let mut app = start(&d);
+    assert!(app.vault_conflict_files().unwrap().is_empty(), "the copy was not merged");
+    assert!(app.rows().iter().any(|r| app.title_of(r.nref) == "from phone"));
+    let s = status_line(&mut app);
+    assert!(s.contains("↻ changed outside fold: Inbox (+1 item)"), "{}", s);
+    assert!(!s.contains("sync-conflict") && !s.contains("pair"), "{}", s);
+    assert_eq!(idle(&mut app, 1000), 0);
 }
 
 // ------------------------------------------------------------ hiding done

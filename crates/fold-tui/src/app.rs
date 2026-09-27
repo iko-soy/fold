@@ -500,8 +500,15 @@ impl App {
     /// another program wrote, added or removed, or a new sync-conflict copy.
     /// An unreadable vault counts: the reload says why.
     fn outside_change(&self) -> bool {
+        self.new_conflict_copy() || self.vault.changed_on_disk().unwrap_or(true)
+    }
+
+    /// Whether a sync-conflict copy is in the vault that was not at the
+    /// last reload (§11.2): one the merge left alone stays, and is not
+    /// merged again on every change after it.
+    fn new_conflict_copy(&self) -> bool {
         let copies = self.vault.conflict_files().unwrap_or_default();
-        copies.iter().any(|c| !self.conflict_copies.contains(c)) || self.vault.changed_on_disk().unwrap_or(true)
+        copies.iter().any(|c| !self.conflict_copies.contains(c))
     }
 
     /// Reload after an external change (§11.2): editor saves first, then
@@ -531,13 +538,19 @@ impl App {
         // vault, then may close the editor, which reads the outline, before
         // the reload is over
         self.anchor_zoom();
-        // sync-conflict files start the merge flow (§11.2)
-        match self.vault.conflict_files() {
-            Ok(files) if !files.is_empty() => self.merge_conflict_files("merged"),
-            _ => match self.vault.reload() {
+        // a new sync-conflict file starts the merge flow (§11.2); what it
+        // took in without a pair is said as any change is, from the vault
+        // as the merge found it: typing saved first is not part of it
+        if self.new_conflict_copy() {
+            let was = tops(&self.vault);
+            if !self.merge_conflict_files() {
+                self.say(changed_outside(&was, &tops(&self.vault)));
+            }
+        } else {
+            match self.vault.reload() {
                 Ok(()) => self.say(changed_outside(&before, &after.unwrap_or_else(|_| tops(&self.vault)))),
                 Err(e) => self.say(format!("reload error: {}", e)),
-            },
+            }
         }
         if !saved.is_empty() {
             self.say(format!("{} · {}", self.status, saved));
@@ -577,17 +590,18 @@ impl App {
     /// stays, so it must not reopen the view on every reload; nor must
     /// pairs lived with (§12.5). New pairs never take the screen from a
     /// busy user (§10.7): the view opens on them once the outline is at
-    /// rest, at once if it is, and an open view stays on its pair.
-    fn merge_conflict_files(&mut self, what: &str) {
+    /// rest, at once if it is, and an open view stays on its pair. True
+    /// when it said something: the pairs raised, or why it failed; what a
+    /// merge without pairs took in is the caller's to say.
+    fn merge_conflict_files(&mut self) -> bool {
         let before = self.conflict_blocks();
         let shown = before.get(self.conflict_idx).cloned().filter(|_| self.mode == Mode::Conflict);
         match fold_core::merge::merge_sync_conflicts(&mut self.vault, false) {
-            Ok(outcomes) => {
-                self.say(format!("{}: {}", what, outcomes.join("; ")));
+            Ok(_) => {
                 let blocks = self.conflict_blocks();
                 let raised: Vec<NodeKey> = blocks.iter().filter(|b| !before.contains(b)).cloned().collect();
                 if raised.is_empty() {
-                    return;
+                    return false;
                 }
                 if self.mode == Mode::Conflict {
                     // the pair on screen stays there; a view that showed
@@ -597,7 +611,7 @@ impl App {
                         None => self.conflict_opened = Some(Instant::now()),
                     }
                     self.say(self.conflict_news(&self.pairs_among(&raised)));
-                    return;
+                    return true;
                 }
                 self.conflicts_waiting.extend(raised);
                 if !self.open_waiting_conflicts() {
@@ -606,6 +620,23 @@ impl App {
                 }
             }
             Err(e) => self.say(format!("merge error: {}", e)),
+        }
+        true
+    }
+
+    /// The startup scan (§12.2): a sync-conflict file present at startup
+    /// starts the merge flow. What it took in without a pair is said as a
+    /// reload says it (§11.2); a copy it left alone leaves the greeting be.
+    pub fn merge_on_startup(&mut self) {
+        if !self.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
+            return;
+        }
+        let was = tops(&self.vault);
+        if !self.merge_conflict_files() {
+            let now = tops(&self.vault);
+            if was.iter().map(|t| (&t.key, t.text)).ne(now.iter().map(|t| (&t.key, t.text))) {
+                self.say(changed_outside(&was, &now));
+            }
         }
     }
 
@@ -3247,10 +3278,7 @@ pub fn run(dir: &Path, keys: Option<&str>) -> anyhow::Result<()> {
         app.apply_view(v, keys_chosen);
     }
     app.start_watcher();
-    // a sync-conflict file present at startup starts the merge flow (§12.2)
-    if app.vault.conflict_files().is_ok_and(|files| !files.is_empty()) {
-        app.merge_conflict_files("merged on startup");
-    }
+    app.merge_on_startup();
     let stop = stop_signals()?;
     let screen = Screen::enter()?;
     // a panic is caught here once its message is out (`Screen`), so the

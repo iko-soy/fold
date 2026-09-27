@@ -1217,7 +1217,9 @@ nothing.
 - A changed file with a built-in edit in progress: the editor saves its dirty blocks first;
   a block whose span hash no longer matches is merged two-way (§5.2 step 5), then the file
   is re-parsed and the buffer re-rendered around the cursor.
-- A new `*.sync-conflict-*.md` file starts the merge flow (§12).
+- A new `*.sync-conflict-*.md` file starts the merge flow (§12). What it merges without a
+  pair is said as above, at startup too; a copy it leaves alone is not merged again at each
+  later change.
 - A deleted file that was a block marks its embed broken; nothing is written.
 - Editing the same vault in Helix at the same time is a supported workflow.
 
