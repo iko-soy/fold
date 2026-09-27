@@ -11,8 +11,17 @@ use std::time::{Duration, Instant};
 
 impl App {
     pub fn handle_mouse(&mut self, m: MouseEvent) {
-        // a pointer only passing over is no use of it (§10.7)
-        if m.kind != MouseEventKind::Moved {
+        // a pointer only passing over is no use of it (§10.7); nor is the
+        // button let go after a click, or wobbled while down: that is the
+        // click, not one since what it said (§10.1). A drag's moves and
+        // release are.
+        let dragging = self.ui.press.is_some_and(|p| p.dragging) || self.ui.resizing;
+        let used = match m.kind {
+            MouseEventKind::Moved => false,
+            MouseEventKind::Drag(_) | MouseEventKind::Up(_) => dragging,
+            _ => true,
+        };
+        if used {
             self.last_input = Some(Instant::now());
         }
         let held = match m.kind {

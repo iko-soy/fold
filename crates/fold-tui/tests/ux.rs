@@ -2113,6 +2113,57 @@ fn a_message_no_key_came_after_stays_until_one_does() {
 }
 
 #[test]
+fn a_message_a_click_said_stays_through_the_click_s_own_release() {
+    // the button let go, or a wobble while it is down, is the click that
+    // said it, not a click since; a drag's release ends the drag, and
+    // what the drag said on its way goes as before
+    let at = |kind, (column, row)| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+    let (down, drag, up) = (
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    );
+    let on = |app: &mut App, title: &str, hit: fn(usize) -> Hit| {
+        draw(app);
+        let i = app.rows().iter().position(|r| app.title_of(r.nref) == title).unwrap();
+        app.hit_pos(hit(i)).unwrap()
+    };
+    // rack's ☐, clicked
+    let d1 = vault(SAMPLE);
+    let mut clicked = App::new(d1.path()).unwrap();
+    let p = on(&mut clicked, "rack", Hit::Check);
+    clicked.handle_mouse(at(down, p));
+    clicked.handle_mouse(at(up, p));
+    assert_eq!(said(&mut clicked), "done: “rack”");
+    // Review PR's, with the pointer a cell off by the time it is let go
+    let d2 = vault(SAMPLE);
+    let mut wobbled = App::new(d2.path()).unwrap();
+    let p = on(&mut wobbled, "Review PR", Hit::Check);
+    wobbled.handle_mouse(at(down, p));
+    wobbled.handle_mouse(at(drag, (p.0 + 1, p.1)));
+    wobbled.handle_mouse(at(up, (p.0 + 1, p.1)));
+    assert_eq!(said(&mut wobbled), "done: “Review PR”");
+    // NAS dragged along its own row and let go there
+    let d3 = vault(SAMPLE);
+    let mut dragged = App::new(d3.path()).unwrap();
+    let p = on(&mut dragged, "NAS", Hit::Row);
+    let over = (p.0 + 5, p.1);
+    dragged.handle_mouse(at(down, p));
+    dragged.handle_mouse(at(drag, over));
+    dragged.handle_mouse(at(up, over));
+    assert!(said(&mut dragged).starts_with("moving “NAS”"), "{}", said(&mut dragged));
+    std::thread::sleep(Duration::from_millis(5100));
+    assert_eq!(said(&mut clicked), "done: “rack”");
+    assert_eq!(said(&mut wobbled), "done: “Review PR”");
+    assert_eq!(said(&mut dragged), OUTLINE_KEYS);
+    // the next click is one since
+    let p = on(&mut clicked, "NAS", Hit::Row);
+    clicked.handle_mouse(at(down, p));
+    clicked.handle_mouse(at(up, p));
+    assert_eq!(said(&mut clicked), OUTLINE_KEYS);
+}
+
+#[test]
 fn an_error_or_refusal_stays_until_the_next_key_after_it_was_read() {
     let d = vault(SAMPLE);
     let mut app = App::new(d.path()).unwrap();
