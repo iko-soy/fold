@@ -2819,6 +2819,7 @@ impl App {
             x,
             y,
             sel: 0,
+            top: 0,
         });
     }
 

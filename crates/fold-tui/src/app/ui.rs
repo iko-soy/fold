@@ -76,15 +76,17 @@ pub enum Hit {
     PropDelete(usize),
 }
 
-/// The node menu: which node, where, and the highlighted item. The node is
-/// kept by its key (§3.4), since files can change under an open menu — a
-/// reload, an editor save — and renumber every node (§11.2).
+/// The node menu: which node, where, the highlighted item and the first
+/// row shown on a screen too short for it. The node is kept by its key
+/// (§3.4), since files can change under an open menu — a reload, an
+/// editor save — and renumber every node (§11.2).
 #[derive(Debug, Clone)]
 pub struct Menu {
     pub target: NodeKey,
     pub x: u16,
     pub y: u16,
     pub sel: usize,
+    pub top: usize,
 }
 
 /// The left button is down: where it went down, on which outline row, and
@@ -1193,8 +1195,15 @@ impl App {
             return;
         };
         let items = self.menu_items();
+        // on a screen too short for it the separators go first, then the
+        // list scrolls with the selection (§10.1)
+        let shown: Vec<usize> = if items.len() + 2 > screen.height as usize {
+            (0..items.len()).filter(|&i| items[i].is_some()).collect()
+        } else {
+            (0..items.len()).collect()
+        };
         let w: u16 = 28;
-        let h = items.len() as u16 + 2;
+        let h = (shown.len() as u16 + 2).min(screen.height);
         let x = menu.x.min(screen.x + screen.width.saturating_sub(w));
         let y = if menu.y + h > screen.y + screen.height { screen.y + screen.height.saturating_sub(h) } else { menu.y };
         let r = Rect { x, y, width: w, height: h }.intersection(screen);
@@ -1204,11 +1213,15 @@ impl App {
         let block = rounded(Line::from(Span::styled(format!(" {} ", fit(&title, 20)), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
         f.render_widget(block, r);
-        for (i, item) in items.iter().enumerate() {
-            let yy = inner.y + i as u16;
-            if yy >= inner.y + inner.height {
-                break;
-            }
+        let view = inner.height as usize;
+        let mut top = menu.top;
+        follow(&mut top, shown.iter().position(|&i| i == menu.sel).unwrap_or(0), true, view, shown.len());
+        if let Some(m) = self.ui.menu.as_mut() {
+            m.top = top;
+        }
+        for (at, &i) in shown.iter().enumerate().skip(top).take(view) {
+            let item = &items[i];
+            let yy = inner.y + (at - top) as u16;
             let row = Rect { x: inner.x, y: yy, width: inner.width, height: 1 };
             let buf = f.buffer_mut();
             match item {

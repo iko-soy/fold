@@ -939,7 +939,8 @@ never held back.
 Heading ↔ bullet · Make block | Move up · Move down · Indent · Outdent · Move to… · Archive |
 Copy · Paste after · Paste before · Delete*, and on either side of a conflict pair, last,
 *Resolve conflict…*: the conflict view at that pair. Hovering highlights an item; a click
-runs it.
+runs it. On a screen too short for it the separators go first, then the list scrolls with
+the selection.
 
 **Pickers instead of typing.** Where an action needs a node — *Move to…*, *Go to…* — the
 prompt is a list of every node, title first and path dimmed, narrowed as you type (title

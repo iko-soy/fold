@@ -1092,6 +1092,50 @@ fn resolve_conflict_in_the_node_menu_of_either_side_opens_its_pair() {
     assert!(s.contains("Move to…") && !s.contains("Resolve conflict"), "{}", s);
 }
 
+/// Draw a frame on a `w`×`h` terminal: the screen as cells.
+fn frame_at(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| app.draw(f)).unwrap();
+    t.backend().buffer().clone()
+}
+
+#[test]
+fn the_node_menu_of_a_pair_fits_a_short_terminal_resolve_conflict_and_all() {
+    let (_d, mut app) = lab();
+    // 80×24: the separators give way, every item shows and a click runs it
+    select(&mut app, "NAS");
+    press(&mut app, "m");
+    let b = frame_at(&mut app, 80, 24);
+    for item in ["│ Edit ", "│ Delete ", "│ Resolve conflict…"] {
+        assert!(find(&b, item).is_some(), "no {}:\n{}", item, text(&b));
+    }
+    let (x, y) = find(&b, "Resolve conflict…").unwrap();
+    click_at(&mut app, x, y, MouseButton::Left);
+    assert_eq!(pair_shown(&mut app), "NAS");
+    app.handle_key(key(KeyCode::Esc));
+    // shorter still, the list scrolls with the selection, down to the last
+    // item and back up to the first
+    press(&mut app, "m");
+    let b = frame_at(&mut app, 80, 14);
+    assert!(find(&b, "│ Edit ").is_some() && find(&b, "Resolve conflict…").is_none(), "{}", text(&b));
+    for _ in 0..30 {
+        app.handle_key(key(KeyCode::Down));
+        frame_at(&mut app, 80, 14);
+    }
+    let b = frame_at(&mut app, 80, 14);
+    assert!(find(&b, "Resolve conflict…").is_some() && find(&b, "│ Edit ").is_none(), "{}", text(&b));
+    for _ in 0..30 {
+        app.handle_key(key(KeyCode::Up));
+        frame_at(&mut app, 80, 14);
+    }
+    assert!(find(&frame_at(&mut app, 80, 14), "│ Edit ").is_some());
+    for _ in 0..30 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(pair_shown(&mut app), "NAS");
+}
+
 #[test]
 fn the_reading_pane_marks_a_conflict_copy_s_title_line() {
     let (_d, mut app) = lab();
