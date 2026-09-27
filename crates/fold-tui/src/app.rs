@@ -1600,6 +1600,8 @@ impl App {
         }
         self.settle_undo();
         let cursor = self.current().map(|r| self.vault.key_of(r));
+        // an open property form's node too: its OK saves the editor first
+        let props = self.props_target.filter(|_| self.mode == Mode::Props).map(|t| self.vault.key_of(t));
         let on_editor = self.anchor_zoom_for_save();
         // the editor saves where it is: a panic in the save leaves its text
         // for `keep_unsaved` to keep (§10.6)
@@ -1621,9 +1623,13 @@ impl App {
         // blocks written before a refusal are an op too
         self.record_edit(snap);
         // the save re-parsed what it wrote: the outline cursor stays on its
-        // node, so a verb that saves the editor first acts on the row clicked
+        // node, so a verb that saves the editor first acts on the row
+        // clicked, and the property form on its own
         if let Some(r) = cursor.and_then(|k| self.find_exact(&k)) {
             self.move_cursor_to(r);
+        }
+        if let Some(k) = props {
+            self.props_target = self.find_exact(&k);
         }
         let saved = match res {
             Ok(_) => true,
@@ -1867,18 +1873,23 @@ impl App {
 
     fn delete_prop(&mut self, i: usize) {
         let Some((k, _, editable)) = self.props_rows.get(i).cloned() else { return };
-        let Some(t) = self.props_target else { return };
+        if self.props_target.is_none() {
+            return;
+        }
         if !editable {
             self.say("read-only line (preserved verbatim)");
             return;
         }
         let edit = self.editor_before_write("outline verb");
-        self.push_undo(&format!("remove {} from {}", k, self.named(t)));
-        match ops::set_frontmatter_key(&mut self.vault, t.0, &k, None) {
-            Ok(()) => self.say(format!("{} removed", k)),
-            Err(e) => self.say(format!("error: {}", e)),
+        // the save may renumber the form's node, and finds it again
+        if let Some(t) = self.props_target {
+            self.push_undo(&format!("remove {} from {}", k, self.named(t)));
+            match ops::set_frontmatter_key(&mut self.vault, t.0, &k, None) {
+                Ok(()) => self.say(format!("{} removed", k)),
+                Err(e) => self.say(format!("error: {}", e)),
+            }
+            self.reopen_props();
         }
-        self.reopen_props();
         self.editor_after_write(edit);
     }
 
@@ -2015,11 +2026,19 @@ impl App {
     }
 
     /// Accept a prompt as an outline verb: the editor saves first and is
-    /// re-rendered after (§10.6).
+    /// re-rendered after (§10.6). One that writes nothing, as *Go to…*, or
+    /// only opens the next prompt, saves it as a pause in typing does: a
+    /// block cut in it stays in transit (§5.2).
     fn accept_prompt_saving_editor(&mut self, mut p: Prompt) {
         // the save re-parses what it wrote: the pick is found again by key
         let picked = p.picks.get(p.sel).map(|&r| self.vault.key_of(r));
-        let edit = self.editor_before_write("outline verb");
+        let edit = match p.action {
+            PromptAction::GoTo | PromptAction::PropNew | PromptAction::ReadSearch => {
+                self.save_editor();
+                None
+            }
+            _ => self.editor_before_write("outline verb"),
+        };
         match picked.map(|k| self.find_exact(&k)) {
             Some(None) => self.say("that node is gone"),
             Some(Some(r)) => {
@@ -3232,6 +3251,26 @@ impl App {
             | Action::Wrap
             | Action::RawMode
             | Action::EditorKeys => None,
+            // nor do a copy, a zoom and the node menu, nor what opens a
+            // prompt or the property form, whose OK is the verb
+            // (`accept_prompt_saving_editor`): the editor saves as after a
+            // pause, the copy taking what was typed, and is not
+            // re-rendered, so a block cut in it stays in transit
+            Action::Copy
+            | Action::Zoom
+            | Action::ZoomOut
+            | Action::NodeMenu
+            | Action::GoTo
+            | Action::Refile
+            | Action::Props
+            | Action::PropAdd
+            | Action::Capture
+            | Action::CaptureTask => {
+                self.save_editor();
+                None
+            }
+            // the prompt's OK saves it as Enter does, its pick held by key
+            Action::PromptOk => None,
             _ => self.editor_before_write("outline verb"),
         };
         self.action_target = target.as_ref().and_then(|k| self.find_exact(k));
@@ -3357,7 +3396,7 @@ impl App {
             Action::Close => self.close_top(),
             Action::PromptOk => {
                 if let Some(p) = self.prompt.take() {
-                    self.accept_prompt(p);
+                    self.accept_prompt_saving_editor(p);
                 }
             }
             Action::PropAdd => self.open_prompt("new property", PromptAction::PropNew, String::new()),

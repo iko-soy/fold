@@ -1059,6 +1059,11 @@ app keeps track. Blocks are saved on their own:
   once, unsaved, as the signal would: the way out while a write waits on a terminal that
   reads nothing. A `SIGHUP` before one does not make it a second.
 
+An outline verb that writes re-renders the editor over what it wrote, so the save before it
+deletes a block cut there and not pasted back (§5.2). One that writes nothing — a copy, a
+zoom, help, the palette, the filter, a view toggle, or a prompt or the property form until
+it writes — leaves the editor as it is, a cut block still to paste.
+
 A save shows in the status bar's save state (§10.1), not as a message, but for `:w` and
 `Ctrl-S`, which are asked for and answer *saved*, and one that an outside change forced,
 which the news of what came in mentions first, so that where the bar is short the list

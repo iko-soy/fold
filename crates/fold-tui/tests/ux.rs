@@ -201,6 +201,144 @@ fn help_and_the_view_toggles_from_the_editor_keep_a_cut_block_to_paste() {
     assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
 }
 
+/// Alpha open in the editor with its "task", a block of its own, cut and
+/// a pause after, beside Bravo, a block too: the autosave writes Alpha
+/// without the embed, and the block waits in transit (§5.2). Bravo's file
+/// is listed after the cut block's, so deleting that one renumbers it.
+/// With the two files.
+fn cut_beside_bravo() -> (tempfile::TempDir, App, std::path::PathBuf, std::path::PathBuf) {
+    let d = vault(&format!("# Alpha\n\n- one\n![[{}]]\n- two\n\n# ![[{}]]\n", FIRST, LAST));
+    let block = d.path().join("bacbec~task.md");
+    let bravo = d.path().join("worzod~bravo.md");
+    std::fs::write(&block, format!("---\nid: {}\n---\n\n- task\n", FIRST)).unwrap();
+    std::fs::write(&bravo, format!("---\nid: {}\ntag: old\n---\n\n# Bravo\n\n- bravo one\n- bravo two\n", LAST)).unwrap();
+    let mut app = start(&d);
+    select(&mut app, "Alpha");
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), format!("# Alpha\n\n- one\n- two\n\n# ![[{}]]\n", LAST));
+    assert!(block.exists(), "in transit");
+    (d, app, block, bravo)
+}
+
+/// Run `name` from ☰ Commands.
+fn command(app: &mut App, name: &str) {
+    click_button(app, Action::Palette);
+    press(app, name);
+    app.handle_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn copy_zoom_and_what_opens_a_prompt_from_the_editor_keep_a_cut_block_to_paste() {
+    // §5.2: a copy and a zoom write nothing, nor do a prompt and the
+    // property form before their OK: run from a row's menu, a button, ☰
+    // Commands or a double-click while editing, a block cut in the editor
+    // is still moved once pasted after them
+    let cases = ["Copy", "Zoom in, out", "Properties…", "Move to…", "+ Capture", "Capture task", "Go to…", "double-click"];
+    for how in cases {
+        let (d, mut app, block, _) = cut_beside_bravo();
+        let text = std::fs::read_to_string(&block).unwrap();
+        match how {
+            "Copy" => {
+                right_click(&mut app, "bravo one", Action::Copy);
+                assert!(said(&mut app).starts_with("copied “bravo one”"), "{}", said(&mut app));
+            }
+            "Zoom in, out" => {
+                right_click(&mut app, "Bravo", Action::Zoom);
+                assert!(screen(&mut app).contains("› Bravo"), "{}", screen(&mut app));
+                assert!(block.exists(), "Zoom in deleted the cut block");
+                command(&mut app, "Zoom out");
+                assert!(!screen(&mut app).contains("› Bravo"), "{}", screen(&mut app));
+            }
+            "Properties…" => {
+                right_click(&mut app, "Bravo", Action::Props);
+                assert_eq!(app.mode_pub(), "props");
+                app.handle_key(key(KeyCode::Esc));
+            }
+            "Move to…" => {
+                right_click(&mut app, "bravo one", Action::Refile);
+                press(&mut app, "Alpha");
+                app.handle_key(key(KeyCode::Esc));
+            }
+            "+ Capture" => {
+                click_button(&mut app, Action::Capture);
+                press(&mut app, "milk");
+                app.handle_key(key(KeyCode::Esc));
+            }
+            "Capture task" => {
+                command(&mut app, "Capture task");
+                press(&mut app, "milk");
+                click_button(&mut app, Action::Close);
+            }
+            "Go to…" => {
+                command(&mut app, "Go to");
+                press(&mut app, "bravo two");
+                app.handle_key(key(KeyCode::Enter));
+                assert_eq!(selected(&app), "bravo two");
+            }
+            _ => {
+                let (x, y) = find(&frame(&mut app), "Bravo").unwrap();
+                click_at(&mut app, x, y, MouseButton::Left);
+                click_at(&mut app, x, y, MouseButton::Left);
+                assert!(screen(&mut app).contains("› Bravo"), "{}", screen(&mut app));
+            }
+        }
+        assert!(block.exists(), "{}: the cut block was deleted", how);
+        assert_eq!(app.mode_pub(), "edit", "{}", how);
+        // paste it above "- one"
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(ctrl('v'));
+        app.handle_key(key(KeyCode::Esc));
+        let moved = format!("# Alpha\n\n![[{}]]\n- one\n- two\n\n# ![[{}]]\n", FIRST, LAST);
+        assert_eq!(root(&d), moved, "{}: pasted as plain text", how);
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), text, "{}", how);
+    }
+}
+
+#[test]
+fn a_prompt_or_the_property_form_opened_over_a_cut_block_writes_where_it_was_opened() {
+    // §5.2, §10.6: what writes from a prompt or the property form saves
+    // the editor first, which deletes a block cut there and renumbers the
+    // files after its own, Bravo's here: the pick and the form's node are
+    // found again, and the write goes to Bravo
+    for how in ["Move to… OK", "Add a property", "Delete a property"] {
+        let (d, mut app, block, bravo) = cut_beside_bravo();
+        match how {
+            "Move to… OK" => {
+                right_click(&mut app, "two", Action::Refile);
+                press(&mut app, "Bravo");
+                click_button(&mut app, Action::PromptOk);
+                assert_eq!(root(&d), format!("# Alpha\n\n- one\n\n# ![[{}]]\n", LAST));
+            }
+            "Add a property" => {
+                right_click(&mut app, "Bravo", Action::Props);
+                click_button(&mut app, Action::PropAdd);
+                press(&mut app, "owner");
+                app.handle_key(key(KeyCode::Enter));
+                press(&mut app, "me");
+                app.handle_key(key(KeyCode::Enter));
+            }
+            _ => {
+                right_click(&mut app, "Bravo", Action::Props);
+                press(&mut app, "d");
+            }
+        }
+        assert!(!block.exists(), "{}: the cut block outlived the write", how);
+        let text = std::fs::read_to_string(&bravo).unwrap();
+        let want = match how {
+            "Move to… OK" => format!("---\nid: {}\ntag: old\n---\n\n# Bravo\n\n- bravo one\n- bravo two\n- two\n", LAST),
+            "Add a property" => format!("---\nid: {}\ntag: old\nowner: me\n---\n\n# Bravo\n\n- bravo one\n- bravo two\n", LAST),
+            _ => format!("---\nid: {}\n---\n\n# Bravo\n\n- bravo one\n- bravo two\n", LAST),
+        };
+        assert_eq!(text, want, "{}: {}", how, said(&mut app));
+    }
+}
+
 #[test]
 fn a_change_from_outside_to_a_file_the_editor_does_not_hold_keeps_a_cut_block_to_paste() {
     cut_then_the_phone_writes_the_inbox(false);
