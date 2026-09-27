@@ -1204,7 +1204,11 @@ named in words, by what was done to which node — *mark “rack” done*, *dele
 operation did not touch are never written by undo, so an external edit to them survives.
 A block cut in the editor and not pasted back (§5.2) is trashed in the entry of the save
 that wrote its embed out, even when a later save or *Revert* is what deletes it, so one
-undo puts back its embed and its file together.
+undo puts back its embed and its file together. One pasted back after a save wrote its
+embed out makes that save, the one that writes the embed back and those between one
+entry, so no undo stops where its file is embedded nowhere: one undo puts it back where it
+was. Where a file they touched changed from outside between two of them, they stay apart,
+as undoing them as one would drop that change.
 
 ---
 

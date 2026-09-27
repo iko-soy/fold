@@ -432,6 +432,92 @@ fn a_cut_block_deleted_after_more_saves_or_on_revert_comes_back_embedded_with_th
 }
 
 #[test]
+fn a_cut_block_pasted_back_after_the_autosave_goes_back_where_it_was_with_one_undo() {
+    // the saves from the one that wrote the embed out to the one that
+    // writes it back are one step: no undo stops between them, where the
+    // block's file is embedded nowhere (§5.2, §10.10)
+    for how in ["leave", "autosave", "typing"] {
+        let (d, mut app, block, embedded) = cut_and_paused();
+        let text = std::fs::read_to_string(&block).unwrap();
+        let embed = embedded.lines().nth(3).unwrap().to_string();
+        let mut moved = format!("# A\n\n{}\n- one\n- two\n", embed);
+        if how == "typing" {
+            app.handle_key(key(KeyCode::End));
+            press(&mut app, " more");
+            idle(&mut app, 1000);
+            assert_eq!(root(&d), "# A\n\n- one\n- two more\n");
+            moved = moved.replace("- two", "- two more");
+        }
+        // the cut line goes back above "one"
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(ctrl('v'));
+        if how == "autosave" {
+            idle(&mut app, 1000);
+            assert_eq!(root(&d), moved);
+        }
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode_pub(), "normal", "{}", how);
+        assert_eq!(root(&d), moved, "{}", how);
+        press(&mut app, "u");
+        assert_eq!(said(&mut app), "undone: edit “A”", "{}", how);
+        assert_eq!(root(&d), embedded, "{}: undo left the block's file embedded nowhere", how);
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), text, "{}", how);
+        // redo moves it again, as one step
+        press(&mut app, "U");
+        assert_eq!(root(&d), moved, "{}", how);
+        assert!(block.exists(), "{}", how);
+    }
+    // pasted back where it was: nothing changed, so nothing to undo
+    let (d, mut app, block, embedded) = cut_and_paused();
+    app.handle_key(ctrl('v'));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(root(&d), embedded);
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "nothing to undo");
+    assert_eq!(root(&d), embedded);
+    assert!(block.exists());
+}
+
+#[test]
+fn a_cut_block_pasted_back_where_a_save_is_refused_first_still_goes_back_with_one_undo() {
+    // pasted above "  - sub", which would nest under its embed: the save
+    // is refused (§4.7) until the line is outdented, and the block waits
+    // with its line back and its embed not written (§5.2, §10.10)
+    let d = vault("# A\n\n- one\n  - sub\n- task\n- two\n");
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    drop(v);
+    let embed = format!("![[{}]]", id.as_str());
+    let embedded = format!("# A\n\n- one\n  - sub\n{}\n- two\n", embed);
+    assert_eq!(root(&d), embedded);
+    let mut app = start(&d);
+    app.set_edit_keys(EditKeys::Normal);
+    app.handle_key(key(KeyCode::Char('e')));
+    for _ in 0..4 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(ctrl('k'));
+    idle(&mut app, 1000);
+    assert_eq!(root(&d), "# A\n\n- one\n  - sub\n- two\n");
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(ctrl('v'));
+    idle(&mut app, 1000);
+    assert!(said(&mut app).contains("not saved"), "{}", said(&mut app));
+    assert_eq!(root(&d), "# A\n\n- one\n  - sub\n- two\n");
+    // "  - sub", under the cursor, outdented, and the save goes through
+    app.handle_key(key(KeyCode::BackTab));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    assert_eq!(root(&d), format!("# A\n\n- one\n{}\n- sub\n- two\n", embed));
+    press(&mut app, "u");
+    assert_eq!(said(&mut app), "undone: edit “A”");
+    assert_eq!(root(&d), embedded, "undo left the block's file embedded nowhere");
+    assert!(block.exists());
+}
+
+#[test]
 fn a_change_from_outside_is_taken_in_and_announced() {
     let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
     let mut app = start(&d);

@@ -140,7 +140,9 @@ pub struct App {
     /// The file of each block an editor save left in transit (§5.2): its
     /// title line cut, the block it was in written without its embed. With
     /// the op-log entry of that save, by the length of `undo` once it was
-    /// in: the save that deletes the block puts the deletion there.
+    /// in: the save that deletes the block puts the deletion there, and
+    /// the one that writes its embed back makes the entries from there to
+    /// its own one.
     edit_transit: Vec<(String, usize)>,
     /// Every editor save panics where it writes: for tests of what fold
     /// keeps when it crashes (`panic_in_saves`).
@@ -2659,10 +2661,14 @@ impl App {
     /// earlier save left in transit (§5.2) and this one deletes is deleted
     /// in the entry of that save, which wrote its embed out, so one undo
     /// puts back its file and its embed together, never the file embedded
-    /// nowhere (§10.10). The blocks this save leaves in transit are
-    /// remembered with its entry.
+    /// nowhere (§10.10). One this save pastes back, writing its embed
+    /// again, makes that save, this one and those between one entry, so
+    /// no undo stops where its file is embedded nowhere either. The blocks
+    /// this save leaves in transit are remembered with its entry, until
+    /// their file is deleted or embedded again.
     fn record_edit(&mut self, snap: ops::Snapshot) {
-        let len = self.undo.len();
+        // the length of `undo` once this save's entry is in, if it has one
+        let mut at = None;
         if let Some(mut inv) = ops::Inverse::since(snap, &self.vault) {
             let (transit, undo) = (&self.edit_transit, &mut self.undo);
             inv.changes.retain(|c| {
@@ -2677,19 +2683,69 @@ impl App {
             });
             if !inv.changes.is_empty() {
                 self.undo.push(inv);
+                at = Some(self.undo.len());
             }
             self.redo.clear();
             self.mark_self_write();
         }
-        let now = self.transit_files();
-        self.edit_transit.retain(|(p, _)| now.contains(p));
-        if self.undo.len() > len {
-            for p in now {
+        // pasted back: joined from the earliest save that wrote out the
+        // embed of a block embedded again now
+        let mut back: Vec<usize> =
+            self.edit_transit.iter().filter(|(p, _)| self.embedded(p) == Some(true)).map(|&(_, n)| n).collect();
+        back.sort_unstable();
+        if let Some(n) = back.into_iter().find(|&n| n > 0 && self.join_undo(n - 1)) {
+            // the entries from `n - 1` on are the one at `n - 1` now, if any
+            let joined = self.undo.len() == n;
+            at = at.and(joined.then_some(n));
+            self.edit_transit.retain_mut(|(_, m)| {
+                *m = (*m).min(n);
+                *m < n || joined
+            });
+        }
+        // still in transit, or pasted back with its embed not written yet
+        let open = self.editor.is_some();
+        let transit = std::mem::take(&mut self.edit_transit);
+        self.edit_transit = transit.into_iter().filter(|(p, _)| open && self.embedded(p) == Some(false)).collect();
+        if let Some(n) = at {
+            for p in self.transit_files() {
                 if !self.edit_transit.iter().any(|(q, _)| *q == p) {
-                    self.edit_transit.push((p, self.undo.len()));
+                    self.edit_transit.push((p, n));
                 }
             }
         }
+    }
+
+    /// Whether the block whose file is `path` is embedded now; `None`
+    /// where the file is gone.
+    fn embedded(&self, path: &str) -> Option<bool> {
+        let tree = &self.vault.tree;
+        let f = self.vault.file_index(path)?;
+        let (_, id) = tree.blocks.iter().find(|(r, _)| r.0 == f)?;
+        Some(tree.embed_of(id).is_some())
+    }
+
+    /// Make the op-log entries from `from` on one (§10.10): for each file,
+    /// its text before the first and after the last; one that ends as it
+    /// began is left out, and an entry left with none is dropped. False,
+    /// with the entries as they were, where a file changed from outside
+    /// between two of them: undoing them as one would drop that change.
+    fn join_undo(&mut self, from: usize) -> bool {
+        let Some(first) = self.undo.get(from) else { return false };
+        let description = first.description.clone();
+        let mut changes: Vec<ops::Change> = Vec::new();
+        for c in self.undo[from..].iter().flat_map(|e| &e.changes) {
+            match changes.iter_mut().find(|x| x.path == c.path) {
+                Some(x) if x.after == c.before => x.after = c.after.clone(),
+                Some(_) => return false,
+                None => changes.push(c.clone()),
+            }
+        }
+        changes.retain(|c| c.before != c.after);
+        self.undo.truncate(from);
+        if !changes.is_empty() {
+            self.undo.push(ops::Inverse { changes, description });
+        }
+        true
     }
 
     /// The files of the blocks the open editor holds in transit (§5.2):
