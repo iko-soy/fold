@@ -142,6 +142,9 @@ pub struct App {
     /// the op-log entry of that save, by the length of `undo` once it was
     /// in: the save that deletes the block puts the deletion there.
     edit_transit: Vec<(String, usize)>,
+    /// Every editor save panics where it writes: for tests of what fold
+    /// keeps when it crashes (`panic_in_saves`).
+    save_panics: bool,
     // property editor (§10.6)
     props_target: Option<NRef>,
     props_rows: Vec<(String, String, bool)>,
@@ -260,6 +263,7 @@ impl App {
             edit_refused: false,
             edit_uncopied: None,
             edit_transit: Vec::new(),
+            save_panics: false,
             props_target: None,
             props_rows: Vec::new(),
             props_sel: 0,
@@ -1504,18 +1508,22 @@ impl App {
         self.settle_undo();
         let cursor = self.current().map(|r| self.vault.key_of(r));
         let on_editor = self.anchor_zoom_for_save();
-        let Some(mut ed) = self.editor.take() else { return true };
+        // the editor saves where it is: a panic in the save leaves its text
+        // for `keep_unsaved` to keep (§10.6)
+        let Some(ed) = self.editor.as_mut() else { return true };
         // what another program changed beside the edited blocks is taken in
         // before the snapshot, so undoing this save leaves it be
         ed.buf.rebase_dirty(&mut self.vault);
-        let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(&ed, None)));
+        let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(ed, None)));
+        if self.save_panics {
+            panic!("the editor's save panicked");
+        }
         let mut res = ed.buf.save_all(&mut self.vault);
         if let Some(n) = res.as_ref().ok().copied().filter(|_| release) {
             ed.release_clip();
             // the block that held the embed is written again: counted once
             res = ed.buf.save_all(&mut self.vault).map(|m| m.max(n));
         }
-        self.editor = Some(ed);
         self.settle_zoom_after_save(on_editor);
         // blocks written before a refusal are an op too
         self.record_edit(snap);
@@ -1689,11 +1697,14 @@ impl App {
         if before != after && self.editor.as_ref().is_some_and(|e| e.buf.dirty.contains(&before)) {
             self.settle_undo();
             let on_editor = self.anchor_zoom_for_save();
-            let mut ed = self.editor.take().unwrap();
+            // saved where it is, as in `write_editor`
+            let ed = self.editor.as_mut().unwrap();
             ed.buf.rebase_dirty(&mut self.vault);
-            let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(&ed, Some(&before))));
+            let snap = ops::Snapshot::take(&self.vault, &format!("edit {}", edited(ed, Some(&before))));
+            if self.save_panics {
+                panic!("the editor's save panicked");
+            }
             let res = ed.buf.splice(&mut self.vault, before);
-            self.editor = Some(ed);
             self.settle_zoom_after_save(on_editor);
             if res.is_ok() {
                 self.record_edit(snap);
@@ -2275,6 +2286,14 @@ impl App {
             Ok(p) => format!("unsaved text kept in {}", p.display()),
             Err(e) => format!("unsaved text could not go to the trash ({}); here it is:\n\n{}", e, text),
         })
+    }
+
+    /// Make every editor save panic where it writes, as a bug in the splice
+    /// would at every pause: for tests of what fold keeps when it crashes
+    /// (§10.6).
+    #[doc(hidden)]
+    pub fn panic_in_saves(&mut self) {
+        self.save_panics = true;
     }
 
     /// The editor's whole text, and the name the trash keeps it under:

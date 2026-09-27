@@ -992,6 +992,55 @@ fn ending_fold_with_text_a_save_was_refused_for_keeps_it_in_the_trash() {
     assert_eq!(root(&d), "# Scrub cadence\n\n- monthly, from the phone\n- [ ] scrub now\n");
 }
 
+#[test]
+fn a_panic_in_the_autosave_keeps_the_editor_s_text_in_the_trash() {
+    // a bug that panics where the editor saves (§10.6): `run` catches it,
+    // and the text the save was writing is kept as on any other end
+    let d = vault("# Snapshot rotation\n\nkeep 24\n");
+    let kept = kept("snapshot-rotation");
+    let mut app = typing(&d, " hourly");
+    app.panic_in_saves();
+    std::thread::sleep(Duration::from_millis(800));
+    let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.tick()));
+    assert!(tick.is_err(), "the autosave did not panic");
+    let words = app.keep_unsaved().expect("nothing kept");
+    let copies = kept();
+    assert_eq!(copies.len(), 1, "{:?}", copies);
+    assert_eq!(words, format!("unsaved text kept in {}", copies[0].display()));
+    assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "# Snapshot rotation hourly\n\nkeep 24\n");
+    assert_eq!(root(&d), "# Snapshot rotation\n\nkeep 24\n");
+}
+
+#[test]
+fn a_panic_in_the_save_on_leaving_a_block_keeps_the_editor_s_text_in_the_trash() {
+    // moving to another block saves the one left (§10.6): the same
+    let d = vault("# Scrub plan\n\n- one\n- task\n- two\n");
+    let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
+    let t = v.find_by_path(&["Scrub plan".into(), "task".into()]).unwrap();
+    let id = fold_core::ops::make_block(&mut v, t).unwrap();
+    let block = v.dir.join(&v.tree.files[v.tree.block_by_id(&id).unwrap().0].path);
+    let before = std::fs::read_to_string(&block).unwrap();
+    drop(v);
+    let kept = kept("scrub-plan");
+    let mut app = App::new(d.path()).unwrap();
+    app.set_edit_keys(EditKeys::Normal);
+    press(&mut app, "e");
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.handle_key(key(KeyCode::End));
+    press(&mut app, " weekly");
+    app.panic_in_saves();
+    let up = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.handle_key(key(KeyCode::Up))));
+    assert!(up.is_err(), "leaving the block did not save it");
+    let words = app.keep_unsaved().expect("nothing kept");
+    let copies = kept();
+    assert_eq!(copies.len(), 1, "{:?}", copies);
+    assert_eq!(words, format!("unsaved text kept in {}", copies[0].display()));
+    assert_eq!(std::fs::read_to_string(&copies[0]).unwrap(), "# Scrub plan\n\n- one\n- task weekly\n- two\n");
+    assert_eq!(std::fs::read_to_string(&block).unwrap(), before);
+}
+
 /// Run the test named `test` again in a process of its own, with a trash
 /// nothing can be written to: a plain file where its directory would be
 /// (§11.5). The trash is the process's, where `$XDG_STATE_HOME` says, so
