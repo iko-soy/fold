@@ -216,6 +216,8 @@ struct Tty {
     script: std::process::Child,
     keys: std::process::ChildStdin,
     out: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// reads what script passes on; done once script closes its output
+    reader: std::thread::JoinHandle<()>,
     pid: u32,
 }
 
@@ -265,7 +267,7 @@ impl Tty {
         let mut stdout = script.stdout.take().unwrap();
         let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = out.clone();
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             let mut buf = [0; 4096];
             while let Ok(n @ 1..) = stdout.read(&mut buf) {
                 sink.lock().unwrap().extend_from_slice(&buf[..n]);
@@ -277,7 +279,7 @@ impl Tty {
             eprintln!("skipped: script(1) ran no shell");
             return None;
         };
-        Some(Tty { script, keys, out, pid })
+        Some(Tty { script, keys, out, reader, pid })
     }
 
     fn output(&self) -> String {
@@ -307,15 +309,19 @@ impl Tty {
         std::process::Command::new("kill").args(["-s", sig, &pid]).status().unwrap();
     }
 
-    /// Whether fold is gone within 10 s (reaped, or a zombie no one reaps).
+    /// Whether fold has exited: reaped, or a zombie no one has reaped yet.
+    fn exited(&self) -> bool {
+        let s = std::fs::read_to_string(format!("/proc/{}/stat", self.pid)).unwrap_or_default();
+        let state = s.rsplit(") ").next().and_then(|r| r.chars().next());
+        matches!(state, None | Some('Z'))
+    }
+
+    /// Whether fold is gone within 10 s (reaped, or a zombie no one reaps)
+    /// and all it wrote has come through: its last bytes can wait in the
+    /// terminal after it exits, until script passes them on and closes its
+    /// output.
     fn ended(&self) -> bool {
-        let stat = format!("/proc/{}/stat", self.pid);
-        until(|| {
-            let s = std::fs::read_to_string(&stat).unwrap_or_default();
-            let state = s.rsplit(") ").next().and_then(|r| r.chars().next());
-            matches!(state, None | Some('Z')).then_some(())
-        })
-        .is_some()
+        until(|| (self.exited() && self.reader.is_finished()).then_some(())).is_some()
     }
 
     /// Open the editor on the first node, and paste ` MYTEXT` at the end of
@@ -394,6 +400,31 @@ fn a_signal_keeps_text_a_save_was_refused_for_in_the_trash_and_says_where() {
     assert!(path.starts_with(&state.path().join("fold").join("trash").display().to_string()), "{}", path);
     assert!(path.ends_with("-unsaved-snapshot-policy.md"), "{}", path);
     assert_eq!(std::fs::read_to_string(path).unwrap(), "# Snapshot policy MYTEXT\n\nkeep 24\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_signal_puts_the_terminal_back_though_script_passes_it_on_late() {
+    let (vault, state) = vault_and_state("# Snapshot policy\n\nkeep 24\n");
+    let Some(mut tty) = Tty::start(vault.path(), state.path()) else { return };
+    tty.edit();
+    // script(1) falls behind, as on a busy machine: fold's last bytes are
+    // still in the terminal when fold has gone
+    let script = tty.script.id().to_string();
+    let to_script = |sig: &str| {
+        std::process::Command::new("kill").args(["-s", sig, &script]).status().unwrap();
+    };
+    to_script("STOP");
+    tty.signal("TERM");
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            until(|| tty.exited().then_some(()));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            to_script("CONT");
+        });
+        assert!(tty.ended(), "fold still runs");
+        assert!(put_back(&tty.output()).is_some(), "terminal left as fold had it:\n{}", tty.tail());
+    });
 }
 
 #[test]
