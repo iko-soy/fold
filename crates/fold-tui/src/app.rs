@@ -993,7 +993,7 @@ impl App {
         let Some(r) = self.subject() else { return };
         let Some((words, step)) = self.done_words(r) else {
             // nothing changes, and nothing is left to undo
-            self.say(format!("{} isn't a task · t makes it one", self.named(r)));
+            self.say(self.not_a_task(r));
             return;
         };
         self.push_undo(&step);
@@ -1006,6 +1006,22 @@ impl App {
                 self.refresh_after(&words);
             }
             Err(e) => self.say(format!("error: {}", e)),
+        }
+    }
+
+    /// What `x` says on `r`, a node that is no task (§10.1).
+    fn not_a_task(&self, r: NRef) -> String {
+        format!("{} isn't a task · {}", self.named(r), self.next_step(Action::ToggleTask, "makes it one"))
+    }
+
+    /// The next step a verb's message names (§10.1): `a`'s key and what it
+    /// does. The reading pane's keys are its own (§10.4), and Tab, then
+    /// the key, would act on the outline's selection: there, the step is
+    /// the menu of the line's node.
+    fn next_step(&self, a: Action, does: &str) -> String {
+        match a.key() {
+            Some(k) if self.focus != Focus::Reading => format!("{} {}", k, does),
+            _ => format!("m, then choose {}", a.label()),
         }
     }
 
@@ -1097,12 +1113,12 @@ impl App {
     fn act_yank(&mut self) {
         let Some(r) = self.subject() else { return };
         self.copy(r);
-        self.say(format!("copied {} · p pastes", self.copied.0));
+        self.say(format!("copied {} · {}", self.copied.0, self.next_step(Action::PasteAfter, "pastes")));
     }
 
     fn act_paste(&mut self, after: bool) {
         if self.register.is_empty() {
-            self.say("nothing copied yet · y copies a node");
+            self.say(format!("nothing copied yet · {}", self.next_step(Action::Copy, "copies a node")));
             return;
         }
         let Some(r) = self.subject() else { return };
@@ -2824,7 +2840,7 @@ impl App {
     /// cursor, and say which by name as `x` in the outline does.
     fn toggle_read_task(&mut self, r: NRef) {
         let Some((words, step)) = self.done_words(r) else {
-            self.say(format!("{} isn't a task", self.named(r)));
+            self.say(self.not_a_task(r));
             return;
         };
         self.push_undo(&step);

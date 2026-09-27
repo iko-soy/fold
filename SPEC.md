@@ -864,8 +864,10 @@ Four regions, each of them live under the pointer:
   hidden* when `zd` is on (click to show), the file, and the save state. A verb's message
   names the node it acted on, in the menus' words, with the next key where one helps —
   *deleted “Homelab” (12 nodes) · u undoes*, *moved “rack” to “NAS” — placed before the
-  sections* when the ordering rule chose the place (§3.1) — and names no file or id (§1,
-  3b), but for undo or redo refusing (§10.10); where the bar is short, the name is cut
+  sections* when the ordering rule chose the place (§3.1); in the reading pane, whose keys
+  are its own (§10.4), the step is the menu of the line's node: *copied “NAS” · m, then
+  choose Paste after* — and names no file or id (§1, 3b), but for undo or redo refusing
+  (§10.10); where the bar is short, the name is cut
   down before the words around it. Once a message is some 5 s old and a key
   or click has come since, the next step takes its place: the keys of what is on screen —
   *n new · e edit · x done · m menu · / find · ? help* in the outline, *e edit · Enter

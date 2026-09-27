@@ -2336,6 +2336,53 @@ fn delete_in_the_reading_pane_points_at_the_menu_of_the_line_s_node() {
     assert_eq!(root(&d), SAMPLE.replace("### [x] Replace fan\n\n", ""));
 }
 
+/// `m` in the reading pane, then a click on `a` in the menu it opens.
+fn choose(app: &mut App, a: Action) {
+    press(app, "m");
+    draw(app);
+    let (x, y) = app.hit_pos(Hit::MenuItem(node_menu_index(a))).unwrap();
+    app.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+}
+
+#[test]
+fn a_verb_from_the_reading_pane_s_menu_names_the_next_step_in_that_menu() {
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    app.show_reading = true;
+    select(&mut app, "NAS");
+    app.handle_key(key(KeyCode::Tab));
+    // y, p, P and t are the outline's: here they do nothing
+    press(&mut app, "ypPt");
+    assert_eq!(root(&d), SAMPLE);
+    choose(&mut app, Action::PasteAfter);
+    assert_eq!(said(&mut app), "nothing copied yet · m, then choose Copy");
+    press(&mut app, "x");
+    assert_eq!(said(&mut app), "“NAS” isn't a task · m, then choose Task on / off");
+    choose(&mut app, Action::Copy);
+    assert_eq!(said(&mut app), "copied “NAS” · m, then choose Paste after");
+    press(&mut app, "pP");
+    assert_eq!(root(&d), SAMPLE);
+    // the menu's Done / reopen says what the pane's x does
+    choose(&mut app, Action::ToggleDone);
+    assert_eq!(said(&mut app), "“NAS” isn't a task · m, then choose Task on / off");
+    assert_eq!(root(&d), SAMPLE);
+    // done as each says, it acts on the line's node
+    choose(&mut app, Action::ToggleTask);
+    assert_eq!(said(&mut app), "made “NAS” a task");
+    let at = app.reading_doc_pub().lines.iter().position(|l| l.contains("Replace fan")).unwrap();
+    for _ in 0..at {
+        press(&mut app, "j");
+        draw(&mut app);
+    }
+    choose(&mut app, Action::PasteAfter);
+    assert_eq!(said(&mut app), "pasted “NAS”");
+    assert_eq!(root(&d).matches("NAS\n").count(), 2, "{}", root(&d));
+    // in the outline, the keys are the outline's
+    app.handle_key(key(KeyCode::Tab));
+    press(&mut app, "y");
+    assert!(said(&mut app).ends_with(" · p pastes"), "{}", said(&mut app));
+}
+
 #[test]
 fn undo_and_redo_say_in_words_what_they_undid() {
     let d = vault(SAMPLE);
