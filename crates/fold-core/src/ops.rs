@@ -1077,7 +1077,22 @@ fn place(
     if kinds.is_empty() {
         return Err(io_err("nothing to place"));
     }
-    let idx = clamp_index(tree, &kids, want, &kinds);
+    let clamped = clamp_index(tree, &kids, want, &kinds);
+    // nothing goes between a conflict copy and the node before it, which
+    // it would pair with (§12.5): past the copies, unless the node they
+    // follow is the one moving, back in its place
+    let mut idx = clamped;
+    let orig = tree.raw_children(parent);
+    let back = |k: NRef| {
+        let before = orig.iter().position(|&o| o == k).and_then(|i| i.checked_sub(1)).map(|i| orig[i]);
+        moving.is_some_and(|m| before == Some(m))
+    };
+    if !kids.get(idx).is_some_and(|&k| back(k)) {
+        let copy_at = |i: usize| kids.get(i).is_some_and(|&k| is_copy(tree, k));
+        while copy_at(idx) && clamp_index(tree, &kids, idx + 1, &kinds) == idx + 1 {
+            idx += 1;
+        }
+    }
     let first = kinds[0];
     let last = *kinds.last().unwrap();
     let file = parent.0;
@@ -1198,7 +1213,7 @@ fn place(
         }
     }
     vault.reload()?;
-    Ok(idx != want.min(kids.len()))
+    Ok(clamped != want.min(kids.len()))
 }
 
 /// Archive: refile under the top-level `Archive` section (§6.5).
@@ -1379,6 +1394,9 @@ pub fn set_property(vault: &mut Vault, r: NRef, key: &str, value: &str) -> std::
 
 /// Move a node among its siblings (§10.3 `J`/`K`). A block moves by its
 /// embed line, so blocks and plain nodes swap freely in the parent file.
+/// A node and the conflict copies after it are one (§12.5): they move
+/// together, and a node moves past them together, so no copy is left
+/// after another node, which it would pair with.
 pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<()> {
     // a block root stands in its parent file as its embed
     let r = stand_in(&vault.tree, r);
@@ -1394,20 +1412,21 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
         Some(p) => p,
         None => return Ok(()),
     };
-    let swap_with = if down {
-        pos + 1
+    let run = |i: usize| paired_run(&vault.tree, &siblings, i);
+    let (a, b) = run(pos);
+    let other = if down {
+        if b + 1 >= siblings.len() {
+            return Ok(());
+        }
+        run(b + 1)
     } else {
-        match pos.checked_sub(1) {
-            Some(p) => p,
+        match a.checked_sub(1) {
+            Some(p) => run(p),
             None => return Ok(()),
         }
     };
-    if swap_with >= siblings.len() {
-        return Ok(());
-    }
-    let other = siblings[swap_with];
     // the ordering rule (§3.1): an item never goes below a section sibling
-    let (rk, ok) = (vault.tree.node(r).kind, vault.tree.node(other).kind);
+    let (rk, ok) = (vault.tree.node(siblings[a]).kind, vault.tree.node(siblings[other.0]).kind);
     if rk != ok {
         return Err(io_err(if rk == Kind::Item {
             "an item cannot move below a section"
@@ -1417,7 +1436,7 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
     }
     let file = r.0;
     let text = vault.tree.files[file].text.clone();
-    // swap the nodes' own lines; trailing blank lines stay where they are,
+    // swap the runs' own lines; trailing blank lines stay where they are,
     // so the list's spacing is unchanged
     let core = |sp: Span| {
         let end = sp.end.min(text.len());
@@ -1427,12 +1446,12 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
         }
         Span { start: sp.start, end: e }
     };
-    let (fr, sr) = if vault.tree.node(r).span.start < vault.tree.node(other).span.start {
-        (r, other)
-    } else {
-        (other, r)
+    let (fr, sr) = if down { ((a, b), other) } else { (other, (a, b)) };
+    let lines = |(s, e): (usize, usize)| Span {
+        start: vault.tree.node(siblings[s]).span.start,
+        end: core(vault.tree.node(siblings[e]).span).end,
     };
-    let (first, second) = (core(vault.tree.node(fr).span), core(vault.tree.node(sr).span));
+    let (first, second) = (lines(fr), lines(sr));
     let with_nl = |t: &str| {
         if t.ends_with('\n') {
             t.to_string()
@@ -1443,19 +1462,30 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
     // The written level and indent decide the parent: a sibling written
     // deeper than the one after it (a skipped heading level, §4.7, or a
     // wider indent) would nest under that one once below it, and J/K keep
-    // every other node's parent (§15.6). So the node moving down is written
-    // at the level and indent of the one moving up, its subtree re-levelled
-    // with it, as a moved node is (§4.2).
-    let (fnode, snode) = (vault.tree.node(fr), vault.tree.node(sr));
+    // every other node's parent (§15.6). So the nodes moving down are
+    // written at the level and indent of the one moving up, their subtrees
+    // re-levelled with them, as a moved node is (§4.2).
+    let (fnode, snode) = (vault.tree.node(siblings[fr.0]), vault.tree.node(siblings[sr.0]));
     let lower = if (fnode.level, fnode.indent) == (snode.level, snode.indent) {
         with_nl(first.text(&text))
     } else {
-        let base = snode.level.unwrap_or_else(|| vault.tree.level(fr));
+        let base = snode.level.unwrap_or_else(|| vault.tree.level(siblings[fr.0]));
         let pad = " ".repeat(snode.indent);
-        render(&vault.tree, fr, base, false)
-            .lines()
-            .map(|l| if l.is_empty() { "\n".to_string() } else { format!("{}{}\n", pad, l) })
-            .collect()
+        let mut out = String::new();
+        for i in fr.0..=fr.1 {
+            let k = siblings[i];
+            out.extend(
+                render(&vault.tree, k, base, false)
+                    .lines()
+                    .map(|l| if l.is_empty() { "\n".to_string() } else { format!("{}{}\n", pad, l) }),
+            );
+            // the blank lines between a node and its copy stay
+            if i < fr.1 {
+                let next = vault.tree.node(siblings[i + 1]).span.start;
+                out.push_str(&text[core(vault.tree.node(k).span).end..next]);
+            }
+        }
+        out
     };
     let mut new_text = format!(
         "{}{}{}{}",
@@ -1467,6 +1497,26 @@ pub fn move_sibling(vault: &mut Vault, r: NRef, down: bool) -> std::io::Result<(
     let rest = &text[second.end..];
     new_text.push_str(rest);
     vault.write_file_text(file, &new_text)
+}
+
+/// Whether the child `k` is a conflict copy, which pairs with the node
+/// before it (§12.4).
+fn is_copy(tree: &crate::tree::Tree, k: NRef) -> bool {
+    tree.node(tree.resolved_child(k)).conflict().is_some()
+}
+
+/// The run of `kids` that the `i`-th is in: a node and the conflict copies
+/// right after it, which pair with it and each other (§12.4), as indices.
+fn paired_run(tree: &crate::tree::Tree, kids: &[NRef], i: usize) -> (usize, usize) {
+    let mut a = i;
+    while a > 0 && is_copy(tree, kids[a]) {
+        a -= 1;
+    }
+    let mut b = i;
+    while b + 1 < kids.len() && is_copy(tree, kids[b + 1]) {
+        b += 1;
+    }
+    (a, b)
 }
 
 /// Toggle spelling section ↔ item (§10.3 `~`). The checkbox, if any, is kept,

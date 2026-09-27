@@ -287,7 +287,8 @@ impl App {
             Drop::Into => (rt, None),
             Drop::Before => {
                 let p = self.outline_parent(rt).unwrap_or(self.vault.tree.root);
-                let at = self.vault.tree.resolved_children(p).iter().position(|&c| c == rt);
+                let kids = self.vault.tree.resolved_children(p);
+                let at = kids.iter().position(|&c| c == rt).map(|at| self.past_copies(&kids, at, rr));
                 (p, at.map(|at| self.namesakes_before(rr, p, at)))
             }
         };

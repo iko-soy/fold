@@ -1561,6 +1561,135 @@ fn indent_puts_nothing_into_a_conflict_copy() {
     assert_eq!(said(&mut app), "indented “Replace fan”");
 }
 
+/// The node each conflict copy pairs with, the one before it (§12.4).
+fn paired(app: &mut App) -> Vec<String> {
+    let v = app.vault_mut();
+    let mut out: Vec<String> =
+        fold_core::merge::conflict_pairs(v).into_iter().map(|(ours, _)| v.tree.node(ours).title.clone()).collect();
+    out.sort();
+    out
+}
+
+/// The lab's pairs, each copy right after its own node.
+const PAIRED: [&str; 2] = ["Label the cables", "NAS"];
+
+/// Put the cursor on the copy of NAS, the second row titled so.
+fn select_copy(app: &mut App) {
+    app.cursor = app.rows().iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+}
+
+#[test]
+fn j_and_k_move_a_node_and_its_conflict_copy_as_one() {
+    // a copy pairs with the node before it (§12.4): a node moved in
+    // between would pair with it, and keeping theirs would replace it
+    let (d, mut app) = lab();
+    let before = root(&d);
+    select(&mut app, "Networking");
+    press(&mut app, "K");
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    assert_eq!(selected(&app), "Networking");
+    let r = root(&d);
+    assert!(r.find("## Networking").unwrap() < r.find("## NAS").unwrap(), "{}", r);
+    // keeping theirs replaces NAS, not what K put above its copy
+    let b = frame(&mut app);
+    let (x, y) = warning_after(&b, "NAS");
+    click_at(&mut app, x, y, MouseButton::Left);
+    assert_eq!(pair_shown(&mut app), "NAS");
+    press(&mut app, "t");
+    assert!(has_line(&d, "## Networking") && has_line(&d, "- [ ] Label the cables"), "{}", root(&d));
+    assert!(has_line(&d, "Mirrored pairs, no raidz."), "{}", root(&d));
+    press(&mut app, "u");
+    app.handle_key(key(KeyCode::Esc));
+    // J steps over the pair as K did
+    select(&mut app, "Networking");
+    press(&mut app, "J");
+    assert_eq!(root(&d), before);
+    // J and K on either side move both
+    select(&mut app, "NAS");
+    press(&mut app, "J");
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    assert_eq!(selected(&app), "NAS");
+    let r = root(&d);
+    assert!(r.find("## Networking").unwrap() < r.find("## NAS").unwrap(), "{}", r);
+    select_copy(&mut app);
+    press(&mut app, "K");
+    assert_eq!(root(&d), before);
+    select(&mut app, "Label the cables");
+    press(&mut app, "J");
+    assert_eq!(root(&d), before, "nothing below it to go past");
+}
+
+#[test]
+fn a_node_added_pasted_or_dropped_beside_a_conflict_pair_goes_after_the_copy() {
+    let (d, mut app) = lab();
+    let before = root(&d);
+    // n on NAS: the new node, and the editor on it, after NAS's copy
+    select(&mut app, "NAS");
+    press(&mut app, "n");
+    assert_eq!(app.mode_pub(), "edit");
+    press(&mut app, "Backups");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    assert_eq!(selected(&app), "Backups");
+    let r = root(&d);
+    assert!(r.find("## ![[").unwrap() < r.find("## Backups").unwrap(), "{}", r);
+    // the title, then the node
+    press(&mut app, "uu");
+    assert_eq!(root(&d), before);
+    // p on NAS and P on its copy
+    select(&mut app, "Networking");
+    press(&mut app, "y");
+    select(&mut app, "NAS");
+    press(&mut app, "p");
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    press(&mut app, "u");
+    select_copy(&mut app);
+    press(&mut app, "P");
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    press(&mut app, "u");
+    assert_eq!(root(&d), before);
+    // a drop to the left of the copy's row
+    draw(&mut app);
+    let rows = app.rows();
+    let copy = rows.iter().rposition(|r| app.title_of(r.nref) == "NAS").unwrap();
+    let from = app.hit_pos(Hit::Row(copy + 1)).unwrap();
+    let to = (2, app.hit_pos(Hit::Row(copy)).unwrap().1);
+    let at = |kind, (column, row)| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+    app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), to));
+    draw(&mut app);
+    app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), to));
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    assert_eq!(selected(&app), "Networking");
+}
+
+#[test]
+fn a_node_dropped_before_a_conflict_copy_is_selected_where_it_lands() {
+    // a second NAS, after Networking, dropped to the left of the copy of
+    // NAS: it lands after the copy, whose title it shares, and it, not
+    // the copy, is selected there
+    let (d, mut app) = lab();
+    select(&mut app, "NAS");
+    press(&mut app, "y");
+    select(&mut app, "Networking");
+    press(&mut app, "p");
+    draw(&mut app);
+    let rows = app.rows();
+    let nas: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| app.title_of(r.nref) == "NAS").map(|(i, _)| i).collect();
+    let [_, copy, second] = nas[..] else { panic!("{:?}", nas) };
+    let from = app.hit_pos(Hit::Row(second)).unwrap();
+    let to = (2, app.hit_pos(Hit::Row(copy)).unwrap().1);
+    let at = |kind, (column, row)| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+    app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+    app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), to));
+    draw(&mut app);
+    app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), to));
+    assert_eq!(paired(&mut app), PAIRED, "{}", root(&d));
+    let cursor = app.cursor;
+    assert_eq!(cursor, copy + 1, "{}", screen(&mut app));
+    assert_eq!(selected(&app), "NAS");
+}
+
 #[test]
 fn the_editor_s_border_says_when_the_cursor_is_in_a_conflict_copy() {
     let (_d, mut app) = lab();

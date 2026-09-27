@@ -1169,8 +1169,9 @@ impl App {
         let parent = self.outline_parent(r);
         let grand = parent.map(|p| self.outline_parent(p).unwrap_or(self.vault.tree.root));
         let rank = parent.zip(grand).and_then(|(p, g)| {
-            let at = self.vault.tree.resolved_children(g).iter().position(|&c| c == p)?;
-            Some(self.namesakes_before(r, g, at + 1))
+            let kids = self.vault.tree.resolved_children(g);
+            let at = kids.iter().position(|&c| c == p)?;
+            Some(self.namesakes_before(r, g, self.past_copies(&kids, at + 1, r)))
         });
         let Some(grand) = grand.map(|g| self.vault.key_of(g)) else {
             self.say(format!("can't outdent {}: it is already at the top level", self.named(r)));
@@ -1276,6 +1277,19 @@ impl App {
             .count()
     }
 
+    /// Where a node that a verb puts just before the `at`-th of `kids`
+    /// lands: past the conflict copies there, which pair with the node
+    /// before them (§12.5), unless it is `r`, that node, back in its place.
+    fn past_copies(&self, kids: &[NRef], at: usize, r: NRef) -> usize {
+        let mut at = at;
+        if at.checked_sub(1).map(|i| kids[i]) != Some(r) {
+            while kids.get(at).is_some_and(|&c| self.vault.tree.node(c).conflict().is_some()) {
+                at += 1;
+            }
+        }
+        at
+    }
+
     /// The node an action applies to: a menu's target, else the cursor's.
     fn subject(&self) -> Option<NRef> {
         self.action_target.or_else(|| self.current())
@@ -1302,14 +1316,17 @@ impl App {
             match ops::paste(&mut self.vault, r, &format!("{}\n", line), true) {
                 Ok(_) => {
                     // the new sibling: the node after the cursor node among
-                    // its siblings in the outline, with an empty title
+                    // its siblings in the outline, past any conflict copy
+                    // of it (§12.5), with an empty title
                     let r = self.vault.find_by_key(&key).unwrap_or(r);
                     let parent = self.outline_parent(r).unwrap_or(self.vault.tree.root);
                     let kids = self.vault.tree.resolved_children(parent);
                     let new = kids
                         .iter()
-                        .position(|&c| c == r)
-                        .and_then(|i| kids.get(i + 1).copied())
+                        .skip_while(|&&c| c != r)
+                        .skip(1)
+                        .find(|&&c| self.vault.tree.node(c).conflict().is_none())
+                        .copied()
                         .filter(|&c| self.vault.tree.node(c).title.is_empty());
                     if let Some(nr) = new {
                         // a sibling of the zoomed node is outside the zoom:
