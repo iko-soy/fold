@@ -628,16 +628,32 @@ impl App {
         if self.hide_done {
             right.push((" done hidden ".into(), Style::default().fg(theme::DIM).bg(theme::BAR), Some(Action::HideDone)));
         }
+        let file_at = right.len();
         right.push((format!(" {} ", file), Style::default().fg(theme::DIM).bg(theme::BAR), None));
         right.push((
             if unsaved { " ● unsaved ".into() } else { " ✓ saved ".into() },
             Style::default().fg(if unsaved { theme::WARN } else { theme::DIM }).bg(theme::BAR),
             None,
         ));
+        let (msg, hint) = self.status_left();
+        let room = |right: &[(String, Style, Option<Action>)]| {
+            let rw: u16 = right.iter().map(|(t, _, _)| t.width() as u16).sum();
+            (area.x + area.width).saturating_sub(rw).saturating_sub(x + 1) as usize
+        };
+        // a message the bar is short for takes room from the right before
+        // it is cut (§10.1): the ⚠ count comes down to its number, then the
+        // file goes, for as long as the message shows; a hint is cut by its
+        // parts instead
+        let plain = !hint && msg != super::HINT;
+        if plain && conflicts > 0 && msg.width() > room(&right) {
+            right[0].0 = format!(" ⚠ {} ", conflicts);
+        }
+        if plain && msg.width() > room(&right) {
+            right.remove(file_at);
+        }
         let rw: u16 = right.iter().map(|(t, _, _)| t.width() as u16).sum();
         let mut rx = (area.x + area.width).saturating_sub(rw);
         let msg_room = rx.saturating_sub(x + 1);
-        let (msg, hint) = self.status_left();
         let msg = if hint {
             fit_parts(&msg, msg_room as usize, self.pending.is_none())
         } else if msg == super::HINT && super::HINT.width() > msg_room as usize {

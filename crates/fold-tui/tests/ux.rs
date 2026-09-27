@@ -642,7 +642,7 @@ fn a_block_file_renamed_outside_fold_is_still_not_overwritten_over_a_change_ther
 #[test]
 fn where_the_bar_is_short_what_came_in_gives_way_to_the_typing_saved_for_it() {
     // 80×24 while editing: the EDIT badge leaves 53 columns, and with done
-    // hidden 40
+    // hidden 40, 49 once the file gives way
     for hide in [false, true] {
         let d = vault("# NAS\n\n- disks\n\n# Inbox\n\n- [ ] a\n");
         let mut app = App::new(d.path()).unwrap();
@@ -658,7 +658,7 @@ fn where_the_bar_is_short_what_came_in_gives_way_to_the_typing_saved_for_it() {
         assert_eq!(app.mode_pub(), "edit");
         let s = status80(&mut app);
         if hide {
-            assert!(s.starts_with("  EDIT  ↻ typing saved; changed outside fold: I…  done hidden "), "{}", s);
+            assert!(s.starts_with("  EDIT  ↻ typing saved; changed outside fold: Inbox (+1 …  done hidden  ✓ saved "), "{}", s);
         } else {
             assert!(s.starts_with("  EDIT  ↻ typing saved; changed outside fold: Inbox (+1 item)  root.md "), "{}", s);
         }
@@ -1607,9 +1607,9 @@ fn the_conflict_view_lists_its_pairs_in_outline_order_from_the_one_it_opens_on()
 }
 
 #[test]
-fn where_the_bar_is_short_the_news_of_a_sync_conflict_cuts_the_name_first() {
-    // 80×24, a key a moment ago: the name gives way, then the end, and the
-    // lit ⚠ count beside it is not said again
+fn where_the_bar_is_short_the_news_of_a_sync_conflict_takes_room_from_the_right_first() {
+    // 80×24, a key a moment ago: the lit ⚠ count beside it comes down to
+    // its number, and the news is whole
     let d = homelab(None);
     let mut app = App::new(d.path()).unwrap();
     press(&mut app, "j");
@@ -1617,12 +1617,13 @@ fn where_the_bar_is_short_the_news_of_a_sync_conflict_cuts_the_name_first() {
     app.reload_external();
     assert_eq!(app.mode_pub(), "normal");
     let s = status80(&mut app);
-    assert!(s.starts_with(" sync conflicts in “…” and 1 more: click ⚠ to"), "{}", s);
-    assert!(s.contains(" ⚠ 2 conflicts "), "{}", s);
-    // wider, the name comes back before the words go
+    assert!(s.starts_with(" sync conflicts in “NAS” and 1 more: click ⚠ to resolve "), "{}", s);
+    assert!(s.ends_with(" ⚠ 2  root.md  ✓ saved "), "{}", s);
+    // wider, the count says what it counts
     let s = status(&mut app);
     assert!(s.contains("sync conflicts in “NAS” and 1 more: click ⚠ to resolve "), "{}", s);
-    // typing on NAS, with less room still
+    assert!(s.contains(" ⚠ 2 conflicts "), "{}", s);
+    // typing on NAS, with less room still: the file goes too
     let d = homelab(None);
     let mut app = App::new(d.path()).unwrap();
     select(&mut app, "NAS");
@@ -1631,7 +1632,8 @@ fn where_the_bar_is_short_the_news_of_a_sync_conflict_cuts_the_name_first() {
     app.reload_external();
     assert_eq!(app.mode_pub(), "edit");
     let s = status80(&mut app);
-    assert!(s.contains(" EDIT  sync conflicts in “…” and 1 more: "), "{}", s);
+    assert!(s.starts_with("  EDIT  sync conflicts in “NAS” and 1 more: click ⚠ to resolve "), "{}", s);
+    assert!(s.ends_with(" ⚠ 2  ✓ saved "), "{}", s);
 }
 
 #[test]
@@ -1651,13 +1653,69 @@ fn news_of_a_sync_conflict_while_typing_says_what_to_do_and_no_more() {
     app.reload_external();
     assert_eq!(app.mode_pub(), "edit");
     assert!(has_line(&d, "Mirrored pairs. typed"), "{}", root(&d));
-    // 80×24: the name gives way first, as with nothing typed
+    // 80×24: the right side gives way first, as with nothing typed
     let s = status80(&mut app);
-    assert!(s.starts_with("  EDIT  sync conflicts in “…” and 1 more: cli…  ⚠ 2 conflicts "), "{}", s);
+    assert!(s.starts_with("  EDIT  sync conflicts in “NAS” and 1 more: click ⚠ to resolve "), "{}", s);
+    assert!(s.ends_with(" ⚠ 2  ✓ saved "), "{}", s);
     // 120 columns: whole, the name too
     let s = status(&mut app);
     assert!(s.starts_with("  EDIT  sync conflicts in “NAS” and 1 more: click ⚠ to resolve  "), "{}", s);
     assert!(!s.contains("typing"), "{}", s);
+}
+
+#[test]
+fn at_80_columns_news_of_a_sync_conflict_in_the_editor_keeps_the_node_and_what_to_do() {
+    // 80×24 while editing: the right side gives way before the news does,
+    // the ⚠ count down to its number
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "NAS");
+    press(&mut app, "e");
+    std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE77.md"), SAMPLE.replace("no raidz.", "no raidz, one spare.")).unwrap();
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(pairs(&mut app), 1);
+    let s = status80(&mut app);
+    assert!(s.starts_with("  EDIT  sync conflict in “NAS”: click ⚠ to resolve  "), "{}", s);
+    assert!(s.ends_with(" ⚠ 1  root.md  ✓ saved "), "{}", s);
+    // with room, the count says what it counts
+    assert!(status(&mut app).contains(" ⚠ 1 conflict  root.md  ✓ saved "), "{}", status(&mut app));
+}
+
+#[test]
+fn at_80_columns_news_of_a_sync_conflict_in_a_block_file_keeps_the_node_and_what_to_do() {
+    // the selection in a block file, whose name is long: the file gives way
+    // too, in the editor and in the outline after it
+    let d = vault(SAMPLE);
+    let mut app = App::new(d.path()).unwrap();
+    select(&mut app, "Project Atlas");
+    press(&mut app, "s");
+    let block = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("~project-atlas.md"))
+        .unwrap();
+    let file = block.file_name().unwrap().to_string_lossy().into_owned();
+    let text = std::fs::read_to_string(&block).unwrap();
+    press(&mut app, "e");
+    std::fs::write(
+        d.path().join(file.replace(".md", ".sync-conflict-20260927-100000-PHONE77.md")),
+        text.replace("[ ] Draft", "[x] Draft"),
+    )
+    .unwrap();
+    app.reload_external();
+    assert_eq!(app.mode_pub(), "edit");
+    assert_eq!(pairs(&mut app), 1);
+    let s = status80(&mut app);
+    assert!(s.starts_with("  EDIT  sync conflict in “Draft the RFC”: click ⚠ to resolve  "), "{}", s);
+    assert!(s.ends_with(" ⚠ 1  ✓ saved "), "{}", s);
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode_pub(), "normal");
+    let s = status80(&mut app);
+    assert!(s.starts_with(" sync conflict in “Draft the RFC”: click ⚠ to resolve  "), "{}", s);
+    assert!(!s.contains(&file), "{}", s);
+    // with room, the file is there
+    assert!(status(&mut app).contains(&format!(" ⚠ 1 conflict  {}  ✓ saved ", file)), "{}", status(&mut app));
 }
 
 #[test]
@@ -2767,8 +2825,8 @@ fn the_editor_s_own_saves_say_nothing_and_ctrl_s_says_saved() {
 
 #[test]
 fn where_the_bar_is_short_a_message_naming_two_nodes_cuts_the_longer_name_first() {
-    // 80×24: the long destination gives way, not the node that moved nor
-    // the words after it
+    // 80×24: the file gives way, then the long destination, not the node
+    // that moved nor the words after it
     let title = "Project Atlas quarterly planning and review notes";
     let d = vault(&format!("# Networking\n\n- [ ] Label the cables\n  - [ ] rack\n\n# {}\n\n- [ ] Draft the RFC\n\n## Milestones\n", title));
     let mut app = App::new(d.path()).unwrap();
@@ -2777,19 +2835,19 @@ fn where_the_bar_is_short_a_message_naming_two_nodes_cuts_the_longer_name_first(
     press(&mut app, "Project Atlas");
     app.handle_key(key(KeyCode::Enter));
     let s = status80(&mut app);
-    assert!(s.starts_with(" moved “rack” to “Project Atla…” — placed before the sections "), "{}", s);
+    assert!(s.starts_with(" moved “rack” to “Project Atlas quarter…” — placed before the sections  ✓ saved "), "{}", s);
     // wider, it is all there
     assert_eq!(said(&mut app), format!("moved “rack” to “{}” — placed before the sections", title));
     // the undo names both too
     press(&mut app, "u");
     let s = status80(&mut app);
-    assert!(s.starts_with(" undone: move “rack” to “Project Atlas quarterly planning a…” "), "{}", s);
+    assert!(s.starts_with(" undone: move “rack” to “Project Atlas quarterly planning and review…”  ✓ saved "), "{}", s);
 }
 
 #[test]
 fn indent_and_outdent_refusals_fit_beside_the_badges_at_80_columns() {
-    // under a conflict copy, which comes with the ⚠ count: the reason
-    // stays whole, the node's name gives way
+    // under a conflict copy, which comes with the ⚠ count: the count
+    // comes down to its number, and the reason and the name stay whole
     let text = "# Networking\n\n- [ ] Replace the flaky switch\n- [ ] Label the cables\n";
     let d = vault(text);
     std::fs::write(d.path().join("root.sync-conflict-20260927-100000-PHONE.md"), text.replace("[ ] Replace", "[x] Replace")).unwrap();
@@ -2799,7 +2857,8 @@ fn indent_and_outdent_refusals_fit_beside_the_badges_at_80_columns() {
     let mut app = App::new(d.path()).unwrap();
     press(&mut app, "G>");
     let s = status80(&mut app);
-    assert!(s.starts_with(" can't indent “Label the…” into a conflict copy  ⚠ 1 conflict "), "{}", s);
+    assert!(s.starts_with(" can't indent “Label the cables” into a conflict copy  "), "{}", s);
+    assert!(s.ends_with(" ⚠ 1  root.md  ✓ saved "), "{}", s);
     assert_eq!(said(&mut app), "can't indent “Label the cables” into a conflict copy");
     // with done hidden, nothing above and the top level, name and all
     let d = vault(SAMPLE);
