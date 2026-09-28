@@ -43,6 +43,7 @@ pub enum Action {
     Canonicalize,
     Merge,
     ResolveConflicts,
+    ResolveConflict,
     // editor
     EditorKeys,
     EditDone,
@@ -102,6 +103,7 @@ impl Action {
             Canonicalize => "Canonicalize",
             Merge => "Merge sync conflicts",
             ResolveConflicts => "Resolve conflicts",
+            ResolveConflict => "Resolve conflict…",
             EditorKeys => "Editor keys",
             EditDone => "Done",
             EditRevert => "Revert",
@@ -233,6 +235,7 @@ impl Action {
             Canonicalize => "rewrite the vault in canonical form",
             Merge => "fold sync-conflict files in",
             ResolveConflicts => "review conflict pairs",
+            ResolveConflict => "the conflict view at this node's pair",
             EditorKeys => "switch the editor between normal, Vim and Helix keys",
             EditDone => "save and leave the editor",
             EditRevert => "drop changes since the last save",
@@ -275,6 +278,9 @@ pub const NODE_MENU: &[Option<Action>] = &[
     Some(Action::PasteBefore),
     Some(Action::Delete),
 ];
+
+/// What the node menu adds on either side of a conflict pair (§12.5).
+pub const CONFLICT_MENU: &[Option<Action>] = &[None, Some(Action::ResolveConflict)];
 
 /// Everything in the command palette, in order.
 pub const PALETTE: &[Action] = &[

@@ -1,7 +1,7 @@
 //! Drawing (§10.1). Everything clickable registers a hit region while it
 //! is drawn, so what the pointer can do is exactly what is on screen.
 
-use super::action::{Action, NODE_MENU};
+use super::action::Action;
 use super::markdown::{fences, style_line, Code};
 use super::{App, Focus, Mode, PromptAction};
 use fold_core::ops::Drop;
@@ -48,6 +48,9 @@ pub mod theme {
 pub enum Hit {
     /// Everything outside an open popup: a click closes it.
     Backdrop,
+    /// Inside a popup, off its list and buttons: it covers what is behind,
+    /// so a click or right-click there does nothing (§10.1).
+    Popup,
     /// A button; with a node, the action applies to that node.
     Button(Action, Option<NRef>),
     /// A breadcrumb segment; `None` is the vault root.
@@ -60,8 +63,12 @@ pub enum Hit {
     Fold(usize),
     Check(usize),
     RowMenu(usize),
+    /// A conflict copy's ⚠ on its row (§10.7).
+    Conflict(usize),
     DocLine(usize),
     DocCheck(usize),
+    /// A conflict copy's ⚠ on its title line.
+    DocConflict(usize),
     Link(usize),
     EditArea,
     MenuItem(usize),
@@ -72,15 +79,17 @@ pub enum Hit {
     PropDelete(usize),
 }
 
-/// The node menu: which node, where, and the highlighted item. The node is
-/// kept by its key (§3.4), since files can change under an open menu — a
-/// reload, an editor save — and renumber every node (§11.2).
+/// The node menu: which node, where, the highlighted item and the first
+/// row shown on a screen too short for it. The node is kept by its key
+/// (§3.4), since files can change under an open menu — a reload, an
+/// editor save — and renumber every node (§11.2).
 #[derive(Debug, Clone)]
 pub struct Menu {
     pub target: NodeKey,
     pub x: u16,
     pub y: u16,
     pub sel: usize,
+    pub top: usize,
 }
 
 /// The left button is down: where it went down, on which outline row, and
@@ -118,6 +127,9 @@ pub struct Ui {
     pub outline_view: usize,
     pub reading_view: usize,
     pub reading_len: usize,
+    /// The doc line each screen row of the reading pane showed, `None` for
+    /// the property header and raw source.
+    pub read_rows: Vec<Option<usize>>,
     /// Highlighted code blocks by (info string, code).
     pub highlight_cache: std::collections::HashMap<(String, String), Vec<Vec<Span<'static>>>>,
 }
@@ -164,6 +176,13 @@ fn follow(scroll: &mut usize, cursor: usize, moved: bool, view: usize, len: usiz
     *scroll = (*scroll).min(len.saturating_sub(view.max(1)));
 }
 
+/// Whether line `at` of `len` is in a view of `view` lines scrolled to
+/// `scroll`, clamped as `follow` clamps it.
+pub(super) fn in_view(scroll: usize, at: usize, view: usize, len: usize) -> bool {
+    let top = scroll.min(len.saturating_sub(view.max(1)));
+    at >= top && at < top + view
+}
+
 fn put(buf: &mut Buffer, x: u16, y: u16, s: &str, max: u16, style: Style) -> u16 {
     if max == 0 {
         return 0;
@@ -191,11 +210,108 @@ fn fit(s: &str, w: usize) -> String {
     out
 }
 
+/// Cut a message to `w` columns: the nodes it names, quoted, give way
+/// first, the longest down to the next, and all down to `…`, so the
+/// words around them stay whole where that is enough; then its end.
+/// Where the words before a name leave no room for it, it and what
+/// follows go with the end.
+fn fit_named(s: &str, w: usize) -> String {
+    let over = s.width().saturating_sub(w);
+    if over == 0 {
+        return s.to_string();
+    }
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(a) = s[from..].find('“').map(|i| from + i + '“'.len_utf8()) {
+        let Some(n) = s[a..].find('”') else { break };
+        names.push((a, a + n));
+        from = a + n;
+    }
+    // the most columns a name keeps: the fewest names cut, by the least
+    let widths: Vec<usize> = names.iter().map(|&(a, b)| s[a..b].width()).collect();
+    let cut = |keep: usize| widths.iter().map(|n| n.saturating_sub(keep)).sum::<usize>();
+    let top = widths.iter().copied().max().unwrap_or(0);
+    let keep = (1..top).rev().find(|&k| cut(k) >= over).unwrap_or(1);
+    let mut out = String::new();
+    let mut last = 0;
+    for &(a, b) in &names {
+        if out.width() + s[last..a].width() + 3 > w {
+            break;
+        }
+        out.push_str(&s[last..a]);
+        out.push_str(&fit(&s[a..b], keep));
+        last = b;
+    }
+    out.push_str(&s[last..]);
+    fit(&out, w)
+}
+
+/// The editor's border title in `w` columns: *Editing*, the block's
+/// title, *⚠ conflict copy from PHONE* in a copy from `device`, then
+/// `tail`, the dot and the mode, which stay whole. Where it is short,
+/// the block's title gives way first, to its first few letters, then
+/// the words after ⚠, then *Editing*, and last the title, down to `…`.
+fn editor_title(name: &str, device: Option<&str>, tail: Vec<Span<'static>>, w: usize) -> Line<'static> {
+    let warns = match device {
+        Some(d) => vec![format!(" ⚠ conflict copy from {}", d), format!(" ⚠ copy from {}", d), " ⚠".to_string()],
+        None => vec![String::new()],
+    };
+    let rest: usize = tail.iter().map(|s| s.width()).sum();
+    let few = name.width().min(8);
+    let bare = warns[warns.len() - 1].as_str();
+    let (lead, warn) = warns
+        .iter()
+        .map(|warn| (" Editing ", warn.as_str(), few))
+        .chain([(" ", bare, 1)])
+        .find(|(lead, warn, least)| lead.width() + warn.width() + rest + least <= w)
+        .map_or((" ", bare), |(lead, warn, _)| (lead, warn));
+    let mut spans = vec![
+        Span::styled(lead.to_string(), Style::default().fg(theme::ACCENT)),
+        Span::styled(fit(name, w.saturating_sub(lead.width() + warn.width() + rest)), Style::default().add_modifier(Modifier::BOLD)),
+    ];
+    if !warn.is_empty() {
+        spans.push(Span::styled(warn.to_string(), Style::default().fg(theme::WARN)));
+    }
+    spans.extend(tail);
+    Line::from(spans)
+}
+
+/// Shorten a hint of `·`-separated parts to `w` columns by whole parts:
+/// the first stays, and the last where it is the way on (as *? help* or
+/// *Esc close*); those before it go first. What can follow a key has no
+/// way on: its keys go from the end.
+fn fit_parts(s: &str, w: usize, way_on: bool) -> String {
+    let mut parts: Vec<&str> = s.split(" · ").collect();
+    let keep = if way_on { 2 } else { 1 };
+    while parts.join(" · ").width() > w && parts.len() > keep {
+        parts.remove(parts.len() - keep);
+    }
+    parts.join(" · ")
+}
+
 /// A title as drawn: the terminal drops a tab, so it shows as the spaces
 /// to its next stop, counted from the title's start (raw text is never
 /// hidden, §10.9).
 fn title_text(title: &str) -> String {
     super::wrap::shown(title, 0, usize::MAX)
+}
+
+/// Where a conflict copy came from (§12.4), as the screen says it: the
+/// merge's *PHONE 20260927-100000* reads *PHONE 09-27 10:00*. A value
+/// written otherwise is shown as it is.
+fn copy_from(conflict: &str) -> String {
+    let Some((device, t)) = conflict.rsplit_once(' ') else { return conflict.to_string() };
+    let digits = |r: std::ops::Range<usize>| t.get(r).is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()));
+    if t.len() == 15 && t.as_bytes()[8] == b'-' && digits(0..8) && digits(9..15) {
+        format!("{} {}-{} {}:{}", device, &t[4..6], &t[6..8], &t[9..11], &t[11..13])
+    } else {
+        conflict.to_string()
+    }
+}
+
+/// A conflict copy's device alone, for *conflict copy from PHONE*.
+fn copy_device(conflict: &str) -> &str {
+    conflict.rsplit_once(' ').map_or(conflict, |(d, _)| d)
 }
 
 /// One screen row of the reading pane.
@@ -205,6 +321,8 @@ struct Drawn {
     code: bool,
     check: Option<usize>,
     link: Option<(usize, usize)>,
+    /// A conflict copy's ⚠ on its title line.
+    conflict: Option<usize>,
 }
 
 /// Break a styled line into screen rows at `cols` columns (§10.1): each row
@@ -499,22 +617,51 @@ impl App {
         let conflicts = fold_core::merge::conflict_pairs(&self.vault).len();
         let mut right: Vec<(String, Style, Option<Action>)> = Vec::new();
         if conflicts > 0 {
-            right.push((format!(" ⚠ {} conflict{} ", conflicts, if conflicts == 1 { "" } else { "s" }), Style::default().fg(theme::WARN).bg(theme::BAR), Some(Action::ResolveConflicts)));
+            // lit while pairs that came in as the user worked wait (§10.7)
+            let style = if self.conflicts_waiting.is_empty() {
+                Style::default().fg(theme::WARN).bg(theme::BAR)
+            } else {
+                Style::default().fg(ratatui::style::Color::Black).bg(theme::WARN).add_modifier(Modifier::BOLD)
+            };
+            right.push((format!(" {} ", super::conflict_count(conflicts)), style, Some(Action::ResolveConflicts)));
         }
         if self.hide_done {
             right.push((" done hidden ".into(), Style::default().fg(theme::DIM).bg(theme::BAR), Some(Action::HideDone)));
         }
+        let file_at = right.len();
         right.push((format!(" {} ", file), Style::default().fg(theme::DIM).bg(theme::BAR), None));
         right.push((
             if unsaved { " ● unsaved ".into() } else { " ✓ saved ".into() },
             Style::default().fg(if unsaved { theme::WARN } else { theme::DIM }).bg(theme::BAR),
             None,
         ));
+        let (msg, hint) = self.status_left();
+        let room = |right: &[(String, Style, Option<Action>)]| {
+            let rw: u16 = right.iter().map(|(t, _, _)| t.width() as u16).sum();
+            (area.x + area.width).saturating_sub(rw).saturating_sub(x + 1) as usize
+        };
+        // a message the bar is short for takes room from the right before
+        // it is cut (§10.1): the ⚠ count comes down to its number, then the
+        // file goes, for as long as the message shows; a hint is cut by its
+        // parts instead
+        let plain = !hint && msg != super::HINT;
+        if plain && conflicts > 0 && msg.width() > room(&right) {
+            right[0].0 = format!(" ⚠ {} ", conflicts);
+        }
+        if plain && msg.width() > room(&right) {
+            right.remove(file_at);
+        }
         let rw: u16 = right.iter().map(|(t, _, _)| t.width() as u16).sum();
         let mut rx = (area.x + area.width).saturating_sub(rw);
         let msg_room = rx.saturating_sub(x + 1);
-        let msg = if self.status == super::HINT && super::HINT.width() > msg_room as usize { super::HINT_SHORT } else { self.status.as_str() };
-        put(buf, x, area.y, &fit(msg, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
+        let msg = if hint {
+            fit_parts(&msg, msg_room as usize, self.pending.is_none())
+        } else if msg == super::HINT && super::HINT.width() > msg_room as usize {
+            super::HINT_SHORT.to_string()
+        } else {
+            fit_named(&msg, msg_room as usize)
+        };
+        put(buf, x, area.y, &fit(&msg, msg_room as usize), msg_room, Style::default().bg(theme::BAR));
         for (t, style, a) in right {
             let w = t.width() as u16;
             let r = Rect { x: rx, y: area.y, width: w, height: 1 };
@@ -625,9 +772,21 @@ impl App {
                 style = style.add_modifier(Modifier::DIM);
             }
             let title = if n.title.is_empty() { "(untitled)".to_string() } else { title_text(&n.title) };
-            let marker = if n.is_block() || n.is_embed() { " ▤" } else { "" };
-            let shown = fit(&format!("{}{}", title, marker), title_room as usize);
-            put(buf, title_x, y, &shown, title_room, style);
+            let copy = n.conflict();
+            let shown = match copy {
+                // a conflict copy's ⚠ stands where ▤ would, and is never cut
+                Some(_) => format!("{} ⚠", fit(&title, (title_room as usize).saturating_sub(2))),
+                None => {
+                    let marker = if n.is_block() || n.is_embed() { " ▤" } else { "" };
+                    fit(&format!("{}{}", title, marker), title_room as usize)
+                }
+            };
+            let end = title_x + put(buf, title_x, y, &shown, title_room, style);
+            if copy.is_some() && shown.width() as u16 <= title_room {
+                // a click away from its pair (§10.7)
+                put(buf, end - 1, y, "⚠", 1, base.fg(theme::WARN).remove_modifier(Modifier::CROSSED_OUT));
+                self.ui.push(Rect { x: end - 1, y, width: 1, height: 1 }, Hit::Conflict(vi));
+            }
             if inline {
                 meta_x = title_x + shown.width() as u16 + 2;
             }
@@ -636,10 +795,14 @@ impl App {
             }
             if inline {
                 let px = if meta_w > 0 { meta_x + meta_w + 2 } else { meta_x };
-                let preview = self.preview(row.nref);
+                // where a copy's text would go, whose copy it is
+                let (preview, look) = match copy {
+                    Some(c) => (format!("other device · {}", copy_from(c)), base.fg(theme::DIM)),
+                    None => (self.preview(row.nref), base.fg(theme::DIM).add_modifier(Modifier::ITALIC)),
+                };
                 if !preview.is_empty() && px + 4 < right {
                     let room = right - px - 1;
-                    put(buf, px, y, &fit(&preview, room as usize), room, base.fg(theme::DIM).add_modifier(Modifier::ITALIC));
+                    put(buf, px, y, &fit(&preview, room as usize), room, look);
                 }
             }
             if handle {
@@ -697,7 +860,9 @@ impl App {
             let n = self.vault.tree.node(r);
             let t = if n.kind == Kind::Root { "fold".into() } else { title_text(&n.title) };
             spans.push(Span::styled(t, Style::default().add_modifier(Modifier::BOLD)));
-            if n.is_block() {
+            if n.conflict().is_some() {
+                spans.push(Span::styled(" ⚠", Style::default().fg(theme::WARN)));
+            } else if n.is_block() {
                 spans.push(Span::styled(" ▤", Style::default().fg(theme::DIM)));
             }
         }
@@ -726,6 +891,8 @@ impl App {
         // display lines: (doc line or None for the property header, text)
         let mut shown: Vec<(Option<usize>, String)> = Vec::new();
         let mut header_at: Option<usize> = None;
+        // the doc lines that are conflict copies' titles, and whose each is
+        let mut copies: Vec<(usize, String)> = Vec::new();
         self.read_header = false;
         if self.raw_mode {
             for l in render(&self.vault.tree, r, 1, false).lines() {
@@ -735,6 +902,11 @@ impl App {
             let doc = fold_core::reading::build(&self.vault, r);
             for (i, l) in doc.lines.iter().enumerate() {
                 shown.push((Some(i), l.clone()));
+                if let fold_core::reading::LineRef::Title(t) = doc.refs[i] {
+                    if let Some(c) = self.vault.tree.node(t).conflict() {
+                        copies.push((i, copy_from(c)));
+                    }
+                }
             }
             if let Some(b) = &self.vault.tree.node(r).block {
                 let props: Vec<String> = b.props.iter().filter(|(k, _)| k.as_str() != "id").map(|(k, v)| format!("{} {}", k, v)).collect();
@@ -754,7 +926,7 @@ impl App {
         let cols = if self.wrap { inner.width as usize } else { usize::MAX / 2 };
         let mut rows: Vec<Drawn> = Vec::new();
         for (si, (doc_line, text)) in shown.iter().enumerate() {
-            let styled = if header_at == Some(si) {
+            let mut styled = if header_at == Some(si) {
                 super::markdown::Styled {
                     line: Line::from(Span::styled(text.clone(), Style::default().fg(theme::DIM).add_modifier(Modifier::ITALIC))),
                     check: None,
@@ -766,10 +938,18 @@ impl App {
                     None => style_line(text, fenced[si]),
                 }
             };
+            // a copy's title line is marked as its row is (§10.1)
+            let mut warn = None;
+            if let Some((_, from)) = copies.iter().find(|(i, _)| Some(*i) == *doc_line) {
+                warn = Some(styled.line.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() + 1);
+                styled.line.spans.push(Span::raw(" "));
+                styled.line.spans.push(Span::styled("⚠", Style::default().fg(theme::WARN)));
+                styled.line.spans.push(Span::styled(format!("  other device · {}", from), Style::default().fg(theme::DIM)));
+            }
             let parts = wrap_styled(&styled.line, cols, code[si].is_some());
             // where each character is drawn: the clickable parts are
             // character columns, and wide characters and tabs take more
-            let xs = if styled.check.is_some() || styled.link.is_some() {
+            let xs = if styled.check.is_some() || styled.link.is_some() || warn.is_some() {
                 super::wrap::columns(&styled.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
             } else {
                 Vec::new()
@@ -785,10 +965,12 @@ impl App {
                     code: code[si].is_some(),
                     check: styled.check.filter(|c| within(*c)).map(at),
                     link: styled.link.filter(|l| on(*l)).map(|(a, b)| (at(a), at(b))),
+                    conflict: warn.filter(|c| within(*c)).map(at),
                 });
             }
         }
         self.ui.reading_len = rows.len();
+        self.ui.read_rows = rows.iter().map(|d| d.doc).collect();
         let cursor_row = rows.iter().position(|d| d.doc == Some(self.read_cursor)).unwrap_or(0);
         let moved = self.ui.last_read_cursor != Some(self.read_cursor);
         self.ui.last_read_cursor = Some(self.read_cursor);
@@ -821,6 +1003,9 @@ impl App {
             let w = inner.width as usize;
             if let Some(c) = d.check.filter(|c| *c < w) {
                 self.ui.push(Rect { x: inner.x + c as u16, y, width: 1, height: 1 }, Hit::DocCheck(di));
+            }
+            if let Some(c) = d.conflict.filter(|c| *c < w) {
+                self.ui.push(Rect { x: inner.x + c as u16, y, width: 1, height: 1 }, Hit::DocConflict(di));
             }
             if let Some((a, b)) = d.link.filter(|(a, _)| *a < w) {
                 self.ui.push(Rect { x: inner.x + a as u16, y, width: b.min(w).saturating_sub(a).max(1) as u16, height: 1 }, Hit::Link(di));
@@ -900,11 +1085,24 @@ impl App {
         let Some(ed) = &self.editor else { return };
         let owner = ed.buf.owner_at(ed.cursor.line);
         let owner_title = ed.buf.owners.get(&owner).map(|o| title_text(&o.title)).unwrap_or_default();
-        let mut title = vec![
-            Span::styled(" Editing ", Style::default().fg(theme::ACCENT)),
-            Span::styled(owner_title, Style::default().add_modifier(Modifier::BOLD)),
-            if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) },
-        ];
+        // the cursor in a conflict copy, or a block within one (§10.6)
+        let mut device = None;
+        let mut at = Some(owner);
+        while let Some(info) = at.and_then(|o| ed.buf.owners.get(&o)) {
+            let node = info.id.as_ref().and_then(|id| self.vault.tree.block_by_id(id)).map(|r| self.vault.tree.node(r));
+            if let Some(c) = node.and_then(|n| n.conflict()) {
+                device = Some(copy_device(c).to_string());
+                break;
+            }
+            at = info.parent;
+        }
+        // or the node the editor is open on in one: a node of a copy's
+        // file, or a block within it
+        if device.is_none() {
+            let up = self.editor_node().map(|r| self.chain(r)).unwrap_or_default();
+            device = up.iter().rev().find_map(|&c| self.vault.tree.node(c).conflict()).map(|c| copy_device(c).to_string());
+        }
+        let mut tail = vec![if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) }];
         let mode = ed.mode_name();
         if !mode.is_empty() {
             let bg = match mode {
@@ -912,11 +1110,11 @@ impl App {
                 "NORMAL" => theme::ACCENT,
                 _ => ratatui::style::Color::Magenta,
             };
-            title.push(Span::styled(format!(" {} ", mode), Style::default().bg(bg).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
-            title.push(Span::raw(" "));
+            tail.push(Span::styled(format!(" {} ", mode), Style::default().bg(bg).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
+            tail.push(Span::raw(" "));
         }
         let keys_label = ed.keys.name();
-        let block = rounded(Line::from(title), true);
+        let block = rounded(Line::default(), true);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let room = area.width.saturating_sub(4) / 2;
@@ -924,12 +1122,19 @@ impl App {
         // the keymap, a click away from the next one
         let label = format!(" ⌨ {} ", keys_label);
         let lw = label.width() as u16;
+        let mut end = start;
         if start > area.x + lw + 2 {
             let r = Rect { x: start - lw - 1, y: area.y, width: lw, height: 1 };
             let bg = if self.ui.hovered(r) { theme::BUTTON_HOVER } else { theme::BUTTON };
             put(f.buffer_mut(), r.x, r.y, &label, lw, Style::default().bg(bg).fg(ratatui::style::Color::White));
             self.ui.push(r, Hit::Button(Action::EditorKeys, None));
+            end = r.x;
         }
+        // the title left of them, never under them: its last blank is the
+        // label's or the button's own
+        let w = end.saturating_sub(area.x);
+        let title = editor_title(&owner_title, device.as_deref(), tail, w as usize);
+        f.buffer_mut().set_line(area.x + 1, area.y, &title, w.saturating_sub(1));
         self.ui.edit_area = inner;
         self.ui.push(inner, Hit::EditArea);
         // a command, search or message takes the pane's last line
@@ -1020,7 +1225,7 @@ impl App {
     fn popup(&mut self, f: &mut Frame, screen: Rect, r: Rect, title: &str, buttons: &[Action]) -> Rect {
         let r = r.intersection(screen);
         self.ui.push(screen, Hit::Backdrop);
-        self.ui.push(r, Hit::ReadingPane);
+        self.ui.push(r, Hit::Popup);
         f.render_widget(Clear, r);
         let block = rounded(Line::from(Span::styled(format!(" {} ", title), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
@@ -1073,8 +1278,16 @@ impl App {
             self.ui.menu = None;
             return;
         };
+        let items = self.menu_items();
+        // on a screen too short for it the separators go first, then the
+        // list scrolls with the selection (§10.1)
+        let shown: Vec<usize> = if items.len() + 2 > screen.height as usize {
+            (0..items.len()).filter(|&i| items[i].is_some()).collect()
+        } else {
+            (0..items.len()).collect()
+        };
         let w: u16 = 28;
-        let h = NODE_MENU.len() as u16 + 2;
+        let h = (shown.len() as u16 + 2).min(screen.height);
         let x = menu.x.min(screen.x + screen.width.saturating_sub(w));
         let y = if menu.y + h > screen.y + screen.height { screen.y + screen.height.saturating_sub(h) } else { menu.y };
         let r = Rect { x, y, width: w, height: h }.intersection(screen);
@@ -1084,11 +1297,15 @@ impl App {
         let block = rounded(Line::from(Span::styled(format!(" {} ", fit(&title, 20)), Style::default().add_modifier(Modifier::BOLD))), true);
         let inner = block.inner(r);
         f.render_widget(block, r);
-        for (i, item) in NODE_MENU.iter().enumerate() {
-            let yy = inner.y + i as u16;
-            if yy >= inner.y + inner.height {
-                break;
-            }
+        let view = inner.height as usize;
+        let mut top = menu.top;
+        follow(&mut top, shown.iter().position(|&i| i == menu.sel).unwrap_or(0), true, view, shown.len());
+        if let Some(m) = self.ui.menu.as_mut() {
+            m.top = top;
+        }
+        for (at, &i) in shown.iter().enumerate().skip(top).take(view) {
+            let item = &items[i];
+            let yy = inner.y + (at - top) as u16;
             let row = Rect { x: inner.x, y: yy, width: inner.width, height: 1 };
             let buf = f.buffer_mut();
             match item {
@@ -1096,14 +1313,17 @@ impl App {
                     put(buf, inner.x, yy, &"─".repeat(inner.width as usize), inner.width, Style::default().fg(theme::DIM));
                 }
                 Some(a) => {
-                    let hovered = self.ui.hovered(row);
-                    if hovered {
-                        if let Some(m) = self.ui.menu.as_mut() {
-                            m.sel = i;
-                        }
-                    }
-                    let sel = self.ui.menu.as_ref().map(|m| m.sel == i).unwrap_or(false);
-                    let base = if sel { Style::default().bg(theme::SEL) } else { Style::default() };
+                    // the item the pointer moved onto is highlighted
+                    // (mouse.rs); once the keys or the wheel move on, the
+                    // row it rests on is only hovered
+                    let bg = if menu.sel == i {
+                        Some(theme::SEL)
+                    } else if self.ui.hovered(row) {
+                        Some(theme::HOVER)
+                    } else {
+                        None
+                    };
+                    let base = bg.map(|b| Style::default().bg(b)).unwrap_or_default();
                     buf.set_style(row, base);
                     let label_style = if *a == Action::Delete { base.fg(theme::DANGER) } else { base };
                     put(buf, inner.x + 1, yy, a.label(), inner.width.saturating_sub(2), label_style);
@@ -1174,11 +1394,15 @@ impl App {
 
     /// A list row for a node: its title, then its parents dimmed.
     fn path_spans(&self, r: NRef) -> Vec<(String, Style)> {
-        let path: Vec<String> = self.path_titles(r).iter().map(|t| title_text(t)).collect();
+        let chain = self.chain(r);
+        let path: Vec<String> = chain.iter().map(|&c| title_text(&self.vault.tree.node(c).title)).collect();
         let (last, parents) = path.split_last().map(|(l, p)| (l.clone(), p.join(" › "))).unwrap_or_default();
         let last = if last.is_empty() { "(untitled)".into() } else { last };
+        // one in a conflict copy, or the copy, is marked as the copy's row is
+        let copy = chain.iter().any(|&c| self.vault.tree.node(c).conflict().is_some());
         vec![
             (last, Style::default().add_modifier(Modifier::BOLD)),
+            (if copy { " ⚠".into() } else { String::new() }, Style::default().fg(theme::WARN)),
             (if parents.is_empty() { String::new() } else { format!("  {}", parents) }, Style::default().fg(theme::DIM)),
         ]
     }
@@ -1251,11 +1475,22 @@ impl App {
         let lines = super::help_text();
         let r = Self::centered(screen, 78, lines.len() as u16 + 2);
         let inner = self.popup(f, screen, r, "Help", &[Action::Close]);
-        f.render_widget(Paragraph::new(lines), inner);
+        // where the screen is short it scrolls, a bar on its right border
+        let (view, len) = (inner.height as usize, lines.len());
+        follow(&mut self.help_scroll, 0, false, view, len);
+        f.render_widget(Paragraph::new(lines).scroll((self.help_scroll as u16, 0)), inner);
+        if len > view {
+            let mut st = ScrollbarState::new(len - view).position(self.help_scroll);
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None),
+                Rect { y: r.y + 1, height: r.height.saturating_sub(2), ..r },
+                &mut st,
+            );
+        }
     }
 
     fn draw_conflict(&mut self, f: &mut Frame, area: Rect) {
-        let pairs = fold_core::merge::conflict_pairs(&self.vault);
+        let pairs = self.view_pairs();
         let buf = f.buffer_mut();
         let head = Rect { height: 1, ..area };
         buf.set_style(head, Style::default().bg(theme::BAR));
@@ -1279,7 +1514,7 @@ impl App {
         let half = body.width / 2;
         let left = Rect { width: half, ..body };
         let right = Rect { x: body.x + half, width: body.width - half, ..body };
-        let who = self.vault.tree.node(theirs).block.as_ref().and_then(|b| b.prop("conflict").map(|s| s.trim_matches('"').to_string())).unwrap_or_default();
+        let who = self.vault.tree.node(theirs).conflict().map(copy_from).unwrap_or_default();
         for (rect, r, title, color) in [
             (left, ours, " This device ".to_string(), theme::ACCENT),
             (right, theirs, format!(" Other device · {} ", who), theme::WARN),

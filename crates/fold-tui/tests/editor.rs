@@ -854,10 +854,10 @@ fn a_cut_block_title_not_pasted_back_deletes_the_block() {
 
 #[test]
 fn a_line_cut_before_a_reload_and_pasted_after_it_is_saved() {
-    // another program changes the file while a nested block's title line is
-    // cut: the editor is re-rendered over the files as they are (§11.2), and
-    // the pasted line is text of the block it lands in, not a line of a
-    // block the new buffer does not have, written nowhere
+    // another program changes the edited node while a nested block's title
+    // line is cut: the editor is re-rendered over the files as they are
+    // (§11.2), and the pasted line is text of the block it lands in, not a
+    // line of a block the new buffer does not have, written nowhere
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- task\n- two\n\n# B\n\nb\n").unwrap();
     let mut v = fold_core::vault::Vault::open(d.path()).unwrap();
@@ -873,12 +873,12 @@ fn a_line_cut_before_a_reload_and_pasted_after_it_is_saved() {
     ctrl(&mut app, 'k');
     ctrl(&mut app, 's');
     assert_eq!(root(&d), "# A\n\n- one\n- two\n\n# B\n\nb\n");
-    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n- two\n\n# B\n\nb, from Helix\n").unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one, from Helix\n- two\n\n# B\n\nb\n").unwrap();
     app.reload_external();
     ctrl(&mut app, 'v');
     keys(&mut app, "⎋");
     assert_eq!(app.mode_pub(), "normal");
-    assert_eq!(root(&d), "# A\n\n- one\n- task\n- two\n\n# B\n\nb, from Helix\n");
+    assert_eq!(root(&d), "# A\n\n- one, from Helix\n- task\n- two\n\n# B\n\nb\n");
 }
 
 #[test]
@@ -999,10 +999,10 @@ fn a_cut_block_title_is_deleted_when_a_reload_re_renders_the_editor() {
     ctrl(&mut app, 'k');
     ctrl(&mut app, 's');
     assert!(block.exists(), "in transit");
-    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n  body\n- two\n\n# C\n").unwrap();
+    std::fs::write(d.path().join("root.md"), "# A\n\n- one\n  body\n- two\n- three\n").unwrap();
     app.reload_external();
     assert!(!block.exists());
-    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n\n# C\n");
+    assert_eq!(root(&d), "# A\n\n- one\n  body\n- two\n- three\n");
 }
 
 #[test]

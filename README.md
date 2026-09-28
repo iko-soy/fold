@@ -57,7 +57,8 @@ The TUI is mouse-first, and every action also has a key.
 
 Keys, in the outline: `j`/`k` move, `h`/`l` fold, `Enter` zooms, `e` edits, `x` checks a
 task, `n`/`N` add a sibling or child, `J`/`K` move a node, `>`/`<` indent, `r` moves a
-subtree elsewhere, `u`/`U` undo and redo, `?` shows everything. Everything is saved as you
+subtree elsewhere, `u`/`U` undo and redo, `?` (or `F1`) shows everything. The status bar
+says what a key did, then which keys come next where you are. Everything is saved as you
 go; `q` quits. The view — the pane, folds, zoom, wrapping, the editor's keys — is remembered
 per vault for next time.
 
@@ -65,7 +66,10 @@ per vault for next time.
 
 `e` edits the selected subtree's Markdown in the reading pane. It saves on its own — when
 you pause, when you leave a part of the tree that lives in another file, and when you're
-done. Pick a keymap with `--keys` or `$FOLD_KEYS`, or click `⌨` in the editor's border:
+done, or when fold is closed some other way (the window closed, the ssh session dropped,
+a crash). Text it cannot save because the file changed under it goes to the trash, and
+fold says where; `fold trash restore` prints it and leaves it there. Pick a keymap with
+`--keys` or `$FOLD_KEYS`, or click `⌨` in the editor's border:
 
 - **normal** (default) — a conventional editor like micro: Shift+arrows select,
   `Ctrl-C`/`X`/`V`, `Ctrl-Z`/`Y`, `Ctrl-S`, `Ctrl-F`.
@@ -104,7 +108,8 @@ Two boxes in the closet, one at Hetzner.
 
 Nothing else is special. Deleting goes to a trash (`$XDG_STATE_HOME/fold/trash`), and
 Syncthing conflict copies are merged node by node, with anything that differs kept as a
-`conflict:` block to resolve in the app.
+`conflict:` block to resolve in the app: it is marked `⚠` in the outline, and a click on the
+`⚠` shows both sides.
 
 ## The command line
 

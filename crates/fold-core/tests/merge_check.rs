@@ -393,6 +393,45 @@ fn sync_conflict_merge_keeps_embeds_in_the_merged_file() {
 }
 
 #[test]
+fn a_copy_from_before_a_block_was_moved_is_merged_without_its_embed() {
+    // the block was cut from NAS in the editor, which wrote root.md
+    // without its embed, and is not pasted yet: moved on this device. The
+    // phone's copy, from before the cut, still embeds it in NAS; its own
+    // change comes in, the embed does not, nor into NAS's conflict copy
+    // where the phone changed NAS's text too
+    let ours = "# Homelab\n\n## NAS\n\nMirrored pairs.\n\n### [x] Replace fan\n\n# Inbox\n\n- [ ] a\n";
+    let before = ours.replace("### [x]", &format!("### ![[{}]]\n\n### [x]", BID));
+    for nas in ["Mirrored pairs.", "Snapshots every 2h."] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.md"), ours).unwrap();
+        let block = dir.path().join("racfer~snapshot-policy.md");
+        let text = format!("---\nid: {}\n---\n\n# [ ] Snapshot policy\n\n- hourly\n", BID);
+        std::fs::write(&block, &text).unwrap();
+        let copy = "root.sync-conflict-20260927-101010-PHONE77.md";
+        let theirs = before.replace("- [ ] a\n", "- [ ] a\n- [ ] from phone\n").replace("Mirrored pairs.", nas);
+        std::fs::write(dir.path().join(copy), theirs).unwrap();
+        let mut v = Vault::open(dir.path()).unwrap();
+        let moving = [fold_core::ident::Id::parse(BID).unwrap()];
+        merge::merge_sync_conflicts_moving(&mut v, false, &moving).unwrap();
+        assert!(!dir.path().join(copy).exists(), "{}", nas);
+        let merged = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+        let embed = format!("![[{}]]", BID);
+        assert!(!merged.contains(&embed), "{}: {}", nas, merged);
+        assert_eq!(std::fs::read_to_string(&block).unwrap(), text, "{}", nas);
+        if nas == "Mirrored pairs." {
+            assert_eq!(merged, ours.replace("- [ ] a\n", "- [ ] a\n- [ ] from phone\n"));
+            assert!(merge::conflict_pairs(&v).is_empty(), "{}", merged);
+            continue;
+        }
+        assert!(merged.contains("- [ ] from phone\n"), "{}", merged);
+        let pairs = merge::conflict_pairs(&v);
+        assert_eq!(pairs.len(), 1, "{}", merged);
+        let theirs = &v.tree.files[pairs[0].1 .0].text;
+        assert!(theirs.contains("Snapshots every 2h.") && !theirs.contains(&embed), "{}", theirs);
+    }
+}
+
+#[test]
 fn merge_leaves_ignored_files_alone() {
     // §4.1/§11.4: a `.md` file without an id is ignored — never parsed,
     // never written. A sync-conflict copy of it is not ours to merge.
@@ -467,6 +506,23 @@ fn merge_with_missing_base_keeps_theirs_frontmatter() {
     let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
     assert!(outcomes.iter().any(|o| o.contains("left alone")), "{:?}", outcomes);
     assert!(dir.path().join(c).exists() && !dir.path().join("readme.md").exists());
+}
+
+#[test]
+fn merge_takes_a_block_that_came_in_with_its_copy_for_one() {
+    // the vault as read before a sync brought a new block, its embed and
+    // a copy of it in one go: X.md is a block on disk, not an ignored
+    // file, and its copy is merged into it (§12.2)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n").unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    std::fs::write(dir.path().join("root.md"), format!("# A\n\n![[{}]]\n", BID)).unwrap();
+    std::fs::write(dir.path().join("racfer~t.md"), format!("---\nid: {}\n---\n\n- [ ] t\n", BID)).unwrap();
+    let c = "racfer~t.sync-conflict-20260912-100000-phone.md";
+    std::fs::write(dir.path().join(c), format!("---\nid: {}\n---\n\n- [x] t\n", BID)).unwrap();
+    let outcomes = merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert!(!dir.path().join(c).exists(), "{:?}", outcomes);
+    assert_eq!(merge::conflict_pairs(&v).len(), 1, "{}", v.tree.files[0].text);
 }
 
 #[test]
@@ -655,4 +711,58 @@ fn sync_conflict_on_a_block_embedded_twice_pairs_where_it_is_shown() {
     let ours = v.tree.node(pairs[0].0).block.as_ref().and_then(|b| b.id.as_ref());
     assert_eq!(ours.map(|i| i.to_string()), Some(BID.to_string()));
     assert_eq!(std::fs::read_to_string(dir.path().join("root.md")).unwrap(), root);
+}
+
+/// A vault merged with a phone's copy of its root.md: B's text and the
+/// third task differ, so B and three each get a conflict copy (§12.4).
+fn merged_with_copies() -> (tempfile::TempDir, Vault) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.md"),
+        "# A\n\n## B\n\nours\n\n- [ ] one\n- [x] two\n\n## C\n\n- [ ] three\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        "# A\n\n## B\n\ntheirs\n\n- [ ] one\n- [x] two\n\n## C\n\n- [x] three\n",
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    assert_eq!(merge::conflict_pairs(&v).len(), 2);
+    (dir, v)
+}
+
+#[test]
+fn a_conflict_copy_s_tasks_are_left_out_of_the_counts_above_it() {
+    // §3.5: a copy repeats the node before it, so its tasks would count
+    // twice, the one the phone checked as open and done at once
+    let (_dir, v) = merged_with_copies();
+    let a = v.find_by_path(&["A".into()]).unwrap();
+    assert_eq!(v.tree.task_counts(a), (2, 3));
+    let c = v.find_by_path(&["A".into(), "C".into()]).unwrap();
+    assert_eq!(v.tree.task_counts(c), (1, 1));
+    // a copy counts its own
+    let copy = merge::conflict_pairs(&v).into_iter().map(|(_, t)| t).find(|&t| v.tree.node(t).title == "B").unwrap();
+    assert_eq!(v.tree.task_counts(copy), (1, 2));
+}
+
+#[test]
+fn clear_done_keeps_a_done_task_with_an_open_one_in_a_conflict_copy_below() {
+    // counts leave copies out, clearing does not: the phone reopened e, and
+    // its copy is not trashed with d (§8.5, §12.5)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# A\n\n- [x] d\n  - [x] e\n").unwrap();
+    std::fs::write(
+        dir.path().join("root.sync-conflict-20260912-100000-phone.md"),
+        "# A\n\n- [x] d\n  - [ ] e\n",
+    )
+    .unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    merge::merge_sync_conflicts(&mut v, false).unwrap();
+    let a = v.find_by_path(&["A".into()]).unwrap();
+    fold_core::ops::clear_done(&mut v, a).unwrap();
+    let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
+    assert!(text.contains("- [x] d\n"), "{}", text);
+    assert!(text.contains("![["), "{}", text);
 }

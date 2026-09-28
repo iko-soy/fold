@@ -245,8 +245,9 @@ Titles may not contain `/` (the path separator). `[` and `]` are discouraged.
 ### 3.5 Derived facts
 
 Computed by the index, never stored in files: heading level, indent, path, file, span,
-open/done task counts per subtree (`3/7` in the outline), per-file mtime. Per-node
-timestamps are not tracked by the app (§12.6).
+open/done task counts per subtree (`3/7` in the outline; a conflict copy's tasks, §12.4,
+are not counted above it), per-file mtime. Per-node timestamps are not tracked by the app
+(§12.6).
 
 ---
 
@@ -582,8 +583,9 @@ in it moved. `splice(block)` writes one dirty block:
 
 Splice runs without being asked (§10.6): when the cursor moves from a dirty block into
 another block, after a pause in typing, on leaving the editor, before any outline verb,
-before a reload, and on quit. A commit may write several files — one per dirty block — but
-each block is written by its own splice, and the law holds per block.
+before a reload, and on quit or any other end of the app. A commit may write several
+files — one per dirty block — but each block is written by its own splice, and the law
+holds per block.
 
 Edge cases follow from the tags, not from rules:
 
@@ -796,10 +798,12 @@ Dates are ISO, `YYYY-MM-DD`. The property editor refuses anything else for `due`
 
 Done items stay where they are: one line each, in the context that gave them
 meaning, which is the cheapest history there is. The panes dim them, and `zd` toggles
-hiding them (remembered with the view, §10.1).
+hiding them (remembered with the view, §10.1). The selection stays on its node; one
+hidden with them gives way to its next shown sibling, else the row above it.
 
 When a list is genuinely finished, *clear done* (palette) trashes every done item with no
-open descendants under `target` (default: current zoom root); task blocks'
+open descendants under `target` (default: current zoom root), unless a conflict copy of
+it stays (§12.5); task blocks'
 files go to trash too. For whole finished subtrees — a completed project, a concluded
 meeting series — `za` refiles them under `Archive` (§6.5). The trash (§11.5) and file versioning (§12.6) backstop both.
 
@@ -845,16 +849,43 @@ Four regions, each of them live under the pointer:
   count). Done tasks are dimmed and struck through; sections are bold. Long titles end in
   `…`. Beside the reading pane, the date and count sit at the pane's right edge and rows
   show titles only. Without it, they follow the title, and after them, dimmed, comes the
-  first line of the node's own text, so no prose is out of sight.
+  first line of the node's own text, so no prose is out of sight. A conflict copy
+  (§12.5) has `⚠`, in the warning colour, for `▤`, and, in place of its text, whose copy
+  it is: *other device · PHONE 09-27 10:00*. It starts folded until unfolded or zoomed
+  into, a fold the view does not remember.
 - The **reading pane**: `render(target, 1, true)`, the zoom root's or else the selected
   node's, with light Markdown styling (§10.9); a block's properties appear as a dimmed
-  `⚑` line under its title, never as text. Its border carries the node's title and the
+  `⚑` line under its title, never as text, and a conflict copy's title line ends in its
+  `⚠` and whose copy it is, as its row does. Its border carries the node's title and the
   buttons *Edit* and `⋯` (the node menu). While editing, the pane is the editor (§10.6) and
   its buttons are *Done* and *Revert*.
 - The **status bar**: the last message on the left (at start, a hint at the gestures and
   `?`, cut down to *right-click for actions · ? help* where it doesn't fit); on the right
-  the unresolved conflicts (click to resolve), *done hidden* when `zd` is on (click to
-  show), the file, and the save state.
+  the unresolved conflicts (click to resolve; lit while new ones wait, §10.7), *done
+  hidden* when `zd` is on (click to show), the file, and the save state. A verb's message
+  names the node it acted on, in the menus' words, with the next key where one helps —
+  *deleted “Homelab” (12 nodes) · u undoes*, *moved “rack” to “NAS” — placed before the
+  sections* when the ordering rule chose the place (§3.1); in the reading pane, whose keys
+  are its own (§10.4), the step is the menu of the line's node: *copied “NAS” · m, then
+  choose Paste after*; in the editor, where every key is text (§10.6), it is the
+  pointer's, short enough to keep the node and the item to choose at 80 columns: *copied
+  “NAS” · right-click, Paste after*, *deleted “rack” · click ↶ Undo* — and names no file
+  or id (§1, 3b), but for undo or redo refusing
+  (§10.10); where the bar is short, the right gives way first, the ⚠ count down to its
+  number (*⚠ 1*), then the file, until the message fits; then the names are cut down,
+  the longest first, before the words around them. Once a message is some 5 s old and a key
+  or click has come since, the next step takes its place: the keys of what is on screen —
+  *n new · e edit · x done · m menu · / find · ? help* in the outline, *e edit · Enter
+  zoom/follow · Tab outline* in the reading pane, *Esc done · Ctrl-S save · Ctrl-Z undo* in
+  the editor (*i insert · :q! revert · :wq done* in Vim and Helix, where `Esc` never
+  leaves), *n add · Enter change · d delete · Esc close* in the property form, and each
+  popup's own — cut down by whole parts where they don't fit, the first and the last kept,
+  so the way on (*? help*, *Esc done*, *:wq done*) stays. An error or a refusal
+  (*error: …*, *can't …*, *… refused: …*) stays until a key or click that comes once it
+  is that old. The greeting is the outline's, and gives way at once to the editor's or a
+  popup's keys. While a key sequence is half typed, the bar says what can follow it:
+  *z… p pane · w wrap · d hide done · r raw · a archive*, cut down from its end where it
+  doesn't fit; with done hidden, *d show done* comes first.
 
 The outline fills the screen. The reading pane is hidden until asked for: `zp` or the top
 bar's `◨` (*Reading pane*) shows it, `Tab` shows it and moves focus there, and the editor
@@ -883,6 +914,7 @@ title ends in `…`.
 | click | an outline row | select it (the reading pane follows) |
 | click | `▸` / `▾` | fold / unfold |
 | click | `☐` / `☑`, in either pane | toggle the task |
+| click | a conflict copy's `⚠`, in either pane | the conflict view at its pair (§10.7) |
 | click | `⋯` (shown on the selected and the hovered row) | the node menu |
 | click | a breadcrumb segment | zoom there |
 | click | a link in the reading pane | open it |
@@ -899,22 +931,40 @@ title ends in `…`.
 While dragging, the target row is highlighted (*into*) or marked with `▶` and a bar
 (*before*), the row being moved is dimmed, the status bar spells out the move, and the pane
 scrolls when the pointer reaches its edge. Both drops are clamped by the ordering rule
-(§3.1) and say so when they are; a drop into the node's own subtree is refused. One drag is
-one undo step.
+(§3.1) and say so when they are; a drop into the node's own subtree is refused, and so is
+one into a conflict copy it is not in, which keeping ours trashes (§12.5): over the copy's
+title or a row in it, nothing is marked and the status bar says why. One drag is one undo
+step.
+
+**No key acts out of sight.** The wheel leaves the selection, and the reading pane's cursor,
+where they are, even out of view. A key that acts on one — in the outline
+`x t d s J K > < ~ za r p P`, `e a m y` and the folds; in the reading pane `x`, `Enter` and
+`e a m o` — first scrolls it back into view, a third of the way down. A key that changes
+nothing then acts; one that changes something stops there, and until the next key or click
+the status bar says what a second press does: *press d again to delete “Replace fan”*.
+Pressed again, with the node in view, it acts. The pointer acts where it points and is
+never held back.
 
 **The node menu** (right-click, `⋯`, or `m`) lists every action on a node, each with its key:
 *Edit · Zoom in · Properties… | New sibling · New child | Done / reopen · Task on / off ·
 Heading ↔ bullet · Make block | Move up · Move down · Indent · Outdent · Move to… · Archive |
-Copy · Paste after · Paste before · Delete*. Hovering highlights an item; a click runs it.
+Copy · Paste after · Paste before · Delete*, and on either side of a conflict pair, last,
+*Resolve conflict…*: the conflict view at that pair. Moving the pointer onto an item
+highlights it, and a click runs it; `↑`/`↓` and the wheel move the highlight on, whatever
+item the pointer rests on. On a screen too short for it the separators go first, then the
+list scrolls with the selection.
 
 **Pickers instead of typing.** Where an action needs a node — *Move to…*, *Go to…* — the
 prompt is a list of every node, title first and path dimmed, narrowed as you type (title
 prefix, then title, then path) and picked with a click or `↑`/`↓` and `Enter`. A typed id,
-path or title (§3.4) still works. *Move to…* leaves out the moving node's own subtree.
+path or title (§3.4) still works. *Move to…* leaves out the moving node's own subtree, and
+its conflict pair's, which moves with it, and conflict copies, which keeping ours trashes
+(§12.5); *Go to…* marks a node in one `⚠`.
 
 Every popup — node menu, prompt, properties, filter, commands, help — has its buttons on
 its bottom border (*OK*, *Close*, …), a list you can click and scroll, and closes on a click
-outside it or `Esc`.
+outside it or `Esc`. It covers the panes: a click, right-click or wheel inside it never
+reaches what is behind it, so a right-click there opens no node menu.
 
 ### 10.2 Modes
 
@@ -942,24 +992,30 @@ the popup — closes the topmost thing.
 | `Ctrl-d` / `Ctrl-u` | half-page down / up |
 | `Enter` | zoom: reading pane shows the cursor node; reading pane takes focus |
 | `Backspace` | zoom out to parent |
-| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged |
-| `~` | toggle spelling, section ↔ item (subtree unchanged). The node moves to its parent's boundary (§3.1): an item respelled as a section becomes the first section child, a section respelled as an item the last item child, so no sibling changes parent |
-| `J` / `K` | move node down / up past the next / previous sibling node; text children stay put. An item never moves below a section sibling, nor a section above an item: the move is refused with a message |
+| `>` / `<` | demote / promote: become the last child of the previous sibling node / the next sibling of the parent, both clamped by the ordering rule (§3.1): an item promoted out of a section lands just before the parent's first section sibling. Spelling unchanged. `>` is refused under a conflict copy, which keeping ours trashes; a node and its conflict copy go as one, from either side (§12.5) |
+| `~` | toggle spelling, section ↔ item (subtree unchanged). The node moves to its parent's boundary (§3.1): an item respelled as a section becomes the first section child, a section respelled as an item the last item child, so no sibling changes parent. Refused on either side of a conflict pair until it is resolved (§12.5) |
+| `J` / `K` | move node down / up past the next / previous sibling node; text children stay put. A node and its conflict copy (§12.4) move as one, and a node moves past them as one. An item never moves below a section sibling, nor a section above an item: the move is refused with a message |
 | `n` / `N` | new sibling after cursor / new last child, spelled like the cursor node / like the last child node (a section if the parent has section children): inserts an empty node and opens it with `e` |
 | `e` | edit the subtree's Markdown in the built-in editor; saves as you go (§10.6) |
 | `a` | property editor: a form over the node's properties (§10.6); first property on a plain node makes it a block |
 | `x` | toggle task open / done: the checkbox, plus `done:` on a block |
 | `t` | toggle task-ness: adds or removes the checkbox (and a block's `done:`) |
 | `s` | make the node a block |
-| `y` / `d` | yank / delete subtree into the register (delete goes to trash too) |
+| `y` / `d` | yank / delete subtree into the register (delete goes to trash too, and takes the node's conflict copies with it, §12.5) |
 | `p` / `P` | paste register after / before cursor as sibling, clamped by the ordering rule (§3.1) |
 | `r` | refile: fuzzy-pick a destination; `Ctrl-Enter` = as first child |
 | `c` / `C` | capture to the inbox as bullet / as task |
 | `/` | filter box (§10.5) |
 | `m` | the node menu (§10.1) |
-| `:` | command palette (§10.8); `?` help |
+| `:` | command palette (§10.8); `?` or `F1` help |
 | `u` / `U` | undo / redo |
 | `q` | quit (nothing is ever unsaved in normal mode) |
+
+A second key that follows the first in no sequence (`zq`) does nothing and says so: *zq
+does nothing · after z press p, w, d, r or a*; `Esc` or a click lets the first key go. A
+few keys fold has no use for, where one often reaches for them, say what to press instead:
+`i` (*i does nothing here: e edits*), `o` (*n adds a node below*), `Delete` (*d deletes*),
+`Ctrl-Z` (*u undoes*), `Ctrl-F` (*/ finds*); any other key that does nothing says nothing.
 
 ### 10.4 Reading pane — normal mode
 
@@ -973,15 +1029,15 @@ the popup — closes the topmost thing.
 | `o` | open external link under cursor (`xdg-open` / `open`) |
 | `[[` / `]]` | previous / next heading |
 | `/` | in-block search; `n` / `N` next / previous match |
-| `:` `?` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor |
+| `:` `?` `F1` `m` `c` `C` `u` `U` `z…` | as in the outline; `m` is the menu of the node under the cursor; `i`, `Delete` (*m, then choose Delete*), `Ctrl-Z` and `Ctrl-F` (*/ searches*) say what to press instead |
 
 ### 10.5 Filter box
 
 `/`, or *Filter* in the top bar, opens a popup with an input and the hits below it:
 fuzzy title match (nucleo) and full-text match over every text child, each hit shown as its
-title with its path dimmed. Clicking a hit — or `↑`/`↓` and `Enter` — unfolds its
-ancestors and selects it. `Esc` or a click outside closes. Creating nodes is `n` / `N`
-(§10.3).
+title with its path dimmed, and `⚠` after the title of a hit in a conflict copy (§12.5).
+Clicking a hit — or `↑`/`↓` and `Enter` — unfolds its ancestors and selects it. `Esc` or a
+click outside closes. Creating nodes is `n` / `N` (§10.3).
 
 ### 10.6 Editing
 
@@ -998,11 +1054,39 @@ app keeps track. Blocks are saved on their own:
 - when the cursor moves out of a block that has changed;
 - after 750 ms without a keystroke;
 - on `Esc` or *Done* (back to normal mode), on any outline verb, before a reload caused by
-  an external change, and on quit.
+  an external change, and on quit;
+- when the app ends any other way: `SIGTERM`, `SIGHUP` (a closed window, a dropped ssh
+  session), `SIGINT`, an I/O error, a panic. A second `SIGTERM` or `SIGINT` ends it at
+  once, unsaved, as the signal would: the way out while a write waits on a terminal that
+  reads nothing. A `SIGHUP` before one does not make it a second.
 
-The pane's border shows the title of the block the cursor is in and a dot while something
-is unsaved, and lines of other blocks in the subtree are drawn a shade dimmer — the only
-hints that blocks exist. *Revert* (or `:q!`) discards changes made since the last save.
+An outline verb that writes re-renders the editor over what it wrote, so the save before it
+deletes a block cut there and not pasted back (§5.2). One that writes nothing — a copy, a
+zoom, help, the palette, the filter, a view toggle, or a prompt or the property form until
+it writes — leaves the editor as it is, a cut block still to paste.
+
+A save shows in the status bar's save state (§10.1), not as a message, but for `:w` and
+`Ctrl-S`, which are asked for and answer *saved*, and one that an outside change forced,
+which the news of what came in mentions first, so that where the bar is short the list
+of it gives way: *↻ typing saved; changed outside fold: Inbox (+1 item)* (§11.2). News
+of a sync conflict says what to do and no more (§10.7).
+
+The pane's border shows the title of the block the cursor is in, *⚠ conflict copy from
+PHONE* after it in a conflict copy (§12.5), and a dot while something is unsaved, and lines
+of other blocks in the subtree are drawn a shade dimmer — the only hints that blocks
+exist. The border's text stays left of `⌨` and the buttons: where that is short, the title
+gives way first, to its first letters, then the words after ⚠ (*⚠ copy from PHONE*, then
+*⚠*), then *Editing*; the ⚠, the dot and the Vim or Helix mode stay whole.
+*Revert* (or `:q!`) discards changes made since the last save.
+
+Text a save cannot take — its block changed on disk under it (§5.2) — stays in the editor,
+and is never dropped without a copy unless asked twice: *Revert* first writes the editor's
+whole text to the trash as `unsaved-<title>.md` (§11.5) and the status line names the entry,
+and the app ending any way but a quit does the same, saying where once the terminal is back:
+a panic in the save itself too, whether an autosave, `Esc` or leaving a block ran it.
+Where the trash cannot be written, *Revert* drops nothing and says so, and a second *Revert*
+on the same text drops it. However it ends, but for that second signal, the app leaves the
+terminal as it found it, a panic's message printed after.
 
 **Keymaps.** The editor speaks one of three keymaps, over the same text, cursor, selection,
 clipboard and undo:
@@ -1031,6 +1115,7 @@ All three take `:` commands — `:w` save, `:q` / `:wq` / `:x` done, `:q!` / `:e
 selects, a double-click selects a word, the wheel scrolls, and text pasted into the
 terminal is inserted as typed. Copying also sets the system clipboard (OSC 52). Undo
 inside the editor is the editor's own; each save is still one entry in the op log (§10.10).
+`F1` shows the help, `?` being text here.
 
 The keymap is `$FOLD_KEYS` (`normal`, `vim`, `helix`), or `--keys`; the *Editor keys*
 action, or the `⌨` label in the editor's border, switches it, and the choice is remembered
@@ -1055,9 +1140,20 @@ and each saves the editor first.
 
 ### 10.7 Conflict view
 
-Entered when a `.sync-conflict-*` file is detected or a splice hits a changed span. Shows
-each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
-`t` keeps theirs, `b` keeps both, `e` edits, `n` / `N` next / previous, `Enter` finishes.
+Opened by the status bar's ⚠ count or *Resolve conflicts*; at a pair, by a copy's `⚠` or
+*Resolve conflict…* in either side's node menu; and on its own when a `.sync-conflict-*`
+file is detected or a splice hits a changed span — on the first new pair in the outline,
+and only from an outline at rest: normal mode, nothing open over it, no key, paste or
+click for 2 s. A busy user is not interrupted: the mode stays, the editor keeps its text,
+the status line names the node — *sync conflict in “NAS”: click ⚠ to resolve*
+— and the ⚠ count is lit until the view opens, from a click or on its own once the outline
+is at rest. Opened on its own, for its first half second it ignores `o t b e`, meant for
+what was there before. Pairs that come in while it is open leave it on the pair it shows.
+
+It shows each conflict pair (ours in place, the `conflict:` block right after it) side by side; `o` keeps ours,
+`t` keeps theirs, `b` keeps both, `e` edits, `n` / `N` next / previous, `u` / `U` undo / redo,
+`Enter` finishes. Each choice names its node — *kept theirs for “NAS” · u undoes* — and is
+one undo step.
 The view's top bar carries the same as buttons — *Previous*, *Next*, *Keep ours*, *Keep
 theirs*, *Keep both*, *Edit ours*, *Close* — and the two versions sit side by side, this
 device's on the left.
@@ -1076,7 +1172,8 @@ follows (§10.1). `Esc` or a click outside closes.
 There is no command syntax: nothing is typed except the search and the argument. Every
 action is in the palette under a readable name, and the four that have no key or button
 live only there: *Clear done*, *Canonicalize*, *Merge sync conflicts*, *Resolve
-conflicts*. `?` is help: the pointer gestures first, then the keys.
+conflicts*. `?` is help: the pointer gestures first, then the keys. Where it is taller
+than the screen it scrolls, a bar on its right border: `j`/`k`, `↑`/`↓` or the wheel.
 
 ### 10.9 Markdown styling in the reading pane
 
@@ -1115,8 +1212,19 @@ before and after, where *absent* stands for a file the operation created or dele
 a block, trashing one). An operation that changed nothing leaves no entry, so it does not
 clear the redo stack. Undo checks every touched file against its *after* text, and redo
 against its *before* text; if any differs — another editor or a sync changed it since — it
-refuses with a message naming the file, writes nothing, and keeps the entry. Files the
+refuses with a message naming the file, writes nothing, and keeps the entry. An entry is
+named in words, by what was done to which node — *mark “rack” done*, *delete “Homelab”*,
+*edit “NAS”* for an editor save — and undo and redo say it: *undone: mark “rack” done*,
+*undo refused: root.md changed since mark “rack” done; not overwriting*. Files the
 operation did not touch are never written by undo, so an external edit to them survives.
+A block cut in the editor and not pasted back (§5.2) is trashed in the entry of the save
+that wrote its embed out, even when a later save, *Revert* or a change from outside that
+re-renders the editor (§11.2) is what deletes it, so one undo puts back its embed and its
+file together, or refuses both where that change is in the way. One pasted back after a
+save wrote its embed out makes that save, the one that writes the embed back and those
+between one entry, so no undo stops where its file is embedded nowhere: one undo puts it
+back where it was. Where a file they touched changed from outside between two of them,
+they stay apart, as undoing them as one would drop that change.
 
 ---
 
@@ -1136,14 +1244,32 @@ operation did not touch are never written by undo, so an external edit to them s
 ### 11.2 Watcher and reload
 
 `notify`-based recursive watcher on the vault, 200 ms debounce, ignoring the patterns in
-§11.4.
+§11.4. Only writes count — a file created, written, renamed or removed — never a file
+opened or read, as every reload reads them all. A reload runs only when the files differ
+from what the app last read or wrote (a file's text changed, a file came or went) or a new
+`*.sync-conflict-*.md` file appeared. The app's own writes, seen once they land, reload
+nothing.
 
 - A changed file that the user is not editing is re-parsed; the cursor is re-attached by
   id, then key (§3.4), then the deepest step of the key that still exists.
+- The status line says what came in, by the top-level nodes it touched:
+  `↻ changed outside fold: Inbox (+1 item)`.
 - A changed file with a built-in edit in progress: the editor saves its dirty blocks first;
   a block whose span hash no longer matches is merged two-way (§5.2 step 5), then the file
-  is re-parsed and the buffer re-rendered around the cursor.
-- A new `*.sync-conflict-*.md` file starts the merge flow (§12).
+  is re-parsed and, where the text the buffer shows changed, the buffer re-rendered around
+  the cursor; a block cut there and not pasted back is deleted then (§5.2). A change that
+  leaves that text as it was — to another node of the same file, as the phone adding to
+  the Inbox in `root.md`, or to a file the buffer does not hold — leaves the editor as it
+  is, a cut block still to paste.
+- A new `*.sync-conflict-*.md` file starts the merge flow (§12). What it merges without a
+  pair is said as above, at startup too; a copy that brings nothing in, one it leaves alone
+  or one the same as its file, says nothing, nor that the editor saved first for it. A copy
+  it leaves alone or fails on is no change by itself, and is tried again with the next
+  change. A copy that lands while a reload runs, as the next of a batch Syncthing delivers
+  a moment apart, is new to the next reload. A block cut in the editor and not pasted back
+  is moved on this device: a copy from before the cut, as the phone's `root.md` with an
+  item added to the Inbox, still embeds it where it was, and is merged without that embed
+  (§12.3): the block is not put back there, and the paste embeds it once.
 - A deleted file that was a block marks its embed broken; nothing is written.
 - Editing the same vault in Helix at the same time is a supported workflow.
 
@@ -1169,8 +1295,12 @@ engine.
 
 Deleted subtrees and resolved `conflict:` blocks are written to
 `$XDG_STATE_HOME/notes/trash/<timestamp>-<id-or-name>.md` (device-local, never synced) before
-removal. `notes trash list|restore` manages it. The app never deletes user content without
-a trash copy.
+removal; editor text no save could take, to `<timestamp>-unsaved-<title>.md` (§10.6).
+`notes trash list|restore` manages it. `restore` moves an entry back into the vault, but an
+`unsaved-` entry has no id, so the vault would ignore it as a file (§6.4): it is printed
+instead, and stays in the trash. The content decides, not the name: a block file renamed
+`unsaved-….md` (§3.4) keeps its id and is moved back. The app never deletes user content
+without a trash copy.
 
 ---
 
@@ -1187,7 +1317,8 @@ a trash copy.
 ### 12.2 Detection
 
 The watcher (or `notes merge`, or the startup scan) finds `X.sync-conflict-*.md` next to
-`X.md`. Several conflict files for the same `X.md` are merged oldest first.
+`X.md`, as the files are then: an `X.md` that came in with its copy is merged into. Several
+conflict files for the same `X.md` are merged oldest first.
 
 Before merging, the engine compares the two files' `id` keys. If they differ, this is not a
 conflict but a **prefix collision** — two blocks that happened to get the same filename
@@ -1198,10 +1329,11 @@ and nothing is lost.
 
 ### 12.3 Merge inputs
 
-Ours `O` is `X.md`; theirs `T` is the conflict file — or, for an in-session conflict
-(§5.2 step 5), the text the user just edited. There is no stored common ancestor (§11.3),
-so every merge is **two-way**: the engine can tell *that* two versions differ, not *which*
-side changed. One algorithm, one code path.
+Ours `O` is `X.md`; theirs `T` is the conflict file, without its embeds of the blocks cut
+in the editor and not pasted back (§11.2) — or, for an in-session conflict (§5.2 step 5),
+the text the user just edited. There is no stored common ancestor (§11.3), so every merge
+is **two-way**: the engine can tell *that* two versions differ, not *which* side changed.
+One algorithm, one code path.
 
 ### 12.4 Node-level merge
 
@@ -1240,8 +1372,8 @@ algorithm is deterministic and idempotent.
 
 ### 12.5 Resolution
 
-The conflict view (§10.7) lists every `conflict:` block, each shown against the sibling
-before it, and the status line counts them. Resolving a pair:
+The conflict view (§10.7) lists every `conflict:` block, in outline order, each shown
+against the sibling before it, and the status line counts them. Resolving a pair:
 
 - **keep ours** — delete the conflict block and its embed (to trash);
 - **keep theirs** — replace ours' title and children (text and nodes) with the conflict block's,
@@ -1251,7 +1383,15 @@ before it, and the status line counts them. Resolving a pair:
   sibling.
 
 Unresolved pairs are ordinary blocks; they sync to every device and are visible in any
-editor, and can be lived with indefinitely.
+editor, and can be lived with indefinitely. The app marks each copy `⚠` and folds it,
+leaves its tasks out of the counts, and offers it as no *Move to…* destination; `>` and a
+drop put nothing under it (§10.1, §10.3). No verb puts a node between a copy and the node it
+follows, which the copy would then pair with, nor takes one away from the other: `J`/`K`,
+*Move to…*, `za`, `>`, `<` and a drop move the two as one, from either side, and into
+neither; `d` on the node deletes its copies with it, and on a copy that copy alone, as
+keep ours does; *clear done* keeps a done node whose copy it keeps; `~` is refused on
+either side until the pair is resolved. A node added, pasted, dropped or outdented between
+them goes after the copy.
 
 ### 12.6 History (outside the app)
 

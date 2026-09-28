@@ -247,6 +247,36 @@ fn rename_block_title_keeps_the_filename_until_fix() {
 }
 
 #[test]
+fn the_vault_knows_when_the_files_differ_from_what_it_parsed() {
+    // §11.2: the watcher reloads only when a reload would find something new
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    assert!(!v.changed_on_disk().unwrap());
+    // its own writes are what it holds; a file written back as it was, a
+    // file without an id and a sync-conflict copy are nothing to parse
+    let task = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, task).unwrap();
+    std::fs::write(d.path().join("root.md"), &v.tree.files[0].text).unwrap();
+    std::fs::write(d.path().join("notes.md"), "no id\n").unwrap();
+    std::fs::write(d.path().join("root.sync-conflict-20260912-100000-phone.md"), "# A\n").unwrap();
+    assert!(!v.changed_on_disk().unwrap());
+    // a changed text, a new block file, a removed one
+    let block = d.path().join(&v.tree.files[1].path);
+    let text = std::fs::read_to_string(&block).unwrap();
+    std::fs::write(&block, text.replace("- task", "- task, from Helix")).unwrap();
+    assert!(v.changed_on_disk().unwrap());
+    v.reload().unwrap();
+    assert!(!v.changed_on_disk().unwrap());
+    std::fs::write(d.path().join("dozzod~b.md"), "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- b\n").unwrap();
+    assert!(v.changed_on_disk().unwrap());
+    v.reload().unwrap();
+    std::fs::remove_file(&block).unwrap();
+    assert!(v.changed_on_disk().unwrap());
+    v.reload().unwrap();
+    assert!(v.tree.block_by_id(&id).is_none());
+    assert!(!v.changed_on_disk().unwrap());
+}
+
+#[test]
 fn prefix_collision_grows_prefix() {
     let (d, _v) = vault_with("# A\n");
     // two ids sharing the first word
@@ -847,6 +877,30 @@ fn respelling_a_broken_embed_keeps_its_id() {
     let e = v.tree.resolved_children(at(&v, &["A"]))[0];
     assert!(ops::toggle_spelling(&mut v, e).unwrap());
     assert_eq!(read(&d, "root.md"), format!("# A\n\n- b\n\n## ![[{}]]\n", ID_A));
+}
+
+#[test]
+fn delete_counts_the_nodes_it_took() {
+    // the TUI says what went by name and count, never by file (§10.1)
+    // (names no other test trashes: two trash copies of one name in the
+    // same second race for its temporary file)
+    let (_d, mut v) = vault_with("# A\n\n- tally\n  - one\n  - two\n- stack\n  - shelf\n");
+    let tally = at(&v, &["A", "tally"]);
+    assert_eq!(ops::delete_subtree(&mut v, tally).unwrap(), 3);
+    // a block, with a block nested in it
+    let shelf = at(&v, &["A", "stack", "shelf"]);
+    ops::make_block(&mut v, shelf).unwrap();
+    let stack = at(&v, &["A", "stack"]);
+    ops::make_block(&mut v, stack).unwrap();
+    let stack = at(&v, &["A", "stack"]);
+    assert!(v.tree.node(stack).is_block());
+    assert_eq!(ops::delete_subtree(&mut v, stack).unwrap(), 2);
+    // a broken embed is the one row it shows as
+    let (_d, mut v) = vault_with(&format!("# A\n\n![[{}]]\n", ID_A));
+    let e = v.tree.raw_children(at(&v, &["A"]))[0];
+    assert!(v.tree.node(e).is_embed());
+    assert_eq!(ops::delete_subtree(&mut v, e).unwrap(), 1);
+    assert_eq!(v.tree.files[0].text, "# A\n");
 }
 
 #[test]

@@ -148,6 +148,10 @@ tree-sitter-yaml = "=0.7.2"
 tree-sitter-zig = "=1.1.2"
 tree-sitter-zsh = "=0.63.4"
 
+# SIGTERM, SIGHUP and SIGINT end a session as a quit does (§10.6)
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.18"
+
 [dev-dependencies]
 insta = "1"
 tempfile = "3"

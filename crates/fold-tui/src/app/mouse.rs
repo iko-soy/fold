@@ -7,18 +7,49 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use fold_core::ops::{self, Drop};
 use fold_core::parse::Kind;
 use fold_core::reading::LineRef;
+use fold_core::tree::NRef;
 use std::time::{Duration, Instant};
 
 impl App {
     pub fn handle_mouse(&mut self, m: MouseEvent) {
+        // a pointer only passing over is no use of it (§10.7); nor is the
+        // button let go after a click, or wobbled while down: that is the
+        // click, not one since what it said (§10.1). A drag's moves and
+        // release are.
+        let dragging = self.ui.press.is_some_and(|p| p.dragging) || self.ui.resizing;
+        let used = match m.kind {
+            MouseEventKind::Moved => false,
+            MouseEventKind::Drag(_) | MouseEventKind::Up(_) => dragging,
+            _ => true,
+        };
+        if used {
+            self.last_input = Some(Instant::now());
+        }
+        let held = match m.kind {
+            MouseEventKind::Down(_) => self.held_words.take(),
+            _ => None,
+        };
+        // a click lets a half-typed key go (§10.3): what it opens takes the
+        // next key, which no `z` or `g` before it turns into a verb
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            self.pending = None;
+        }
         self.handle_mouse_inner(m);
+        self.drop_held_words(held);
         self.settle_undo();
     }
 
     fn handle_mouse_inner(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
         match m.kind {
-            MouseEventKind::Moved => self.ui.hover = Some((x, y)),
+            MouseEventKind::Moved => {
+                self.ui.hover = Some((x, y));
+                // the pointer moving onto a menu item highlights it; one
+                // resting there leaves the keys and the wheel to move it
+                if let (Some(Hit::MenuItem(i)), Some(m)) = (self.ui.hit_at(x, y), self.ui.menu.as_mut()) {
+                    m.sel = i;
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.ui.hover = Some((x, y));
                 self.mouse_down(x, y);
@@ -70,6 +101,7 @@ impl App {
         let Some(hit) = self.ui.hit_at(x, y) else { return };
         match hit {
             Hit::Backdrop => self.close_top(),
+            Hit::Popup => {}
             Hit::Button(a, target) => {
                 self.action_target = target;
                 self.run_action(a);
@@ -116,6 +148,11 @@ impl App {
                     self.open_menu(r, x.saturating_sub(24), y + 1);
                 }
             }
+            Hit::Conflict(i) => {
+                self.focus_pane(Focus::Outline);
+                self.cursor = i;
+                self.run_action(super::Action::ResolveConflict);
+            }
             Hit::DocLine(i) => {
                 self.focus_pane(Focus::Reading);
                 self.read_cursor = i;
@@ -126,6 +163,12 @@ impl App {
             Hit::DocCheck(i) => {
                 self.read_cursor = i;
                 self.toggle_doc_line(i);
+            }
+            Hit::DocConflict(i) => {
+                self.read_cursor = i;
+                if let Some(r) = self.doc_line_node(i) {
+                    self.enter_conflict_view_at(r);
+                }
             }
             Hit::Link(i) => {
                 self.read_cursor = i;
@@ -217,7 +260,7 @@ impl App {
         // only over an outline row (§10.1): released anywhere else, over the
         // reading pane or a border, the drag does nothing
         let target = match self.ui.hit_at(x, y) {
-            Some(Hit::Row(j) | Hit::Fold(j) | Hit::Check(j) | Hit::RowMenu(j)) => self
+            Some(Hit::Row(j) | Hit::Fold(j) | Hit::Check(j) | Hit::RowMenu(j) | Hit::Conflict(j)) => self
                 .ui
                 .rows_geom
                 .iter()
@@ -225,9 +268,16 @@ impl App {
                 .map(|&(j, _, title_x)| (j, if x < title_x { Drop::Before } else { Drop::Into })),
             _ => None,
         };
-        self.ui.drop = target.filter(|(j, _)| *j != from);
+        let target = target.filter(|(j, _)| *j != from);
+        // nor into a conflict copy, which keeping ours trashes (§12.5): the
+        // copy is no target, and the bar says why
+        let into_copy = target.is_some_and(|(j, how)| {
+            rows.get(from).zip(rows.get(j)).is_some_and(|(f, t)| self.drop_into_copy(f.nref, t.nref, how))
+        });
+        self.ui.drop = target.filter(|_| !into_copy);
         let name = |i: usize| rows.get(i).map(|r| self.vault.tree.node(r.nref).title.clone()).unwrap_or_default();
         let msg = match self.ui.drop {
+            _ if into_copy => format!("can't move “{}” into a conflict copy", name(from)),
             Some((j, Drop::Before)) => format!("move “{}” before “{}”", name(from), name(j)),
             Some((j, Drop::Into)) => format!("move “{}” into “{}”", name(from), name(j)),
             None => format!("moving “{}” — drop on a title to nest, left of it to place before", name(from)),
@@ -250,6 +300,11 @@ impl App {
         }
         let rows = self.rows();
         let (Some(from), Some(to)) = (press.row.and_then(|i| rows.get(i)), rows.get(j)) else { return };
+        // the rows may have changed since the drag last said where it goes
+        if self.drop_into_copy(from.nref, to.nref, how) {
+            self.say(format!("can't move {} into a conflict copy", self.named(from.nref)));
+            return;
+        }
         // a drop is an outline verb: the editor saves first (§10.6), which
         // re-parses what it wrote, so both nodes are found again by key
         let keys = (self.vault.key_of(from.nref), self.vault.key_of(to.nref));
@@ -260,23 +315,24 @@ impl App {
         };
         let (rr, rt) = (self.vault.tree.resolved_child(r), self.vault.tree.resolved_child(target));
         let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
-        let title = self.vault.tree.node(rr).title.clone();
+        let name = self.named(rr);
         // it goes into the target, last, or just before it, under the
         // target's parent
         let (dest, rank) = match how {
             Drop::Into => (rt, None),
             Drop::Before => {
                 let p = self.outline_parent(rt).unwrap_or(self.vault.tree.root);
-                let at = self.vault.tree.resolved_children(p).iter().position(|&c| c == rt);
+                let kids = self.vault.tree.resolved_children(p);
+                let at = kids.iter().position(|&c| c == rt).map(|at| self.past_copies(&kids, at, rr));
                 (p, at.map(|at| self.namesakes_before(rr, p, at)))
             }
         };
         let dest = self.vault.key_of(dest);
         let on = self.on_node(r);
-        self.push_undo("move");
+        self.push_undo(&format!("move {} {} {}", name, if how == Drop::Into { "into" } else { "before" }, self.named(rt)));
         match ops::move_node(&mut self.vault, r, target, how) {
             Ok(moved) => {
-                self.say(super::with_rule_note(&format!("moved “{}”", title), moved));
+                self.say(super::with_rule_note(&format!("moved {}", name), moved, kind));
                 // find it where it landed, by its kind and place too: a
                 // namesake of it may be there already
                 match self.moved_node(&key, kind, &dest, rank) {
@@ -293,16 +349,29 @@ impl App {
         self.editor_after_write(edit);
     }
 
+    /// Whether dropping `r` on `target` puts it into a conflict copy it is
+    /// not in already (§12.5): onto the copy's title, or onto or left of a
+    /// row in it. Left of the copy's own row, it goes after the copy.
+    fn drop_into_copy(&self, r: NRef, target: NRef, how: Drop) -> bool {
+        let tree = &self.vault.tree;
+        let own = self.chain(tree.resolved_child(r));
+        let mut dest = self.chain(tree.resolved_child(target));
+        if how == Drop::Before {
+            dest.pop();
+        }
+        dest.iter().any(|c| tree.node(*c).conflict().is_some() && !own.contains(c))
+    }
+
     fn mouse_right(&mut self, x: u16, y: u16) {
         match self.ui.hit_at(x, y) {
-            Some(Hit::Row(i) | Hit::Fold(i) | Hit::Check(i) | Hit::RowMenu(i)) => {
+            Some(Hit::Row(i) | Hit::Fold(i) | Hit::Check(i) | Hit::RowMenu(i) | Hit::Conflict(i)) => {
                 self.focus_pane(Focus::Outline);
                 self.cursor = i;
                 if let Some(r) = self.current() {
                     self.open_menu(r, x, y + 1);
                 }
             }
-            Some(Hit::DocLine(i) | Hit::DocCheck(i) | Hit::Link(i)) => {
+            Some(Hit::DocLine(i) | Hit::DocCheck(i) | Hit::DocConflict(i) | Hit::Link(i)) => {
                 self.read_cursor = i;
                 if let Some(r) = self.doc_line_node(i).or_else(|| self.reading_target()) {
                     self.open_menu(r, x, y + 1);
@@ -321,6 +390,7 @@ impl App {
     fn mouse_wheel(&mut self, x: u16, y: u16, delta: i32) {
         let step = |v: usize| (v as i64 + delta as i64).max(0) as usize;
         if self.ui.menu.is_some() {
+            self.menu_step(delta);
             return;
         }
         if self.prompt.is_some() {
@@ -331,16 +401,17 @@ impl App {
         }
         match self.mode {
             Mode::Picker => self.palette_sel = step(self.palette_sel),
+            Mode::Help => self.help_scroll = step(self.help_scroll),
             Mode::Filter => {
                 self.filter_sel = step(self.filter_sel).min(self.filter_rows.len().saturating_sub(1))
             }
             _ => match self.ui.hit_at(x, y) {
                 Some(Hit::EditArea) => self.ui.edit_scroll = step(self.ui.edit_scroll),
-                Some(Hit::ReadingPane | Hit::DocLine(_) | Hit::DocCheck(_) | Hit::Link(_)) => {
+                Some(Hit::ReadingPane | Hit::DocLine(_) | Hit::DocCheck(_) | Hit::DocConflict(_) | Hit::Link(_)) => {
                     self.scroll_reading = step(self.scroll_reading)
                 }
                 Some(
-                    Hit::OutlinePane | Hit::Row(_) | Hit::Fold(_) | Hit::Check(_) | Hit::RowMenu(_),
+                    Hit::OutlinePane | Hit::Row(_) | Hit::Fold(_) | Hit::Check(_) | Hit::RowMenu(_) | Hit::Conflict(_),
                 ) => self.outline_scroll = step(self.outline_scroll),
                 _ => {}
             },
@@ -348,7 +419,7 @@ impl App {
     }
 
     /// The node a reading-pane line belongs to.
-    fn doc_line_node(&self, i: usize) -> Option<fold_core::tree::NRef> {
+    fn doc_line_node(&self, i: usize) -> Option<NRef> {
         let doc = self.reading_doc();
         match fold_core::reading::node_at(&doc, i) {
             Some(LineRef::Title(r)) | Some(LineRef::Body(r)) | Some(LineRef::Embed(r)) => Some(r),
@@ -359,8 +430,7 @@ impl App {
     fn toggle_doc_line(&mut self, i: usize) {
         if let Some(r) = self.doc_line_node(i) {
             if self.vault.tree.node(self.vault.tree.resolved_child(r)).task.is_some() {
-                self.push_undo("toggle");
-                let _ = ops::toggle_task(&mut self.vault, r);
+                self.toggle_read_task(r);
             }
         }
     }

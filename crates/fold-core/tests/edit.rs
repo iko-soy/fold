@@ -650,6 +650,55 @@ fn one_refused_block_does_not_block_other_saves() {
 }
 
 #[test]
+fn a_block_file_renamed_on_disk_is_checked_against_what_was_read_under_its_old_name() {
+    // `fold check --fix` renames a block file whose title changed, its
+    // text as it was: §5.2 step 5 still holds under the new name. The
+    // phone's line added there after the vault read it is refused, not
+    // taken as a file never read and written over
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let task = v.tree.resolved_children(a)[0];
+    ops::make_block(&mut v, task).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let old = d.path().join(&v.tree.files[1].path);
+    let renamed = d.path().join(v.tree.files[1].path.replace("~task.md", "~task-renamed.md"));
+    std::fs::rename(&old, &renamed).unwrap();
+    v.reload().unwrap();
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    buf.set_line(i, "- task XYZ".into());
+    let theirs = std::fs::read_to_string(&renamed).unwrap() + "  - phone child\n";
+    std::fs::write(&renamed, &theirs).unwrap();
+    let err = buf.save_all(&mut v).unwrap_err();
+    assert!(err.to_string().contains("changed on disk"), "{}", err);
+    // and once the vault has read it, as after any refused save
+    v.reload().unwrap();
+    let err = buf.save_all(&mut v).unwrap_err();
+    assert!(err.to_string().contains("changed on disk"), "{}", err);
+    assert_eq!(std::fs::read_to_string(&renamed).unwrap(), theirs);
+    assert!(!buf.dirty.is_empty());
+    // a rename alone changes nothing the buffer read: the typing is saved
+    // under the new name, and again after a second rename
+    let (d, mut v) = vault_with("# A\n\n- task\n");
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let task = v.tree.resolved_children(a)[0];
+    ops::make_block(&mut v, task).unwrap();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let mut path = d.path().join(&v.tree.files[1].path);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    for (n, name) in ["~task-renamed.md", "~task-again.md"].into_iter().enumerate() {
+        let to = path.with_file_name(path.file_name().unwrap().to_string_lossy().split('~').next().unwrap().to_string() + name);
+        std::fs::rename(&path, &to).unwrap();
+        path = to;
+        v.reload().unwrap();
+        buf.set_line(i, format!("- task {}", n));
+        assert_eq!(buf.save_all(&mut v).unwrap(), 1, "rename {}", n);
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with(&format!("\n- task {}\n", n)), "rename {}", n);
+    }
+}
+
+#[test]
 fn a_save_goes_through_when_the_file_changed_only_outside_the_block() {
     // §5.2 step 5 compares the block's source span, not the whole file:
     // a sync that changed another section of root.md (and moved this one
@@ -774,6 +823,45 @@ fn a_held_block_still_in_the_buffer_is_not_in_transit() {
     buf.save_all(&mut v).unwrap();
     assert_eq!(v.tree.files[0].text, format!("# A\n\n- one\n  ![[{}]]\n- two\n", c.as_str()));
     assert!(!d.path().join(&b_path).exists());
+}
+
+#[test]
+fn a_reload_that_leaves_the_text_as_it_was_keeps_a_block_in_transit() {
+    // §11.2: the phone adds a node above A in root.md and the vault re-reads
+    // it: the buffer on A takes in where A is now and the file's hash, its
+    // cut block still in transit, so the paste embeds the block again. A
+    // change to A's own text is not taken in: the editor is re-rendered
+    let (d, mut v) = vault_with("# A\n\n- one\n- task\n- two\n");
+    let t = v.find_by_path(&["A".into(), "task".into()]).unwrap();
+    let id = ops::make_block(&mut v, t).unwrap();
+    let block_path = d.path().join(&v.tree.files[1].path);
+    let block_before = v.tree.files[1].text.clone();
+    let a = v.tree.resolved_children(v.tree.root)[0];
+    let mut buf = open_editor(&v, a);
+    let i = buf.lines.iter().position(|l| l.text == "- task").unwrap();
+    let cut = buf.lines[i].clone();
+    buf.delete_line(i);
+    buf.hold(vec![cut.owner]);
+    buf.save_all(&mut v).unwrap();
+    let theirs = "# Inbox\n\n- [ ] from phone\n\n# A\n\n- one\n- two\n";
+    std::fs::write(d.path().join("root.md"), theirs).unwrap();
+    v.reload().unwrap();
+    let a = v.find_by_path(&["A".into()]).unwrap();
+    assert!(buf.take_in(open_editor(&v, a)));
+    // pasted below "- two" with its tag
+    let two = buf.lines.iter().position(|l| l.text == "- two").unwrap();
+    buf.lines.insert(two + 1, cut.clone());
+    buf.mark_dirty(cut.owner);
+    buf.mark_dirty(buf.lines[0].owner);
+    buf.save_all(&mut v).unwrap();
+    let embedded = format!("{}![[{}]]\n", theirs, id.as_str());
+    assert_eq!(std::fs::read_to_string(d.path().join("root.md")).unwrap(), embedded);
+    assert_eq!(std::fs::read_to_string(&block_path).unwrap(), block_before);
+    // A's own text changed: nothing taken in
+    std::fs::write(d.path().join("root.md"), embedded.replace("- one", "- one, from Helix")).unwrap();
+    v.reload().unwrap();
+    let a = v.find_by_path(&["A".into()]).unwrap();
+    assert!(!buf.take_in(open_editor(&v, a)));
 }
 
 #[test]
