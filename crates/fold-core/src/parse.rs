@@ -129,6 +129,22 @@ impl ParsedFile {
             self.nodes[self.root_node].children[0]
         }
     }
+
+    /// A block file with text or an embed before its root node, or with no
+    /// root at all (§4.9): what comes before the root is in no block, so
+    /// the file is read-only until fixed by hand. `root.md` never is: text
+    /// before its first node is its Root's own.
+    pub fn malformed_block(&self) -> bool {
+        let root = &self.nodes[self.root_node];
+        if root.block.is_some() {
+            return false;
+        }
+        let text_before = root.content.iter().any(|c| match c {
+            Content::Text(sp) => !sp.text(&self.text).trim().is_empty(),
+            Content::Node(_) => false,
+        });
+        text_before || root.children.len() != 1 || self.nodes[root.children[0]].embed.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -657,7 +673,6 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
                     }
                 }
                 if node.title.is_empty() && node.embed.is_none() {
-                    node.noncanonical.push("empty title".into());
                     diagnostics.push(Diag {
                         span: node.title_span,
                         message: "title line with an empty title".into(),
@@ -666,7 +681,7 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
                 if node.title.contains('/') {
                     diagnostics.push(Diag {
                         span: node.title_span,
-                        message: "title contains '/'".into(),
+                        message: format!("title contains '/': {:?}", node.title),
                     });
                 }
                 let idx = nodes.len();

@@ -427,3 +427,11 @@ fn undo_from_a_message_undoes_only_that_change() {
     assert!(r.ok, "{}", r.message);
     assert_eq!(read(&d, "root.md"), ROOT);
 }
+
+/// `fold check` as the app shows it: an ignored file once (§4.1, §15.7).
+#[test]
+fn diagnostics_list_an_ignored_file_once() {
+    let (_d, s) = vault(&[("root.md", ROOT), ("foreign.md", "# no id here\n")]);
+    let ignored: Vec<String> = s.diagnostics().into_iter().filter(|d| d.starts_with("foreign.md")).collect();
+    assert_eq!(ignored, ["foreign.md: ignored: no valid id in frontmatter"]);
+}

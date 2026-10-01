@@ -35,12 +35,6 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                     message: format!("non-canonical: {} ({:?})", nc, n.title),
                 });
             }
-            if n.title.contains('/') && n.kind != Kind::Root {
-                out.push(Diagnostic {
-                    file: f.path.clone(),
-                    message: format!("title contains '/': {:?}", n.title),
-                });
-            }
         }
     }
     // embeds: broken, duplicate, cyclic, with children (§6.2, §15.7)
@@ -341,11 +335,7 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
             }
             s
         } else {
-            let malformed = top.len() != 1
-                || f.diagnostics.iter().any(|d| {
-                    d.message.contains("more than one node") || d.message.contains("before the block")
-                });
-            if malformed {
+            if f.malformed_block() {
                 continue;
             }
             render(&vault.tree, (i, top[0]), 1, false)

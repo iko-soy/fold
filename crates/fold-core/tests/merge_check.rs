@@ -155,6 +155,32 @@ fn check_reports_bad_dates() {
     assert!(diags.iter().any(|d| d.message.contains("not an ISO date")), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
 }
 
+/// Each problem is reported once, by name where it has one (§15.7).
+#[test]
+fn check_reports_each_problem_once() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# a/b\n\n-\n").unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let diags: Vec<String> = fold_core::check::check(&v).iter().map(|d| d.message.clone()).collect();
+    assert_eq!(diags, ["title contains '/': \"a/b\"", "title line with an empty title"]);
+}
+
+/// A block file whose one top-level node is an embed has no root of its
+/// own (§4.9): `--fix` leaves its text as it is, as it does text before
+/// the root, rather than canonicalize lines it cannot place.
+#[test]
+fn fix_leaves_a_block_file_without_a_root_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "- a\n![[racfer-hattes-mislup-nodrys]]\n").unwrap();
+    let rootless = "---\nid: racfer-hattes-mislup-nodrys\n---\n\n![[dozzod-binwes-talsun-worbec]]\n  *   b\n";
+    // named as its (empty) title slugs, so no rename is due
+    std::fs::write(dir.path().join("racfer~untitled.md"), rootless).unwrap();
+    let mut v = Vault::open(dir.path()).unwrap();
+    assert!(v.tree.files[1].malformed_block());
+    fold_core::check::fix(&mut v).unwrap();
+    assert_eq!(std::fs::read_to_string(dir.path().join("racfer~untitled.md")).unwrap(), rootless);
+}
+
 // ---------------------------------------------------------------- regressions
 
 const BID: &str = "racfer-hattes-mislup-nodrys";

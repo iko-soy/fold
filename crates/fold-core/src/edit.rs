@@ -648,7 +648,7 @@ impl EditBuffer {
         // §4.9: a block file with text or an embed before its root is
         // read-only until fixed — the bytes before the root are not in the
         // buffer, and rewriting the file would drop them
-        if malformed_block_file(f) {
+        if f.malformed_block() {
             return Err(std::io::Error::other(format!(
                 "{}: text or an embed before the block's root; read-only until fixed",
                 path
@@ -675,7 +675,7 @@ impl EditBuffer {
                     frontmatter_span: None,
                     ..b.clone()
                 };
-                if malformed_block_file(&parse_file(&path, &out, Some(b))) {
+                if parse_file(&path, &out, Some(b)).malformed_block() {
                     return Err(std::io::Error::other(format!(
                         "{}: the block's text must start with its title line; not saved",
                         path
@@ -965,21 +965,6 @@ fn span_now(known: &str, now: &str, region: Option<Span>) -> Option<Span> {
         }
         _ => None,
     })
-}
-
-/// A block file with text or an embed before its root node, or with no
-/// root at all (§4.9). `root.md` never is: text before its first node is
-/// its Root's own.
-fn malformed_block_file(f: &ParsedFile) -> bool {
-    let root = &f.nodes[f.root_node];
-    if root.block.is_some() {
-        return false;
-    }
-    let text_before = root.content.iter().any(|c| match c {
-        Content::Text(sp) => !sp.text(&f.text).trim().is_empty(),
-        Content::Node(_) => false,
-    });
-    text_before || root.children.len() != 1 || f.nodes[root.children[0]].is_embed()
 }
 
 /// The blocks whose embed in `f` has lines nested under it: nodes, or text

@@ -407,12 +407,8 @@ impl Session {
 
     /// `fold check` (§15.7).
     pub fn diagnostics(&self) -> Vec<String> {
-        let s = self.lock();
-        let mut out: Vec<String> = fold_core::check::check(&s.vault).iter().map(|d| d.to_string()).collect();
-        if let Ok(ignored) = s.vault.ignored_files() {
-            out.extend(ignored.into_iter().map(|f| format!("{}: ignored: {}", f.path, f.reason)));
-        }
-        out
+        // ignored files among them (§4.1)
+        fold_core::check::check(&self.lock().vault).iter().map(|d| d.to_string()).collect()
     }
 
     // ------------------------------------------------------------ verbs
