@@ -1648,9 +1648,7 @@ impl State {
         // text the editor could not save has no id: moved in, it would be a
         // file fold ignores, so it stays in the trash (§11.5)
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let has_id = fold_core::parse::parse_frontmatter(&text)
-            .and_then(|fm| fm.props.get("id").and_then(|v| Id::parse(v)))
-            .is_some();
+        let has_id = fold_core::parse::parse_frontmatter(&text).and_then(|fm| fm.id()).is_some();
         if !has_id {
             return Self::refused("this is text, not a file fold reads: copy what you need from it");
         }

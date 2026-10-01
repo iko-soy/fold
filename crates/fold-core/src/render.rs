@@ -258,7 +258,7 @@ pub fn embed_line(n: &crate::parse::Node, dlevel: usize, dindent: usize) -> Stri
     }
 }
 
-fn push_checkbox(task: Option<TaskState>, out: &mut String) {
+pub(crate) fn push_checkbox(task: Option<TaskState>, out: &mut String) {
     match task {
         Some(TaskState::Open) => out.push_str("[ ] "),
         Some(TaskState::Done) => out.push_str("[x] "),

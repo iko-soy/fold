@@ -8,7 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, Node, ParsedFile, Span};
+use crate::parse::{fence_transition, parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, Node, ParsedFile, Span};
 use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -992,11 +992,6 @@ fn owned_end(text: &str, span: Span) -> usize {
         .map(|i| content_end + i + 1)
         .unwrap_or(old.len());
     span.start + own
-}
-
-fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
-    // fences as the parser reads them, so splice re-levels what it does
-    crate::parse::fence_transition(raw, open)
 }
 
 /// What the editor needs to know when it opens: the buffer plus a render of

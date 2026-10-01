@@ -116,7 +116,7 @@ impl Vault {
                 Some(t) => t,
                 None => continue,
             };
-            if parse_frontmatter(&text).as_ref().and_then(file_id).is_none() {
+            if parse_frontmatter(&text).as_ref().and_then(Frontmatter::id).is_none() {
                 continue; // ignored: never parsed (§4.1)
             }
             files.push((name, text));
@@ -227,26 +227,12 @@ impl Vault {
             .nodes
             .iter()
             .find_map(|n| n.block.clone());
+        let fm = parse_frontmatter(text);
         let block = if path == "root.md" {
-            Some(Block {
-                id: None,
-                path: path.clone(),
-                props: parse_frontmatter(text).map(|f| f.props).unwrap_or_default(),
-                frontmatter_raw: parse_frontmatter(text).map(|f| f.raw).unwrap_or_default(),
-                frontmatter_span: parse_frontmatter(text).map(|f| f.span),
-            })
+            Some(Block::new(&path, None, fm.as_ref()))
         } else {
             old_block.map(|mut b| {
-                let fm = parse_frontmatter(text);
-                if let Some(f) = fm.as_ref() {
-                    b.props = f.props.clone();
-                    b.frontmatter_raw = f.raw.clone();
-                    b.frontmatter_span = Some(f.span);
-                } else {
-                    b.props.clear();
-                    b.frontmatter_raw.clear();
-                    b.frontmatter_span = None;
-                }
+                b.set_frontmatter(fm.as_ref());
                 b
             })
         };
@@ -334,7 +320,7 @@ fn trash_target(trash: &Path, name: &str) -> PathBuf {
 pub fn trash_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "fold")
         .map(|p| p.state_dir().unwrap_or(p.data_dir()).join("trash"))
-        .unwrap_or_else(|| PathBuf::from(".notes-trash"))
+        .unwrap_or_else(|| PathBuf::from(".fold-trash"))
 }
 
 /// Write to `.<name>.fold-tmp`, fsync, rename (§11.1).
@@ -364,23 +350,12 @@ pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// A file's id, from its frontmatter's `id` key, if it validates (§2).
-fn file_id(fm: &Frontmatter) -> Option<Id> {
-    fm.props.get("id").and_then(|v| Id::parse(v))
-}
-
 /// Parse a vault file as a reload reads it: `root.md` is the one file
 /// without an id; any other is a block file, by the id it holds (§4.9).
 fn parse_vault_file(name: &str, text: &str) -> ParsedFile {
     let fm = parse_frontmatter(text);
-    let block = Block {
-        id: if name == "root.md" { None } else { fm.as_ref().and_then(file_id) },
-        path: name.to_string(),
-        props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
-        frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
-        frontmatter_span: fm.as_ref().map(|f| f.span),
-    };
-    parse_file(name, text, Some(block))
+    let id = if name == "root.md" { None } else { fm.as_ref().and_then(Frontmatter::id) };
+    parse_file(name, text, Some(Block::new(name, id, fm.as_ref())))
 }
 
 /// Read a vault `.md` file as text; `None` for anything that is not a
@@ -546,13 +521,10 @@ impl Vault {
         }
         // 2. path
         if text.contains('/') {
-            let rel = text.strip_prefix("./");
+            if text.starts_with("./") {
+                return Err("./ relative resolution needs a zoom root".into());
+            }
             let segs: Vec<String> = text.split('/').map(|s| s.trim().to_string()).collect();
-            let base = match rel {
-                Some(_) => return Err("./ relative resolution needs a zoom root".into()),
-                None => self.tree.root,
-            };
-            let _ = base;
             // a path that matches twice is an ambiguity, never a guess
             let found = self.find_all_by_path(&segs);
             return match found.len() {

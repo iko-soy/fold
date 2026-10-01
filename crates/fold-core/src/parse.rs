@@ -44,6 +44,27 @@ pub struct Block {
 }
 
 impl Block {
+    /// The block of the file at `path`, as its frontmatter `fm` has it
+    /// (§4.4); `id` is `None` for `root.md`.
+    pub fn new(path: &str, id: Option<Id>, fm: Option<&Frontmatter>) -> Block {
+        let mut b = Block {
+            id,
+            path: path.to_string(),
+            props: IndexMap::new(),
+            frontmatter_raw: String::new(),
+            frontmatter_span: None,
+        };
+        b.set_frontmatter(fm);
+        b
+    }
+
+    /// Take the frontmatter as a file now has it; the id and path stay.
+    pub fn set_frontmatter(&mut self, fm: Option<&Frontmatter>) {
+        self.props = fm.map(|f| f.props.clone()).unwrap_or_default();
+        self.frontmatter_raw = fm.map(|f| f.raw.clone()).unwrap_or_default();
+        self.frontmatter_span = fm.map(|f| f.span);
+    }
+
     pub fn prop(&self, key: &str) -> Option<&str> {
         self.props.get(key).map(String::as_str)
     }
@@ -183,6 +204,14 @@ pub struct Frontmatter {
     pub raw: String,
     pub span: Span,
     pub props: IndexMap<String, String>,
+}
+
+impl Frontmatter {
+    /// The `id` key, if it validates against the syllable tables (§6.4):
+    /// what makes a file a block file.
+    pub fn id(&self) -> Option<Id> {
+        self.props.get("id").and_then(|v| Id::parse(v))
+    }
 }
 
 /// Scan frontmatter at byte 0 of a file. Returns None if absent.

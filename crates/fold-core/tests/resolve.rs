@@ -27,6 +27,21 @@ fn pairs_found_after_merge() {
     assert!(v.tree.node(theirs).block.as_ref().unwrap().prop("conflict").is_some());
 }
 
+/// A second embed of a conflict block reads as broken (§6.2): the block is
+/// the side of the one pair at its own embed, never of the node before a
+/// stray copy of the line.
+#[test]
+fn a_second_embed_of_a_copy_pairs_with_nothing() {
+    let (d, mut v) = make_conflict_vault();
+    let (_, theirs) = merge::conflict_pairs(&v)[0];
+    let id = v.tree.node(theirs).block.as_ref().unwrap().id.clone().unwrap();
+    let root = std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    std::fs::write(d.path().join("root.md"), format!("{}\n# B\n\n- other\n![[{}]]\n", root, id)).unwrap();
+    v.reload().unwrap();
+    let pairs: Vec<String> = merge::conflict_pairs(&v).iter().map(|&(o, _)| v.tree.node(o).title.clone()).collect();
+    assert_eq!(pairs, ["task"]);
+}
+
 #[test]
 fn keep_ours_removes_conflict_block() {
     let (_d, mut v) = make_conflict_vault();

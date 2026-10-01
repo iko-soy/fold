@@ -502,9 +502,6 @@ pub fn set_frontmatter_key(
     };
     // rewrite the line for `key` inside raw
     let mut lines: Vec<String> = raw.split_inclusive('\n').map(|s| s.to_string()).collect();
-    if !lines.is_empty() && !lines.last().unwrap().ends_with('\n') {
-        // keep as is; we append a newline when needed
-    }
     let key_prefix = format!("{}:", key);
     let mut found = false;
     for l in lines.iter_mut() {
@@ -619,7 +616,7 @@ fn delete_one(vault: &mut Vault, r: NRef) -> std::io::Result<usize> {
             // block, which renders as broken (§6.2): the block, and the
             // embed it is stitched in at, are not this line's
             let span = embed_line_span(&vault.tree, r);
-            remove_span_with_separator(vault, r.0, span)?;
+            remove_span(vault, r.0, span)?;
             return Ok(1);
         }
         // the block itself first: it leaves by its own embed
@@ -655,7 +652,7 @@ fn plain_remove(vault: &mut Vault, r: NRef) -> std::io::Result<Vec<Id>> {
     let name = format!("{}.md", slug(&vault.tree.node(r).title));
     vault.trash_text(&name, &text)?;
     let span = vault.tree.node(r).span;
-    remove_span_with_separator(vault, r.0, span)?;
+    remove_span(vault, r.0, span)?;
     Ok(ids)
 }
 
@@ -664,7 +661,7 @@ fn plain_remove(vault: &mut Vault, r: NRef) -> std::io::Result<Vec<Id>> {
 fn trash_block(vault: &mut Vault, id: &Id) -> std::io::Result<()> {
     if let Some(e) = vault.tree.embed_of(id) {
         let span = embed_line_span(&vault.tree, e);
-        remove_span_with_separator(vault, e.0, span)?;
+        remove_span(vault, e.0, span)?;
     }
     if let Some(b) = vault.tree.block_by_id(id) {
         vault.trash_file(b.0)?;
@@ -735,15 +732,10 @@ fn after_removal(pos: usize, start: usize, end: usize) -> usize {
 }
 
 /// Remove a span plus one adjacent blank separator line, then re-parse just
-/// that file (no full reload, so other files' node refs stay valid).
-fn remove_span_no_reload(vault: &mut Vault, file: usize, span: Span) -> std::io::Result<()> {
+/// that file, so other files' node refs stay valid.
+fn remove_span(vault: &mut Vault, file: usize, span: Span) -> std::io::Result<()> {
     let (start, end) = removal_range(&vault.tree.files[file].text, span);
     vault.write_span(file, Span { start, end }, "")
-}
-
-/// Remove a span plus one adjacent blank separator line.
-fn remove_span_with_separator(vault: &mut Vault, file: usize, span: Span) -> std::io::Result<()> {
-    remove_span_no_reload(vault, file, span)
 }
 
 /// Yank: render the subtree resolved (the register's text) (§10.3).
@@ -773,13 +765,7 @@ pub fn paste(vault: &mut Vault, at: NRef, text: &str, after: bool) -> std::io::R
 /// in a section of level `parent_level`. Everything inside keeps its position
 /// relative to its top-level node.
 pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String {
-    let block = crate::parse::Block {
-        id: None,
-        path: "clip.md".into(),
-        props: Default::default(),
-        frontmatter_raw: String::new(),
-        frontmatter_span: None,
-    };
+    let block = crate::parse::Block::new("clip.md", None, None);
     let pf = crate::parse::parse_file("clip.md", text, Some(block));
     let tree = crate::tree::Tree::new(vec![pf]);
     let mut out = String::new();
@@ -819,7 +805,7 @@ fn shift_lines(raw: &str, level_delta: isize, indent_delta: isize) -> String {
     for line in raw.split_inclusive('\n') {
         let l = line.strip_suffix('\n').unwrap_or(line);
         let nl = if line.ends_with('\n') { "\n" } else { "" };
-        let in_code = fence_transition(l, &mut fence) || fence.is_some();
+        let in_code = crate::parse::fence_transition(l, &mut fence) || fence.is_some();
         let trimmed = l.trim_start();
         if trimmed.is_empty() {
             out.push_str(nl);
@@ -858,11 +844,6 @@ fn atx_hashes(trimmed: &str) -> Option<usize> {
     let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
     let after = &trimmed[hashes..];
     (hashes > 0 && (after.is_empty() || after.starts_with(' '))).then_some(hashes)
-}
-
-fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
-    // fences as the parser reads them, so shifting re-levels what it does
-    crate::parse::fence_transition(raw, open)
 }
 
 /// Refile: move a subtree under a new parent as its last child (§6.5).
@@ -1260,7 +1241,7 @@ fn place(
     let away: Vec<(usize, Span)> =
         moving.iter().filter(|m| m.0 != file).map(|&m| (m.0, vault.tree.node(m).span)).collect();
     for (f, span) in away.into_iter().rev() {
-        remove_span_no_reload(vault, f, span)?;
+        remove_span(vault, f, span)?;
     }
     Ok(clamped != want.min(kids.len()))
 }

@@ -119,7 +119,6 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
             });
         }
         seen_ids.push(id);
-        let n = t.node(*r);
         let f = &t.files[r.0];
         let top: Vec<usize> = f.nodes[f.root_node].children.clone();
         if top.len() != 1 {
@@ -128,7 +127,6 @@ pub fn check(vault: &Vault) -> Vec<Diagnostic> {
                 message: "block file must have exactly one node at column 0".into(),
             });
         }
-        let _ = n;
         // filename checks (§6.4)
         let b = t.node(*r).block.as_ref().unwrap();
         let words = id.words();

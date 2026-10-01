@@ -2929,8 +2929,8 @@ impl App {
             }
             KeyCode::Char('o') => self.open_link_under_cursor(&doc),
             KeyCode::Char('/') => self.open_prompt("search", PromptAction::ReadSearch, String::new()),
-            KeyCode::Char('n') => self.next_match(&doc, 1),
-            KeyCode::Char('N') => self.next_match(&doc, -1),
+            KeyCode::Char('n') => self.next_match(1),
+            KeyCode::Char('N') => self.next_match(-1),
             KeyCode::Char('q') => self.quit = true,
             // what isn't the pane's own works as it does in the outline
             KeyCode::Char('m') => {
@@ -3029,12 +3029,11 @@ impl App {
         self.say(format!("{} match(es)", self.read_matches.len()));
     }
 
-    fn next_match(&mut self, doc: &fold_core::reading::ReadingDoc, dir: i32) {
+    fn next_match(&mut self, dir: i32) {
         if self.read_matches.is_empty() {
             self.say("no search (use /)");
             return;
         }
-        let _ = doc;
         let n = self.read_matches.len() as i32;
         self.read_match_idx = ((self.read_match_idx as i32 + dir).rem_euclid(n)) as usize;
         let m = self.read_matches[self.read_match_idx];
