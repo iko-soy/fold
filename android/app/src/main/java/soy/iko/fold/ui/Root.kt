@@ -43,7 +43,7 @@ fun Root(vm: FoldViewModel) {
             )
             if (result == SnackbarResult.ActionPerformed) {
                 when (m.action) {
-                    Message.Action.Undo -> vm.undo()
+                    Message.Action.Undo -> vm.undo(m.mark)
                     Message.Action.Resolve -> vm.push(Screen.Conflicts)
                     null -> {}
                 }

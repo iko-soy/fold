@@ -73,7 +73,7 @@ fn verbs_write_files_and_undo() {
     assert_eq!(r.message, "done: “Replace fan”");
     assert!(read(&d, "root.md").contains("- [x] Replace fan\n"));
     assert_eq!(s.outline(all()).undo.as_deref(), Some("mark “Replace fan” done"));
-    let r = s.undo();
+    let r = s.undo(None);
     assert!(r.ok, "{}", r.message);
     assert_eq!(read(&d, "root.md"), ROOT);
     assert!(s.redo().ok);
@@ -185,7 +185,7 @@ fn editor_saves_through_tags() {
     assert_eq!(read(&d, "root.md"), "# Networking\n\n- [ ] Replace the flaky switch\n- Label cables\n![[racfer-hattes-mislup-nodrys]]\n");
     // each save is one undo step
     assert_eq!(s.outline(all()).undo.as_deref(), Some("edit “Networking”"));
-    assert!(s.undo().ok);
+    assert!(s.undo(None).ok);
     assert_eq!(read(&d, "root.md"), root);
 }
 
@@ -236,7 +236,7 @@ fn editor_deleting_a_block_line_trashes_it_on_close() {
     assert_eq!(read(&d, "root.md"), "# Networking\n\n- a\n");
     assert!(!d.path().join("racfer~order-new-switch.md").exists());
     // one undo puts back the embed and the file together (§10.10)
-    let r = s.undo();
+    let r = s.undo(None);
     assert!(r.ok, "{}", r.message);
     assert_eq!(read(&d, "root.md"), root);
     assert_eq!(read(&d, "racfer~order-new-switch.md"), block);
@@ -356,4 +356,74 @@ fn a_sync_under_the_editor_re_renders_it_and_drops_stale_typing() {
     assert!(!st.dirty);
     assert!(s.edit_close().ok);
     assert_eq!(read(&d, "root.md"), "# Notes\n\n- milk\n- eggs\n");
+}
+
+#[test]
+fn a_verb_under_the_editor_saves_it_first_and_hands_back_its_text() {
+    let (d, s) = vault(&[("root.md", "# Notes\n\n- milk\n\n# Inbox\n")]);
+    let v = s.edit_open(row(&s, "Notes").key).unwrap();
+    upd(&s, "# Notes\n\n- milk\n- bread".into(), Some(22));
+    // text shared to fold while the editor is open
+    let r = s.capture("from share".into(), false);
+    assert!(r.ok, "{}", r.message);
+    assert!(read(&d, "root.md").contains("- milk\n- bread\n"), "{}", read(&d, "root.md"));
+    // the editor was re-rendered: the result says over what, and the new
+    // generation takes typing again
+    assert!(r.editor_generation > v.generation);
+    let text = r.editor_text.unwrap_or_else(|| s.edit_text().unwrap());
+    let st = s.edit_update(format!("{}\n- eggs", text), None, r.editor_generation);
+    assert!(st.dirty);
+    assert!(s.edit_close().ok);
+    assert!(read(&d, "root.md").contains("- bread\n- eggs\n"), "{}", read(&d, "root.md"));
+}
+
+#[test]
+fn a_verb_under_the_editor_finds_its_node_after_the_save() {
+    let (d, s) = vault(&[("root.md", "# A\n\n- [ ] t1\n- [ ] t2\n")]);
+    let t2 = row(&s, "t2").key;
+    s.edit_open(row(&s, "A").key).unwrap();
+    // a line typed above t2, not saved yet
+    upd(&s, "# A\n\n- [ ] t1\n- new\n- [ ] t2".into(), Some(19));
+    let r = s.toggle_task(t2);
+    assert!(r.ok, "{}", r.message);
+    assert_eq!(r.message, "done: “t2”");
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [ ] t1\n- new\n- [x] t2\n");
+}
+
+#[test]
+fn a_cut_block_released_by_a_verb_does_not_leave_stale_nodes() {
+    let one = "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- one\n";
+    let two = "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- [ ] two\n";
+    let root = "# A\n\n![[dozzod-binwes-talsun-worbec]]\n- after\n\n# B\n\n![[racfer-hattes-mislup-nodrys]]\n";
+    let (d, s) = vault(&[("root.md", root), ("dozzod~one.md", one), ("racfer~two.md", two)]);
+    let two_key = row(&s, "two").key;
+    let v = s.edit_open(row(&s, "A").key).unwrap();
+    assert_eq!(v.text, "# A\n\n- one\n- after");
+    // the block's line cut, and saved in transit
+    upd(&s, "# A\n\n- after".into(), Some(5));
+    assert!(s.edit_save().ok);
+    assert!(d.path().join("dozzod~one.md").exists());
+    // a verb elsewhere: the editor's save lets the block go, trashing its
+    // file and renumbering the files after it
+    let r = s.toggle_task(two_key);
+    assert!(r.ok, "{}", r.message);
+    assert!(!d.path().join("dozzod~one.md").exists());
+    assert!(read(&d, "racfer~two.md").contains("- [x] two"));
+}
+
+#[test]
+fn undo_from_a_message_undoes_only_that_change() {
+    let (d, s) = vault(&[("root.md", ROOT)]);
+    assert!(s.toggle_task(row(&s, "Replace fan").key).ok);
+    let o = s.outline(all());
+    let mark = UndoMark { depth: o.undo_depth, description: o.undo.clone().unwrap() };
+    // something else changed since the message went up
+    assert!(s.toggle_task(row(&s, "Scrub").key).ok);
+    let r = s.undo(Some(mark.clone()));
+    assert!(!r.ok);
+    assert!(r.message.contains("“Scrub”"), "{}", r.message);
+    assert!(s.undo(None).ok);
+    let r = s.undo(Some(mark));
+    assert!(r.ok, "{}", r.message);
+    assert_eq!(read(&d, "root.md"), ROOT);
 }

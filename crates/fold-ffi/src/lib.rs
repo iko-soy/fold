@@ -54,6 +54,34 @@ pub struct OpResult {
     pub message: String,
     /// The node the verb acted on or made, where it is now.
     pub node: Option<String>,
+    /// A verb run while the editor is open saves it first and re-renders it
+    /// over what it wrote (§10.6): its new text, the generation the text
+    /// field's updates now name, and whether its node is gone and it closed.
+    pub editor_text: Option<String>,
+    pub editor_generation: u32,
+    pub editor_closed: bool,
+}
+
+impl OpResult {
+    fn new(ok: bool, message: impl Into<String>, node: Option<String>) -> OpResult {
+        OpResult {
+            ok,
+            message: message.into(),
+            node,
+            editor_text: None,
+            editor_generation: 0,
+            editor_closed: false,
+        }
+    }
+}
+
+/// The op-log entry an undo is meant for: the one a message offered to
+/// undo, so a tap on it never undoes a later change (§10.10).
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct UndoMark {
+    /// How many entries the op log held with it on top.
+    pub depth: u32,
+    pub description: String,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -134,6 +162,8 @@ pub struct Outline {
     /// What undo and redo would do, named (§10.10).
     pub undo: Option<String>,
     pub redo: Option<String>,
+    /// The op log's depth, for `UndoMark`.
+    pub undo_depth: u32,
     /// What the register holds, for *Paste*.
     pub copied: Option<String>,
 }
@@ -389,22 +419,22 @@ impl Session {
 
     /// `x`: toggle a task open / done (§8.1).
     pub fn toggle_task(&self, key: String) -> OpResult {
-        self.lock().toggle_task(&key)
+        self.lock().with_editor_saved(|s| s.toggle_task(&key))
     }
 
     /// `t`: add or remove the checkbox (§10.3).
     pub fn toggle_taskness(&self, key: String) -> OpResult {
-        self.lock().toggle_taskness(&key)
+        self.lock().with_editor_saved(|s| s.toggle_taskness(&key))
     }
 
     /// `n` / `N`: a new node titled `title` after `key`, or as its last
     /// child; under the vault's root for no key.
     pub fn add_node(&self, key: Option<String>, title: String, task: bool, child: bool) -> OpResult {
-        self.lock().add_node(key.as_deref(), &title, task, child)
+        self.lock().with_editor_saved(|s| s.add_node(key.as_deref(), &title, task, child))
     }
 
     pub fn delete(&self, key: String) -> OpResult {
-        self.lock().delete(&key)
+        self.lock().with_editor_saved(|s| s.delete(&key))
     }
 
     pub fn copy(&self, key: String) -> OpResult {
@@ -412,77 +442,89 @@ impl Session {
     }
 
     pub fn paste(&self, key: String, after: bool) -> OpResult {
-        self.lock().paste(&key, after)
+        self.lock().with_editor_saved(|s| s.paste(&key, after))
     }
 
     /// `J` / `K` (§10.3).
     pub fn move_sibling(&self, key: String, down: bool) -> OpResult {
-        self.lock().move_sibling(&key, down)
+        self.lock().with_editor_saved(|s| s.move_sibling(&key, down))
     }
 
     /// `>` (§10.3).
     pub fn indent(&self, key: String) -> OpResult {
-        self.lock().indent(&key)
+        self.lock().with_editor_saved(|s| s.indent(&key))
     }
 
     /// `<` (§10.3).
     pub fn outdent(&self, key: String) -> OpResult {
-        self.lock().outdent(&key)
+        self.lock().with_editor_saved(|s| s.outdent(&key))
     }
 
     /// *Move to…* (§6.5).
     pub fn move_to(&self, key: String, dest: String) -> OpResult {
-        self.lock().move_to(&key, &dest)
+        self.lock().with_editor_saved(|s| s.move_to(&key, &dest))
     }
 
     /// `za` (§6.5).
     pub fn archive(&self, key: String) -> OpResult {
-        self.lock().archive(&key)
+        self.lock().with_editor_saved(|s| s.archive(&key))
     }
 
     /// `~` (§10.3).
     pub fn toggle_spelling(&self, key: String) -> OpResult {
-        self.lock().toggle_spelling(&key)
+        self.lock().with_editor_saved(|s| s.toggle_spelling(&key))
     }
 
     /// `s` (§6.1).
     pub fn make_block(&self, key: String) -> OpResult {
-        self.lock().make_block(&key)
+        self.lock().with_editor_saved(|s| s.make_block(&key))
     }
 
     /// A property, from the property form (§10.6); the first one on a plain
     /// node makes it a block.
     pub fn set_property(&self, key: String, name: String, value: String) -> OpResult {
-        self.lock().set_property(&key, &name, &value)
+        self.lock().with_editor_saved(|s| s.set_property(&key, &name, &value))
     }
 
     pub fn remove_property(&self, key: String, name: String) -> OpResult {
-        self.lock().remove_property(&key, &name)
+        self.lock().with_editor_saved(|s| s.remove_property(&key, &name))
     }
 
     /// `c` / `C` (§7).
     pub fn capture(&self, text: String, task: bool) -> OpResult {
-        self.lock().capture(&text, task)
+        self.lock().with_editor_saved(|s| s.capture(&text, task))
     }
 
     /// *Clear done* (§8.5), under `zoom` or everywhere.
     pub fn clear_done(&self, zoom: Option<String>) -> OpResult {
-        self.lock().clear_done(zoom.as_deref())
+        self.lock().with_editor_saved(|s| s.clear_done(zoom.as_deref()))
     }
 
     /// The conflict view's choices (§12.5), on the pair whose copy is
     /// `theirs`.
     pub fn resolve(&self, theirs: String, keep: Keep) -> OpResult {
-        self.lock().resolve(&theirs, keep)
+        self.lock().with_editor_saved(|s| s.resolve(&theirs, keep))
     }
 
     /// *Canonicalize*: `fold check --fix` (§4.2).
     pub fn canonicalize(&self) -> OpResult {
-        self.lock().canonicalize()
+        self.lock().with_editor_saved(|s| s.canonicalize())
     }
 
-    pub fn undo(&self) -> OpResult {
-        self.lock().undo_redo(true)
+    /// Undo the last change; with `mark`, only if it is still the change
+    /// the mark names.
+    pub fn undo(&self, mark: Option<UndoMark>) -> OpResult {
+        let mut s = self.lock();
+        if let Some(m) = mark {
+            let top = s.undo.last().map(|e| e.description.as_str());
+            if s.undo.len() as u32 != m.depth || top != Some(m.description.as_str()) {
+                return State::refused(match top {
+                    Some(d) => format!("not undone: the last change is now {}", d),
+                    None => "nothing to undo".into(),
+                });
+            }
+        }
+        s.undo_redo(true)
     }
 
     pub fn redo(&self) -> OpResult {
@@ -521,7 +563,7 @@ impl Session {
 
     /// `fold trash restore` (§11.5).
     pub fn restore(&self, name: String) -> OpResult {
-        self.lock().restore(&name)
+        self.lock().with_editor_saved(|s| s.restore(&name))
     }
 
     // ------------------------------------------------------------ editor
@@ -586,9 +628,12 @@ impl Session {
 
     /// The app is going away, maybe for good (§10.6): save what can be
     /// saved; text no save can take goes to the trash whole (§11.5). What to
-    /// say, if anything.
-    pub fn edit_keep(&self) -> Option<String> {
-        self.lock().edit_keep()
+    /// say, if anything. With `release`, as when the vault closes, a block
+    /// cut and not pasted back is deleted as on leaving the editor (§5.2);
+    /// without, as when the app only goes to the background, it stays in
+    /// transit for the paste the user may be on the way to.
+    pub fn edit_keep(&self, release: bool) -> Option<String> {
+        self.lock().edit_keep(release)
     }
 }
 
@@ -760,6 +805,7 @@ impl State {
             conflicts: fold_core::merge::conflict_pairs(&self.vault).len() as u32,
             undo: self.undo.last().map(|e| e.description.clone()),
             redo: self.redo.last().map(|e| e.description.clone()),
+            undo_depth: self.undo.len() as u32,
             copied: self.register.as_ref().map(|(_, name, _)| name.clone()),
         }
     }
@@ -1078,23 +1124,42 @@ impl State {
 
     // ------------------------------------------------------------ verbs
 
-    /// Run a verb as one op-log entry (§10.10): the editor saves first and is
-    /// re-rendered after (§10.6); the entry holds exactly the files the verb
-    /// changed, written before a failure too.
-    fn verb(&mut self, desc: &str, f: Verb<'_>) -> OpResult {
+    /// Run a verb from the app (`fold-tui`'s `editor_before_write` and
+    /// `editor_after_write`, §10.6): an open editor saves first, and only
+    /// then does the verb find its nodes, as the save re-parses what it
+    /// writes; after it, the editor is re-rendered over what the verb wrote,
+    /// and the result says so, so the text field takes the new text.
+    fn with_editor_saved(&mut self, f: impl FnOnce(&mut State) -> OpResult) -> OpResult {
+        let open = self.editor.is_some();
         let edit = self.editor_before_write();
+        let generation = self.edit_generation;
+        let mut r = f(self);
+        self.editor_after_write(edit);
+        if open {
+            match &self.editor {
+                None => r.editor_closed = true,
+                Some(ed) if self.edit_generation != generation => r.editor_text = Some(ed.text()),
+                Some(_) => {}
+            }
+        }
+        r.editor_generation = self.edit_generation;
+        r
+    }
+
+    /// Run a verb as one op-log entry (§10.10): the entry holds exactly the
+    /// files the verb changed, written before a failure too.
+    fn verb(&mut self, desc: &str, f: Verb<'_>) -> OpResult {
         let snap = ops::Snapshot::take(&self.vault, desc);
         let res = f(self);
         self.record_undo(snap);
-        self.editor_after_write(edit);
         match res {
-            Ok((message, node)) => OpResult { ok: true, message, node },
-            Err(message) => OpResult { ok: false, message, node: None },
+            Ok((message, node)) => OpResult::new(true, message, node),
+            Err(message) => OpResult::new(false, message, None),
         }
     }
 
     fn refused(message: impl Into<String>) -> OpResult {
-        OpResult { ok: false, message: message.into(), node: None }
+        OpResult::new(false, message, None)
     }
 
     fn gone() -> OpResult {
@@ -1233,7 +1298,7 @@ impl State {
     fn copy(&mut self, key: &str) -> OpResult {
         let Some(r) = self.find(key) else { return Self::gone() };
         self.put_register(r);
-        OpResult { ok: true, message: format!("copied {}", self.named(r)), node: Some(key.to_string()) }
+        OpResult::new(true, format!("copied {}", self.named(r)), Some(key.to_string()))
     }
 
     fn paste(&mut self, key: &str, after: bool) -> OpResult {
@@ -1566,7 +1631,7 @@ impl State {
             Ok(()) => {
                 let message = format!("{}: {}", done, inv.description);
                 if undo { self.redo.push(inv) } else { self.undo.push(inv) }
-                OpResult { ok: true, message, node: None }
+                OpResult::new(true, message, None)
             }
             Err(e) => {
                 // refused: an external change since; the entry stays
@@ -1604,12 +1669,11 @@ impl State {
         if let Err(e) = fold_core::vault::move_file(&path, &dir.join(&target)) {
             return Self::refused(format!("error: {}", e));
         }
-        let _ = self.refresh(true);
-        OpResult {
-            ok: true,
-            message: format!("restored {} — check lists it until it is embedded somewhere", target),
-            node: None,
+        // the file came in: read the vault again
+        if let Err(e) = self.vault.reload() {
+            return Self::refused(format!("error: {}", e));
         }
+        OpResult::new(true, format!("restored {} — check lists it until it is embedded somewhere", target), None)
     }
 
     // ------------------------------------------------------------ files
@@ -2001,7 +2065,7 @@ impl State {
             }
             self.record_edit(snap);
         }
-        OpResult { ok: true, message: said, node: None }
+        OpResult::new(true, said, None)
     }
 
     /// The editor's whole text, and the name the trash keeps it under.
@@ -2012,9 +2076,9 @@ impl State {
         Some((format!("unsaved-{}.md", fold_core::slug(title)), text))
     }
 
-    fn edit_keep(&mut self) -> Option<String> {
+    fn edit_keep(&mut self, release: bool) -> Option<String> {
         let (name, text) = self.editor_text()?;
-        if self.write_editor(false).is_ok() || !self.editor_dirty() {
+        if self.write_editor(release).is_ok() || !self.editor_dirty() {
             return None;
         }
         Some(match self.vault.trash_text(&name, &text) {

@@ -29,6 +29,7 @@ import soy.iko.fold.core.Property
 import soy.iko.fold.core.ReadLine
 import soy.iko.fold.core.Session
 import soy.iko.fold.core.TrashEntry
+import soy.iko.fold.core.UndoMark
 
 /** What is on screen above the outline. */
 sealed interface Screen {
@@ -52,8 +53,11 @@ sealed interface Screen {
     data object Vaults : Screen
 }
 
-/** A line for the snackbar, and whether it offers to undo what it says. */
-data class Message(val text: String, val action: Action? = null) {
+/**
+ * A line for the snackbar, and whether it offers to undo what it says: then
+ * `mark` names that change, so the offer never undoes a later one.
+ */
+data class Message(val text: String, val action: Action? = null, val mark: UndoMark? = null) {
     enum class Action { Undo, Resolve }
 }
 
@@ -87,7 +91,8 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = Prefs(app)
 
     /** Every call into the core runs here, one at a time, in order. */
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "fold-core") }.asCoroutineDispatcher()
+    private val executor = Executors.newSingleThreadExecutor { Thread(it, "fold-core") }
+    private val worker = executor.asCoroutineDispatcher()
 
     private var session: Session? = null
     private var watcher: Watcher? = null
@@ -159,12 +164,22 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         watcher?.stop()
-        session?.let { s -> runCatching { s.editKeep() } }
-        worker.close()
+        val s = session
+        session = null
+        // after whatever is queued for it, as `closeVault`
+        if (s != null) executor.execute { runCatching { s.editKeep(true) }; s.destroy() }
+        executor.shutdown()
     }
 
     private fun say(text: String, action: Message.Action? = null) {
         _messages.tryEmit(Message(text, action))
+    }
+
+    /** Offer to undo what was just done: the change now on top of the op log. */
+    private fun sayUndoable(text: String) {
+        val o = outline
+        val mark = o?.undo?.let { UndoMark(o.undoDepth, it) }
+        _messages.tryEmit(Message(text, if (mark != null) Message.Action.Undo else null, mark))
     }
 
     private suspend fun <T> core(f: (Session) -> T): T? {
@@ -218,12 +233,21 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun closeVault() {
         watcher?.stop()
         watcher = null
+        refreshing?.cancel()
+        searching?.cancel()
+        autosave?.cancel()
         val s = session ?: return
-        withContext(worker) { s.editKeep() }?.let { say(it) }
-        editor = null
+        // no call starts on it from here; those already queued run first,
+        // then it saves, letting go of a block cut and not pasted back
+        // (§5.2), and goes
         session = null
+        editor = null
         outline = null
-        s.destroy()
+        withContext(worker) {
+            val said = s.editKeep(true)
+            s.destroy()
+            said
+        }?.let { say(it) }
     }
 
     fun forgetVault() {
@@ -334,13 +358,34 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
     private fun act(subject: String?, undoable: Boolean = true, op: (Session) -> OpResult) {
         viewModelScope.launch {
             val r = core(op) ?: return@launch
+            settle(r)
             if (r.ok && subject != null && view.zoom == subject && r.node != null) {
                 applyView(view.copy(zoom = r.node))
             }
             reload()
             if (r.ok) r.node?.let { highlight = it }
-            say(r.message, if (r.ok && undoable && outline?.undo != null) Message.Action.Undo else null)
+            if (r.ok && undoable) sayUndoable(r.message) else say(r.message)
         }
+    }
+
+    /**
+     * A verb run while the editor is open saved it first and re-rendered
+     * it over what the verb wrote (§10.6): the text field takes the new
+     * text, or the editor closes where its node is gone.
+     */
+    private fun settle(r: OpResult) {
+        val ed = editor ?: return
+        if (r.editorClosed) {
+            editor = null
+            screens.remove(Screen.Editor)
+            say("the node being edited is gone")
+            return
+        }
+        r.editorText?.let { text ->
+            val sel = ed.value.selection
+            ed.value = TextFieldValue(text, TextRange(sel.start.coerceAtMost(text.length), sel.end.coerceAtMost(text.length)))
+        }
+        ed.generation = r.editorGeneration
     }
 
     fun openMenu(key: String) {
@@ -377,7 +422,8 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
 
     fun canonicalize() = act(null) { it.canonicalize() }.also { checks() }
 
-    fun undo() = act(null, undoable = false) { it.undo() }
+    /** Undo the last change; from a message, only the change it named. */
+    fun undo(mark: UndoMark? = null) = act(null, undoable = false) { it.undo(mark) }
 
     fun redo() = act(null, undoable = false) { it.redo() }
 
@@ -408,11 +454,7 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
         val req = input ?: return
         input = null
         when (req.kind) {
-            Input.Kind.Capture -> viewModelScope.launch {
-                val r = core { it.capture(text, task) } ?: return@launch
-                reload()
-                say(r.message, if (r.ok) Message.Action.Undo else null)
-            }
+            Input.Kind.Capture -> act(null) { it.capture(text, task) }
             Input.Kind.Child -> act(null) { it.addNode(req.key, text, task, true) }
             Input.Kind.Sibling -> act(null) { it.addNode(req.key, text, task, false) }
         }
@@ -487,6 +529,7 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
     fun setProperty(key: String, name: String, value: String) {
         viewModelScope.launch {
             val r = core { it.setProperty(key, name, value) } ?: return@launch
+            settle(r)
             // a first property makes a block (§6.1): the form follows it
             if (r.ok && r.node != null && r.node != key) {
                 val i = screens.indexOf(Screen.Properties(key))
@@ -494,7 +537,7 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
                 if (view.zoom == key) applyView(view.copy(zoom = r.node))
             }
             reload()
-            say(r.message, if (r.ok) Message.Action.Undo else null)
+            if (r.ok) sayUndoable(r.message) else say(r.message)
         }
     }
 
@@ -522,6 +565,7 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
     fun restore(name: String) {
         viewModelScope.launch {
             val r = core { it.restore(name) } ?: return@launch
+            settle(r)
             trash = core { it.trash() } ?: emptyList()
             trashShown = null
             reload()
@@ -550,7 +594,9 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         autosave?.cancel()
         viewModelScope.launch {
-            withContext(worker) { s.editKeep() }?.let { say(it) }
+            // a block cut and not pasted back stays in transit: the user may
+            // be off copying something, and back to paste it
+            withContext(worker) { s.editKeep(false) }?.let { say(it) }
         }
     }
 

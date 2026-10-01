@@ -216,6 +216,24 @@ class UiTest {
     }
 
     @Test
+    fun captureWhileEditing() {
+        val vm = start()
+        val root = File(vm.vault!!, "root.md")
+        vm.edit(vm.outline!!.rows.first { it.title == "Call the plumber" }.key)
+        await { vm.editor != null }
+        // text shared to fold while the editor is open: the capture saves
+        // the editor first, and the editor takes typing after it
+        vm.captureFromOutside("from the share sheet")
+        await { vm.input != null }
+        vm.submitInput("from the share sheet", false)
+        await { root.readText().contains("- from the share sheet") }
+        compose.onNode(hasSetTextAction()).performTextInput("Today: ")
+        compose.onNodeWithContentDescription("Done").performClick()
+        await { vm.editor == null }
+        assertTrue(root.readText(), root.readText().contains("Today: - [ ] Call the plumber\n"))
+    }
+
+    @Test
     fun noVaultYet() {
         val vm = FoldViewModel(app)
         compose.setContent { FoldThemeFixed { Root(vm) } }

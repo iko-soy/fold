@@ -55,7 +55,7 @@ class CoreTest {
         val block = dir.resolve("racfer~order-new-switch.md").readText()
         assertTrue(block, block.contains("- [x] Order new switch"))
         assertTrue(block, block.contains("done: "))
-        assertTrue(s.undo().ok)
+        assertTrue(s.undo(null).ok)
         assertEquals(BLOCK, dir.resolve("racfer~order-new-switch.md").readText())
         assertEquals(ROOT, dir.resolve("root.md").readText())
 
