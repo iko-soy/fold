@@ -1,0 +1,29 @@
+[package]
+name = "fold-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "fold-core for other languages: the session API the Android app calls, through UniFFI"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "fold_ffi"
+
+[[bin]]
+# generates the Kotlin bindings from the built library:
+# cargo run -p fold-ffi --features bindgen --bin uniffi-bindgen -- generate --library …
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+fold-core = { path = "../fold-core" }
+uniffi = "0.32"
+similar.workspace = true
+jiff.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

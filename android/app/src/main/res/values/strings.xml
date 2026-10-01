@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">fold</string>
+    <string name="capture_to_fold">Capture to fold</string>
+    <string name="shortcut_capture">Capture</string>
+    <string name="shortcut_capture_long">Capture to the inbox</string>
+</resources>

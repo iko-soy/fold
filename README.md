@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" height="128" alt="fold"></p>
+
 # fold
 
 One outline of notes and tasks, stored as plain Markdown, in the terminal.
@@ -123,6 +125,15 @@ fold trash list | fold trash restore ID
 fold help
 ```
 
+## On Android
+
+[android/](android/README.md) is fold for the phone: the same vault, opened from the
+folder Syncthing syncs it to, read and written by the same `fold-core`. The outline with
+folds and checkboxes, zoom, the node menu, capture (also from the share sheet), the
+subtree editor, properties with a date picker, find, move to, undo, and the conflict view
+for sync-conflict copies. Build it with `./gradlew assembleDebug` in `android/`; see its
+README for what it needs.
+
 ## Developing
 
 ```sh
@@ -131,6 +142,8 @@ cargo test --workspace
 nix flake check      # the same tests, in the Nix sandbox
 ```
 
-The code is three crates: `fold-core` (parsing, rendering, the operations, merge),
-`fold-tui` (the ratatui app) and `fold-cli` (the `fold` binary). [SPEC.md](SPEC.md) is the
-design: the data model, the file format, every operation and the laws they keep.
+The code is four crates: `fold-core` (parsing, rendering, the operations, merge),
+`fold-tui` (the ratatui app), `fold-cli` (the `fold` binary) and `fold-ffi` (a session
+over `fold-core` for other languages, through UniFFI, which the Android app calls).
+[SPEC.md](SPEC.md) is the design: the data model, the file format, every operation and
+the laws they keep.
