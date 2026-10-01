@@ -1,7 +1,7 @@
 # SPEC — a tree-shaped plain-text notes and task manager for the terminal
 
 Status: draft 0.40 · 2026-09-26
-Working name: not chosen yet. This document uses `notes` as the binary name; rename freely.
+Name: fold. The binary is `fold`; the crates are `fold-*` (§15.1).
 Language: Rust · TUI: ratatui · Sync: Syncthing · History: file versioning on one node
 
 ---
@@ -135,7 +135,7 @@ Rules:
   as it is spelled — a heading or a bullet — and that is where its spelling is defined
   (§4.9). The embed repeats it in its form (§4.7) so the parent file parses into the right
   shape on its own; the app keeps the two in step (`~` rewrites both), and where they
-  disagree the file wins and `notes check` reports the embed.
+  disagree the file wins and `fold check` reports the embed.
 
 ### 3.2 Properties
 
@@ -235,7 +235,7 @@ Resolution order for a command target (the *refile*, *go to* and *make block* pr
    (`2026-09-10`) resolve this way; there is nothing special about them.
 
 Ambiguous or missing targets are an error for the command that named them; broken or
-duplicate embeds are diagnostics in `notes check` (§15.7).
+duplicate embeds are diagnostics in `fold check` (§15.7).
 
 Renaming a block's title does not rename its file (§6.4); a stale name is harmless, since
 nothing references the filename.
@@ -266,7 +266,7 @@ The vault is flat: every block sits beside `root.md`. Only `root.md` and `.md` f
 whose frontmatter carries a valid `id` (§6.4) are parsed. Everything else — subdirectories,
 non-Markdown files, `.md` files without an id — is ignored: never parsed, never written,
 never deleted. There is no import: to bring a foreign `.md` file in, paste its text into
-a node (or `notes capture < file.md`) and let the app assign ids as it makes blocks. `notes check`
+a node (or `fold capture < file.md`) and let the app assign ids as it makes blocks. `fold check`
 lists ignored `.md` files so nothing is forgotten in the vault.
 
 There is no configuration and no configuration file. The inbox is the section titled
@@ -309,7 +309,7 @@ The app **reads** any CommonMark it can make sense of and **writes** this subset
   readers agree the text is not part of that node.
 
 Canonicalization is **lazy**: a node is rewritten in canonical form only when it is touched
-(edited, spliced, moved). `notes check --fix` (or *canonicalize* in the palette) rewrites
+(edited, spliced, moved). `fold check --fix` (or *canonicalize* in the palette) rewrites
 everything at once.
 
 **What is ours.** A standard Markdown renderer will mishandle exactly these four things:
@@ -328,7 +328,7 @@ title    := any text not starting with whitespace; may not contain "/"
 
 There is no attribute syntax. An `@word` or `key:: value` in a title or body is text, and
 so is `[[…]]` (reserved, §4.6).
-A title line with an empty title is invalid; `notes check` reports it, the TUI won't create it.
+A title line with an empty title is invalid; `fold check` reports it, the TUI won't create it.
 
 ### 4.4 Frontmatter
 
@@ -401,7 +401,7 @@ The app writes the form that matches the block's spelling: a block whose root is
 is embedded with a heading embed, a block whose root is an item with a bare one. The
 heading form exists because a bare embed after a section sibling would, like any line
 there, belong to that section (§3.1). Either form is read anywhere; an embed whose form
-does not match its block's spelling is a diagnostic (§15.7) that `notes check --fix`
+does not match its block's spelling is a diagnostic (§15.7) that `fold check --fix`
 rewrites, and it is placed where its form puts it.
 
 The embed names the block by id and nothing else; title, checkbox, properties, text and
@@ -415,7 +415,7 @@ decides the embed's parent the same way. The level its position gives is `1 +` i
 ancestors (§3.1), and that is the level the app writes. A written level deeper than that —
 left by another editor, or by moving text around by hand — still parses under the same
 parent (a shallower one would parse elsewhere and is simply a different position), so
-`notes check` reports it and `check --fix` rewrites it to the positional level; the
+`fold check` reports it and `check --fix` rewrites it to the positional level; the
 structure does not change.
 
 `![[` anywhere else is body text. The app does not implement general transclusion.
@@ -445,7 +445,7 @@ A block's file is exactly `render(node, 1, resolve_blocks = false)`:
   nodes, or text — is adopted as the root's children**, in order, as if it were indented
   under it. That is what a phone editor produces by appending `- new thing` to a block
   spelled as a bullet, and it must never make the block unusable. Adopted lines are
-  non-canonical (`notes check` notes them); the next write of the block, or `check --fix`,
+  non-canonical (`fold check` notes them); the next write of the block, or `check --fix`,
   writes them in place under the root (indented under a bullet root, re-levelled under a
   heading root).
 - Text before the root other than frontmatter, or an embed before it, is a diagnostic; the
@@ -669,7 +669,7 @@ syllables (vowels `e u y`) — each word `prefix suffix`, words joined by `-`:
 `racfer-hattes-dozzod-binwes`. No `~` sigil and no scrambling step, since the bits are random
 rather than sequential. Never derived from content or time. Stored as the `id` frontmatter
 key and validated against the syllable tables on read; a file whose `id` does not validate
-is ignored, and `notes check` says why.
+is ignored, and `fold check` says why.
 
 Collisions: 2⁶⁴ values, so two ids minted independently are never expected to collide; the
 index still checks and redraws locally, and the merge engine still reports an id collision
@@ -696,7 +696,7 @@ splits without knowing how many words the prefix has. Because the prefix alone i
 can never collide with anything, and `racfer~` already tells you which file you are looking
 at before you read the rest. Cross-device collisions are found at merge time and resolved
 the same way (§12.2). The filename carries no identity: a file is parsed because of its
-`id` key, not its name, so `python-basics.md` with an `id:` is a block (and `notes
+`id` key, not its name, so `python-basics.md` with an `id:` is a block (and `fold
 check` asks for the prefix) while `racfer~order-new-switch.md` without one is ignored.
 Safe on APFS, ext4, Android storage and Windows; case-insensitive-safe because lowercase.
 
@@ -705,8 +705,8 @@ later title change does not rename the file. Under Syncthing a rename arrives on
 devices as a delete plus a create; a phone that edits the old name meanwhile turns that
 into a sync conflict or an orphan, for nothing — the prefix alone identifies the file and
 nothing references the filename. A file renamed or titled by another tool is still found by
-its id. `notes check` reports filenames whose prefix is not a leading run of the id (a
-problem) and names that no longer match the title (stale, harmless); `notes check --fix`
+its id. `fold check` reports filenames whose prefix is not a leading run of the id (a
+problem) and names that no longer match the title (stale, harmless); `fold check --fix`
 renames both, which is the one moment the app renames a file.
 
 ### 6.5 Refile
@@ -735,8 +735,8 @@ delete it. Nothing in the archive is hidden or dimmed.
 
 - The inbox is the top-level section titled `Inbox` (case-insensitive). If none exists,
   capture creates `# Inbox` as the last top-level section of `root.md`. If several exist,
-  the first in `root.md` order wins and `notes check` reports the rest.
-- **Capture** (`c` in the TUI, `notes capture`, a global hotkey via the CLI) appends an item
+  the first in `root.md` order wins and `fold check` reports the rest.
+- **Capture** (`c` in the TUI, `fold capture`, a global hotkey via the CLI) appends an item
   under today's day: the child section of `Inbox` titled with today's date, `YYYY-MM-DD`,
   created on demand as the last child. `--task` or a leading `[ ]` makes it a task.
   `--to <target>` captures under any node instead. A captured item is clamped like any
@@ -1232,7 +1232,7 @@ they stay apart, as undoing them as one would drop that change.
 
 ### 11.1 Writes
 
-- **Atomic**: write to `.<name>.notes-tmp` in the same directory, `fsync`, `rename`.
+- **Atomic**: write to `.<name>.fold-tmp` in the same directory, `fsync`, `rename`.
   Never truncate in place.
 - **Span-preserving**: an edit replaces exactly the bytes of the affected node(s) — for a
   property change, exactly the frontmatter lines that changed. Every other byte is copied
@@ -1287,16 +1287,16 @@ during atomic writes.
 ### 11.4 Ignore patterns
 
 Never parsed, never written, never deleted: dotfiles and dot-directories (`.git`, `.jj`,
-`.stfolder`, `.stversions`, `.stignore`, `.obsidian`), `.syncthing.*.tmp`, `*.notes-tmp`,
+`.stfolder`, `.stversions`, `.stignore`, `.obsidian`), `.syncthing.*.tmp`, `*.fold-tmp`,
 `*.tmp`, and any file not ending in `.md`. `*.sync-conflict-*.md` is parsed only by the merge
 engine.
 
 ### 11.5 Trash
 
 Deleted subtrees and resolved `conflict:` blocks are written to
-`$XDG_STATE_HOME/notes/trash/<timestamp>-<id-or-name>.md` (device-local, never synced) before
+`$XDG_STATE_HOME/fold/trash/<timestamp>-<id-or-name>.md` (device-local, never synced) before
 removal; editor text no save could take, to `<timestamp>-unsaved-<title>.md` (§10.6).
-`notes trash list|restore` manages it. `restore` moves an entry back into the vault, but an
+`fold trash list|restore` manages it. `restore` moves an entry back into the vault, but an
 `unsaved-` entry has no id, so the vault would ignore it as a file (§6.4): it is printed
 instead, and stays in the trash. The content decides, not the name: a block file renamed
 `unsaved-….md` (§3.4) keeps its id and is moved back. The app never deletes user content
@@ -1312,11 +1312,11 @@ without a trash copy.
   winner plus a `name.sync-conflict-<date>-<time>-<device>.md` copy of the loser.
 - Therefore: keep concurrently-edited things in different files where possible (a
   `Inbox` as a block; blocks), and make the app the thing that understands conflict files.
-- The vault's `.stignore` should contain at minimum: `.git`, `.jj`, `*.notes-tmp`, `*.tmp`.
+- The vault's `.stignore` should contain at minimum: `.git`, `.jj`, `*.fold-tmp`, `*.tmp`.
 
 ### 12.2 Detection
 
-The watcher (or `notes merge`, or the startup scan) finds `X.sync-conflict-*.md` next to
+The watcher (or `fold merge`, or the startup scan) finds `X.sync-conflict-*.md` next to
 `X.md`, as the files are then: an `X.md` that came in with its copy is merged into. Several
 conflict files for the same `X.md` are merged oldest first.
 
@@ -1404,16 +1404,16 @@ notices it.
 
 ## 13. CLI
 
-All commands take `--vault PATH` (default: `$NOTES_VAULT`, else the nearest ancestor of
-`$PWD` containing `root.md`, else `~/notes`).
+All commands take `--vault PATH` (default: `$FOLD_VAULT`, else the nearest ancestor of
+`$PWD` containing `root.md`, else `~/fold`).
 
 | Command | Purpose |
 |---|---|
-| `notes [--keys normal\|vim\|helix]` | open the TUI; creates `root.md` if the directory is empty (§4.1.1); `--keys` picks the editor's keymap (§10.6) |
-| `notes capture [TEXT] [--to TARGET] [--task]` | append to the inbox (stdin if no TEXT) |
-| `notes check [--fix]` | diagnostics with source spans (§15.7); `--fix` rewrites the vault in canonical form (§4.2) and repairs filenames (§6.4) |
-| `notes merge [--dry-run]` | process sync-conflict files non-interactively; list leftovers |
-| `notes trash list \| restore ID` | trash management |
+| `fold [--keys normal\|vim\|helix]` | open the TUI; creates `root.md` if the directory is empty (§4.1.1); `--keys` picks the editor's keymap (§10.6) |
+| `fold capture [TEXT] [--to TARGET] [--task]` | append to the inbox (stdin if no TEXT) |
+| `fold check [--fix]` | diagnostics with source spans (§15.7); `--fix` rewrites the vault in canonical form (§4.2) and repairs filenames (§6.4) |
+| `fold merge [--dry-run]` | process sync-conflict files non-interactively; list leftovers |
+| `fold trash list \| restore ID` | trash management |
 
 That is the whole CLI: the entry points a shell, a hotkey, a cron job on the homelab, or a
 recovery session needs. Everything else is a TUI verb.
@@ -1433,9 +1433,9 @@ contain the same Markdown behave identically.
 There are no device settings either. The app reads no file outside the vault. What other
 tools keep in configuration is:
 
-- the vault: `--vault PATH`, else `$NOTES_VAULT`, else the nearest ancestor of `$PWD`
-  containing `root.md`, else `~/notes`;
-- the trash location: `$XDG_STATE_HOME/notes/trash/` (§11.5);
+- the vault: `--vault PATH`, else `$FOLD_VAULT`, else the nearest ancestor of `$PWD`
+  containing `root.md`, else `~/fold`;
+- the trash location: `$XDG_STATE_HOME/fold/trash/` (§11.5);
 - the editor's keymap: `--keys`, else `$FOLD_KEYS` (`normal`, `vim`, `helix`), else
   `normal` (§10.6);
 - everything visual: fixed (§10.1) or a session toggle (`zd`, `zr`).
@@ -1450,12 +1450,12 @@ The only thing the app keeps outside the vault is the trash.
 
 ```
 crates/
-  notes-core/    parsing, tree, render/splice, index, store, merge — no TUI deps
-  notes-tui/     ratatui application
-  notes-cli/     clap binary; depends on both
+  fold-core/    parsing, tree, render/splice, index, store, merge — no TUI deps
+  fold-tui/     ratatui application
+  fold-cli/     clap binary; depends on both
 ```
 
-`notes-core` is the stable API a future Android client or Helix extension would use.
+`fold-core` is the stable API a future Android client or Helix extension would use.
 
 ### 15.2 Core types (sketch)
 
@@ -1510,7 +1510,7 @@ exact spans, lossless round-tripping, and a small canonical subset — not a ful
 `pulldown-cmark` may be used later for inline styling in the reading pane only.
 
 Reading tolerance (setext headings, `*` bullets, tabs, `[X]`, `[-]`) is handled in the lexer and
-recorded per node as "non-canonical", which `notes check` reports and touching rewrites.
+recorded per node as "non-canonical", which `fold check` reports and touching rewrites.
 
 ### 15.4 Dependencies
 
@@ -1519,7 +1519,7 @@ recorded per node as "non-canonical", which `notes check` reports and touching r
 (today's date), `clap`, `indexmap`, `nucleo` (fuzzy
 filter), `similar` (sequence alignment and diff3 for merge), `blake3`, `tempfile`,
 `unicode-normalization`, `unicode-width`, `directories` (XDG),
-`getrandom` (64-bit ids; the `@p` syllable tables are a 512-entry constant in `notes-core`),
+`getrandom` (64-bit ids; the `@p` syllable tables are a 512-entry constant in `fold-core`),
 `ariadne` (diagnostics), `proptest` + `insta` (tests).
 
 ### 15.5 Performance targets
@@ -1556,7 +1556,7 @@ of real-world Markdown (Obsidian, Logseq, FSNotes exports) that must parse witho
 
 ### 15.7 Diagnostics
 
-`notes check` reports, with `ariadne`-rendered source spans: non-canonical syntax, empty
+`fold check` reports, with `ariadne`-rendered source spans: non-canonical syntax, empty
 titles, titles containing `/`, broken, duplicate or cyclic embeds, embeds with children in the
 parent file, embeds whose form (bare or heading) does not match their block's spelling,
 heading embeds whose level is not the level of their position, text directly after a child
@@ -1597,25 +1597,25 @@ task state; wiki-links between nodes and backlinks
 
 | # | Deliverable | Exit criterion |
 |---|---|---|
-| M0 | `notes-core`: parser incl. frontmatter, tree, render/splice, canonicalize, ids and names | round-trip laws pass under proptest; `notes check` works |
+| M0 | `fold-core`: parser incl. frontmatter, tree, render/splice, canonicalize, ids and names | round-trip laws pass under proptest; `fold check` works |
 | M1 | TUI: outline + reading panes, zoom, fold, move, promote/demote, refile, filter box, subtree editing (`e`), undo | daily-drivable on a single `root.md` |
 | M2 | Blocks and properties: `s`, property-triggered blocks, task blocks | a task can be given a due date in the editor and its file round-trips |
 | M3 | Tasks: toggling on any node, `done:` stamping, dates, clear-done, filter box | replaces a TaskPaper file |
 | M4 | Inbox and capture; watcher and reload | safe to edit in Helix and the TUI at once |
-| M5 | Sync: conflict detection, two-way node-level merge, `conflict:` blocks, conflict view, `notes merge` | phone + laptop + homelab over Syncthing for two weeks without data loss |
+| M5 | Sync: conflict detection, two-way node-level merge, `conflict:` blocks, conflict view, `fold merge` | phone + laptop + homelab over Syncthing for two weeks without data loss |
 | M6 | CLI polish, diagnostics, docs | 1.0 |
 
 ---
 
 ## 19. Decisions
 
-1. **Name.** Binary `notes` is a placeholder.
+1. **Name.** `fold`: the binary, the crate prefix and the state directory.
 2. **Dated inbox, ISO titles, fixed.** Capture creates `## YYYY-MM-DD` under `Inbox`. There
    is no format choice and no way to turn it off except `--to`. Days append oldest-first; a
    long-lived inbox is a long section, which is what `s` (make block) and *clear done* are for.
 3. **Filenames are named once.** A title change does not rename the file: renames sync as
    delete-plus-create and race with edits on other devices. The id prefix identifies the
-   file; the name is a hint that `notes check --fix` refreshes on request.
+   file; the name is a hint that `fold check --fix` refreshes on request.
 4. **Id format.** Four-word `@p` names (64 bits): collision-free in practice, with three words
    of slack for the filename prefix to grow into. Pronounceable, typeable from memory, and
    self-validating against the syllable tables; nobody is expected to type all four.
@@ -1646,7 +1646,7 @@ task state; wiki-links between nodes and backlinks
 13. **Inbox by title.** Capture finds the inbox by the title `Inbox`. Renaming it means the
     next capture creates a new one. A hidden marker property would be the only setting.
 14. **No config file.** Presentation choices are fixed or session toggles; a config format, a
-    lookup order and a `notes config` command are not worth it. A real per-device need is
+    lookup order and a `fold config` command are not worth it. A real per-device need is
     one environment variable: the editor's keymap is `$FOLD_KEYS` (§10.6), and a
     colour-blind palette, say, would be another.
 15. **Windows.** Slugs and atomic writes are Windows-safe by design; nothing else is tested.
