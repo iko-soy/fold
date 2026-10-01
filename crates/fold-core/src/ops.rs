@@ -199,10 +199,9 @@ fn find_or_create_day(vault: &mut Vault, inbox: NRef) -> std::io::Result<NRef> {
     );
     let inbox_key = vault.key_of(inbox);
     append_structural_line(vault, inbox, &heading)?;
-    vault.reload()?;
     let inbox = vault
         .find_by_key(&inbox_key)
-        .ok_or_else(|| io_err("inbox lost after reload"))?;
+        .ok_or_else(|| io_err("inbox lost after the write"))?;
     for c in vault.tree.resolved_children(inbox) {
         if vault.tree.node(c).title == day {
             return Ok(c);
@@ -348,10 +347,9 @@ fn append_child_line(
             index = kids.len();
         }
     }
-    vault.reload()?;
     let parent = vault
         .find_by_key(&parent_key)
-        .ok_or_else(|| io_err("parent lost after reload"))?;
+        .ok_or_else(|| io_err("parent lost after the write"))?;
     vault
         .tree
         .resolved_children(parent)
@@ -1264,7 +1262,6 @@ fn place(
     for (f, span) in away.into_iter().rev() {
         remove_span_no_reload(vault, f, span)?;
     }
-    vault.reload()?;
     Ok(clamped != want.min(kids.len()))
 }
 
@@ -1425,7 +1422,7 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
         let _ = std::fs::remove_file(&full);
         return Err(e);
     }
-    vault.reload()?;
+    vault.add_file(&fname, &file_text);
     Ok(id)
 }
 
@@ -1657,7 +1654,6 @@ pub fn toggle_spelling(vault: &mut Vault, r: NRef) -> std::io::Result<bool> {
         let id = n.block.as_ref().and_then(|b| b.id.clone());
         vault.write_span(file, span, &respelled)?;
         let Some(e) = id.and_then(|id| vault.tree.embed_of(&id)) else {
-            vault.reload()?;
             return Ok(false);
         };
         return respell_embed(vault, e, to_section);
@@ -1708,7 +1704,6 @@ fn reposition(
         let prev = pos.checked_sub(1).map(|i| others[i]);
         let new = level_among(tree, prev, others.get(pos).copied(), &new);
         vault.write_span(r.0, span, &new)?;
-        vault.reload()?;
         return Ok(false);
     }
     place(vault, &[r], parent, pos, &new).map(|_| true)

@@ -883,7 +883,6 @@ pub fn resolve_keep_theirs(vault: &mut Vault, ours: NRef, theirs: NRef) -> std::
             crate::ops::set_frontmatter_key(vault, file, &k, Some(&v))?;
         }
         // a title change does not rename the file (§6.4)
-        vault.reload()?;
     } else {
         // plain node: replace its span with theirs' re-levelled text
         let parent_level = on.parent.map(|p| vault.tree.level((ours.0, p))).unwrap_or(0);

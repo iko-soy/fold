@@ -103,3 +103,117 @@ fn a_verb_refuses_to_overwrite_a_change_not_reloaded_yet() {
     ops::toggle_task(&mut v, a).unwrap();
     assert_eq!(read(&d, "root.md"), "- [x] a\n- [ ] b\n- [ ] from phone\n");
 }
+
+const OTHER_SYNCED: &str = "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- other, from phone\n";
+
+/// A sync changes a file the verb does not touch, and it is not reloaded
+/// yet (the watcher's debounce): the verb's entry holds only what the verb
+/// wrote, so undoing it leaves the sync's change be (§10.10). A verb that
+/// re-read the whole vault would take the change in as its own, and its
+/// undo would revert it.
+fn keeps_a_sync_it_did_not_make(d: &tempfile::TempDir, v: &mut Vault, verb: impl FnOnce(&mut Vault)) {
+    std::fs::write(d.path().join("racfer~other.md"), OTHER_SYNCED).unwrap();
+    let snap = Snapshot::take(v, "verb");
+    verb(v);
+    let inv = Inverse::since(snap, v).expect("the verb changed something");
+    let paths: Vec<&str> = inv.changes.iter().map(|c| c.path.as_str()).collect();
+    assert!(!paths.contains(&"racfer~other.md"), "{:?}", paths);
+    inv.undo(v).unwrap();
+    assert_eq!(read(d, "racfer~other.md"), OTHER_SYNCED);
+}
+
+/// `keeps_a_sync_it_did_not_make` on a vault with `WITH_OTHER` as its root.
+fn verb_keeps_a_sync(verb: impl FnOnce(&mut Vault)) {
+    let (d, mut v) = vault_with("# A\n\n- t\n- u\n\n![[racfer-hattes-mislup-nodrys]]\n\n# B\n");
+    keeps_a_sync_it_did_not_make(&d, &mut v, verb);
+}
+
+fn at(v: &Vault, path: &[&str]) -> fold_core::tree::NRef {
+    v.find_by_path(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+}
+
+#[test]
+fn make_block_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::make_block(v, at(v, &["A", "t"])).unwrap();
+    });
+}
+
+#[test]
+fn set_property_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::set_property(v, at(v, &["A", "t"]), "due", "2026-10-01").unwrap();
+    });
+}
+
+#[test]
+fn refile_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::refile(v, at(v, &["A", "t"]), at(v, &["B"])).unwrap();
+    });
+}
+
+#[test]
+fn paste_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::paste(v, at(v, &["A", "u"]), "- pasted\n", true).unwrap();
+    });
+}
+
+#[test]
+fn capture_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::capture(v, "call the plumber", false).unwrap();
+    });
+}
+
+#[test]
+fn a_new_child_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::append_child_public(v, at(v, &["B"]), "new").unwrap();
+    });
+}
+
+#[test]
+fn respelling_keeps_a_sync_it_did_not_make() {
+    verb_keeps_a_sync(|v| {
+        ops::toggle_spelling(v, at(v, &["B"])).unwrap();
+    });
+}
+
+#[test]
+fn canonicalizing_keeps_a_sync_it_did_not_make() {
+    // a non-canonical bullet to rewrite, and a block whose name is stale,
+    // to rename (§4.2, §6.4)
+    let (d, mut v) = vault_with("# A\n\n* t\n\n![[racfer-hattes-mislup-nodrys]]\n![[dozzod-binwes-talsun-worbec]]\n");
+    let block = "---\nid: dozzod-binwes-talsun-worbec\n---\n\n- renamed since\n";
+    std::fs::write(d.path().join("dozzod~old-name.md"), block).unwrap();
+    v.reload().unwrap();
+    keeps_a_sync_it_did_not_make(&d, &mut v, |v| {
+        assert_eq!(fold_core::check::fix(v).unwrap(), 2);
+        // the index knows the file by its new name
+        assert!(v.file_index("dozzod~renamed-since.md").is_some());
+        assert!(v.file_index("dozzod~old-name.md").is_none());
+    });
+    assert_eq!(read(&d, "dozzod~old-name.md"), block);
+}
+
+#[test]
+fn keeping_theirs_keeps_a_sync_it_did_not_make() {
+    // ours is a block, its conflict copy right after it (§12.4)
+    let (d, mut v) = vault_with(
+        "- other\n![[racfer-hattes-mislup-nodrys]]\n![[dozzod-binwes-talsun-worbec]]\n![[lacnum-walbyn-dirlyn-havtyp]]\n",
+    );
+    std::fs::write(d.path().join("dozzod~ours.md"), "---\nid: dozzod-binwes-talsun-worbec\ndue: 2026-10-01\n---\n\n- ours\n").unwrap();
+    std::fs::write(
+        d.path().join("lacnum~ours.md"),
+        "---\nid: lacnum-walbyn-dirlyn-havtyp\nconflict: \"PHONE 20260927-100000\"\n---\n\n- theirs\n",
+    )
+    .unwrap();
+    v.reload().unwrap();
+    keeps_a_sync_it_did_not_make(&d, &mut v, |v| {
+        let (ours, theirs) = fold_core::merge::conflict_pairs(v)[0];
+        fold_core::merge::resolve_keep_theirs(v, ours, theirs).unwrap();
+    });
+    assert_eq!(read(&d, "lacnum~ours.md").lines().last(), Some("- theirs"));
+}

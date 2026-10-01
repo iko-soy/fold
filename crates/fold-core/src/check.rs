@@ -392,7 +392,8 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         })
         .collect();
     let mut decided: Vec<String> = Vec::new();
-    let mut renames: Vec<(usize, String)> = Vec::new();
+    // by path: a renamed file takes its place by name among the others
+    let mut renames: Vec<(String, String)> = Vec::new();
     for (i, (r, id)) in vault.tree.blocks.iter().enumerate() {
         let b = vault.tree.node(*r).block.as_ref().unwrap();
         let words = id.words();
@@ -411,21 +412,17 @@ pub fn fix(vault: &mut Vault) -> std::io::Result<usize> {
         });
         let want = filename(&prefix, &slug(&vault.tree.node(*r).title));
         if want != b.path {
-            renames.push((r.0, want));
+            renames.push((b.path.clone(), want));
         }
         decided.push(prefix);
     }
-    for (file, want) in renames {
-        let old = vault.tree.files[file].path.clone();
-        let target = vault.dir.join(&want);
-        if target.exists() {
+    for (old, want) in renames {
+        if vault.dir.join(&want).exists() {
             continue; // never overwrite; check keeps reporting it
         }
-        std::fs::rename(vault.dir.join(&old), target)?;
+        let Some(file) = vault.file_index(&old) else { continue };
+        vault.rename_file(file, &want)?;
         count += 1;
-    }
-    if count > 0 {
-        vault.reload()?;
     }
     Ok(count)
 }

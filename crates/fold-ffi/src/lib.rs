@@ -1607,9 +1607,9 @@ impl State {
         self.verb(
             "canonicalize",
             Box::new(|s| {
+                // fix keeps the index as it renames: nothing else is read
+                // again, so the entry holds what it wrote and no more
                 let n = fold_core::check::fix(&mut s.vault).map_err(|e| format!("error: {}", e))?;
-                // fix renames files: the index is read again
-                s.vault.reload().map_err(|e| format!("error: {}", e))?;
                 Ok((format!("{} file{} rewritten or renamed", n, if n == 1 { "" } else { "s" }), None))
             }),
         )
