@@ -8,11 +8,11 @@
 
 mod edit;
 mod keys;
-mod news;
 
 use edit::TextEditor;
 use fold_core::edit::{open_editor, OwnerInfo};
 use fold_core::ident::Id;
+use fold_core::news;
 use fold_core::ops;
 use fold_core::parse::{Kind, TaskState};
 use fold_core::render::{render, render_lines, LineKind};
@@ -664,18 +664,6 @@ fn spelling_of(k: Kind) -> Spelling {
     }
 }
 
-/// Where a conflict copy came from (§12.4), as the screen says it: the
-/// merge's *PHONE 20260927-100000* reads *PHONE 09-27 10:00*.
-fn copy_from(conflict: &str) -> String {
-    let Some((device, t)) = conflict.rsplit_once(' ') else { return conflict.to_string() };
-    let digits = |r: std::ops::Range<usize>| t.get(r).is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()));
-    if t.len() == 15 && t.as_bytes()[8] == b'-' && digits(0..8) && digits(9..15) {
-        format!("{} {}-{} {}:{}", device, &t[4..6], &t[6..8], &t[9..11], &t[11..13])
-    } else {
-        conflict.to_string()
-    }
-}
-
 /// What a verb's message adds when the ordering rule chose the place (§3.1).
 fn with_rule_note(what: &str, moved: bool, kind: Kind) -> String {
     match (moved, kind) {
@@ -837,7 +825,7 @@ impl State {
             spelling: spelling_of(n.kind),
             task: task_of(n.task),
             block: n.is_block(),
-            conflict: n.conflict().map(copy_from),
+            conflict: n.conflict().map(fold_core::merge::copy_from),
             broken: n.is_embed(),
             has_children: !kids.is_empty(),
             folded: is_folded,
@@ -904,7 +892,7 @@ impl State {
             spelling: spelling_of(n.kind),
             task: task_of(n.task),
             block: n.is_block(),
-            conflict: n.conflict().map(copy_from),
+            conflict: n.conflict().map(fold_core::merge::copy_from),
             due: n.block.as_ref().and_then(|b| b.prop("due")).map(str::to_string),
             open,
             total,
@@ -921,7 +909,7 @@ impl State {
             spelling: spelling_of(n.kind),
             task: task_of(n.task),
             block: n.is_block(),
-            conflict: n.conflict().map(copy_from),
+            conflict: n.conflict().map(fold_core::merge::copy_from),
             paired: ops::conflict_pair(&self.vault.tree, r).len() > 1 || n.conflict().is_some(),
             path: self.crumbs(r),
         }
@@ -972,7 +960,7 @@ impl State {
                     };
                     line.task = task_of(n.task);
                     line.title = n.title.clone();
-                    line.conflict = n.conflict().map(copy_from);
+                    line.conflict = n.conflict().map(fold_core::merge::copy_from);
                     let props: Vec<String> = self
                         .properties(l.node)
                         .into_iter()
@@ -1085,27 +1073,15 @@ impl State {
         scored.into_iter().take(200).map(|(_, _, r)| self.hit(r, None)).collect()
     }
 
-    /// The unresolved pairs, first in the outline first (§10.7).
-    fn view_pairs(&self) -> Vec<(NRef, NRef)> {
-        let mut pairs = fold_core::merge::conflict_pairs(&self.vault);
-        if pairs.len() > 1 {
-            let tree = &self.vault.tree;
-            let mut order = Vec::new();
-            tree.walk(tree.root, &mut |_, r| order.push(r));
-            pairs.sort_by_key(|&(ours, _)| order.iter().position(|&r| r == ours));
-        }
-        pairs
-    }
-
     fn conflicts(&self) -> Vec<ConflictPair> {
         let tree = &self.vault.tree;
-        self.view_pairs()
+        fold_core::merge::conflict_pairs_in_order(&self.vault)
             .into_iter()
             .map(|(ours, theirs)| ConflictPair {
                 ours: self.key(ours),
                 theirs: self.key(theirs),
                 title: tree.node(ours).title.clone(),
-                from: tree.node(theirs).conflict().map(copy_from).unwrap_or_default(),
+                from: tree.node(theirs).conflict().map(fold_core::merge::copy_from).unwrap_or_default(),
                 ours_text: render(tree, ours, 1, true),
                 theirs_text: render(tree, theirs, 1, true),
             })
@@ -1566,7 +1542,7 @@ impl State {
 
     fn resolve(&mut self, theirs: &str, keep: Keep) -> OpResult {
         let Some(t) = self.find(theirs) else { return Self::gone() };
-        let Some((ours, theirs)) = self.view_pairs().into_iter().find(|&(_, x)| x == t) else {
+        let Some((ours, theirs)) = fold_core::merge::conflict_pairs_in_order(&self.vault).into_iter().find(|&(_, x)| x == t) else {
             return Self::refused("that conflict is resolved already");
         };
         let side = match keep {
@@ -1736,11 +1712,10 @@ impl State {
     /// raised and what to say of them; a block cut in the editor and not
     /// pasted back is moved, and not put back where it was (§5.2).
     fn merge_conflict_files(&mut self) -> std::io::Result<(u32, String)> {
-        let before: Vec<NodeKey> = self.view_pairs().into_iter().map(|(_, t)| self.vault.key_of(t)).collect();
+        let before: Vec<NodeKey> = fold_core::merge::conflict_pairs_in_order(&self.vault).into_iter().map(|(_, t)| self.vault.key_of(t)).collect();
         let moving: Vec<Id> = self.transit().into_iter().map(|(id, _)| id).collect();
         fold_core::merge::merge_sync_conflicts_moving(&mut self.vault, false, &moving)?;
-        let raised: Vec<NRef> = self
-            .view_pairs()
+        let raised: Vec<NRef> = fold_core::merge::conflict_pairs_in_order(&self.vault)
             .into_iter()
             .filter(|&(_, t)| !before.contains(&self.vault.key_of(t)))
             .map(|(o, _)| o)

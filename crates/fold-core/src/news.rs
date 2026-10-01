@@ -1,9 +1,11 @@
-//! What a reload took in, in outline terms (§11.2): the same words the TUI
-//! uses (`fold-tui/src/app.rs`), *↻ changed outside fold: Inbox (+1 item)*.
+//! What a reload took in, in outline terms (§11.2), as the TUI's status bar
+//! and the app's message say it: *↻ changed outside fold: Inbox (+1 item)*.
 
-use fold_core::parse::Kind;
-use fold_core::vault::{NodeKey, Vault};
+use crate::parse::Kind;
+use crate::vault::{NodeKey, Vault};
 
+/// A top-level node before or after a reload: what it holds, and a hash of
+/// its text, to say what changed.
 #[derive(Clone)]
 pub struct Top {
     key: NodeKey,

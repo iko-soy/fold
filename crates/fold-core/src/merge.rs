@@ -727,6 +727,19 @@ fn place_sibling_embeds(vault: &mut Vault, owner: Option<&Id>, ids: &[Id]) -> st
     }
 }
 
+/// Where a conflict copy came from (§12.4), as a screen says it: the
+/// `conflict:` value *PHONE 20260927-100000* that a merge writes reads
+/// *PHONE 09-27 10:00*. A value written otherwise is shown as it is.
+pub fn copy_from(conflict: &str) -> String {
+    let Some((device, t)) = conflict.rsplit_once(' ') else { return conflict.to_string() };
+    let digits = |r: std::ops::Range<usize>| t.get(r).is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()));
+    if t.len() == 15 && t.as_bytes()[8] == b'-' && digits(0..8) && digits(9..15) {
+        format!("{} {}-{} {}:{}", device, &t[4..6], &t[6..8], &t[9..11], &t[11..13])
+    } else {
+        conflict.to_string()
+    }
+}
+
 fn parse_conflict_name(name: &str) -> (String, String) {
     // name.sync-conflict-<date>-<time>-<device>.md
     let mut device = "unknown".to_string();
@@ -748,6 +761,25 @@ fn parse_conflict_name(name: &str) -> (String, String) {
 /// Returns (ours, theirs) pairs; theirs is the block right after ours.
 pub fn conflict_pairs(vault: &Vault) -> Vec<(NRef, NRef)> {
     conflict_pairs_tree(&vault.tree)
+}
+
+/// `conflict_pairs` first in the outline first, as the conflict view lists
+/// them (§10.7, §12.5): it opens on the first new one in the outline, and
+/// goes on down it.
+pub fn conflict_pairs_in_order(vault: &Vault) -> Vec<(NRef, NRef)> {
+    let mut pairs = conflict_pairs(vault);
+    if pairs.len() > 1 {
+        // found by their blocks' files; the outline is walked for their
+        // order only when there is one to find
+        let tree = &vault.tree;
+        let mut order = std::collections::HashMap::new();
+        tree.walk(tree.root, &mut |_, r| {
+            let at = order.len();
+            order.entry(r).or_insert(at);
+        });
+        pairs.sort_by_key(|(ours, _)| order.get(ours).copied());
+    }
+    pairs
 }
 
 pub fn conflict_pairs_tree(tree: &Tree) -> Vec<(NRef, NRef)> {
