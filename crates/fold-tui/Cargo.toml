@@ -7,10 +7,7 @@ edition = "2021"
 fold-core = { path = "../fold-core" }
 ratatui.workspace = true
 crossterm.workspace = true
-tui-textarea.workspace = true
 notify.workspace = true
-jiff.workspace = true
-nucleo.workspace = true
 unicode-width.workspace = true
 anyhow.workspace = true
 # syntax highlighting of fenced code in the reading pane (§10.9); grammar
@@ -153,6 +150,4 @@ tree-sitter-zsh = "=0.63.4"
 signal-hook = "0.3.18"
 
 [dev-dependencies]
-insta = "1"
 tempfile = "3"
-crossterm.workspace = true

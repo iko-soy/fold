@@ -11,9 +11,6 @@ blake3.workspace = true
 unicode-normalization.workspace = true
 directories.workspace = true
 getrandom.workspace = true
-anyhow.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
-proptest = "1"
 tempfile = "3"
