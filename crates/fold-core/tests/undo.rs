@@ -1,7 +1,7 @@
 //! The session op log (§10.10): an entry holds exactly the files an
 //! operation touched; undo and redo refuse when one changed since.
 
-use fold_core::ops::{self, Inverse, Snapshot};
+use fold_core::ops::{self, Inverse, OpLog, Snapshot};
 use fold_core::vault::Vault;
 
 fn vault_with(root: &str) -> (tempfile::TempDir, Vault) {
@@ -216,4 +216,27 @@ fn keeping_theirs_keeps_a_sync_it_did_not_make() {
         fold_core::merge::resolve_keep_theirs(v, ours, theirs).unwrap();
     });
     assert_eq!(read(&d, "lacnum~ours.md").lines().last(), Some("- theirs"));
+}
+
+#[test]
+fn the_op_log_steps_back_and_forth() {
+    let (d, mut v) = vault_with("# A\n\n- [ ] t\n");
+    let mut log = OpLog::default();
+    assert!(log.step(&mut v, true).is_none(), "nothing to undo");
+    let snap = Snapshot::take(&v, "mark “t” done");
+    let t = at(&v, &["A", "t"]);
+    ops::toggle_task(&mut v, t).unwrap();
+    assert!(log.record(Inverse::since(snap, &v)));
+    // a verb that changed nothing leaves no entry
+    assert!(!log.record(Inverse::since(Snapshot::take(&v, "nothing"), &v)));
+    assert_eq!(log.depth(), 1);
+    assert_eq!(log.step(&mut v, true).unwrap().unwrap(), "mark “t” done");
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [ ] t\n");
+    assert_eq!(log.last_redo().map(|e| e.description.as_str()), Some("mark “t” done"));
+    log.step(&mut v, false).unwrap().unwrap();
+    assert_eq!(read(&d, "root.md"), "# A\n\n- [x] t\n");
+    // refused when the file changed since: the entry stays
+    std::fs::write(d.path().join("root.md"), "# A\n\n- [x] t\n- more\n").unwrap();
+    assert!(log.step(&mut v, true).unwrap().is_err());
+    assert_eq!(log.depth(), 1);
 }

@@ -207,6 +207,20 @@ impl EditBuffer {
         }
     }
 
+    /// The blocks this buffer holds in transit (§5.2), with their files:
+    /// nested here, with no line left in it, embedded nowhere, and still in
+    /// the vault.
+    pub fn transit(&self, vault: &Vault) -> Vec<(Id, String)> {
+        let tree = &vault.tree;
+        self.owners
+            .iter()
+            .filter(|&(o, i)| i.parent.is_some() && !self.lines.iter().any(|l| l.owner == *o))
+            .filter_map(|(_, i)| i.id.as_ref())
+            .filter(|id| tree.embed_of(id).is_none())
+            .filter_map(|id| Some((id.clone(), tree.files[tree.block_by_id(id)?.0].path.clone())))
+            .collect()
+    }
+
     /// Insert a line after `idx`; it inherits that line's tag (§5.2).
     pub fn insert_line(&mut self, idx: usize, text: String) {
         let owner = if self.lines.is_empty() {

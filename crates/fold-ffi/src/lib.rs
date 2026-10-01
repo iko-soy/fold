@@ -301,8 +301,7 @@ pub struct Session {
 
 struct State {
     vault: Vault,
-    undo: Vec<ops::Inverse>,
-    redo: Vec<ops::Inverse>,
+    log: ops::OpLog,
     /// The register (§10.3 `y`/`d`): text, what it is, its spelling.
     register: Option<(String, String, Kind)>,
     editor: Option<TextEditor>,
@@ -315,9 +314,6 @@ struct State {
     /// The editor's text as it was when *Revert* could not copy it to the
     /// trash: *Revert* again on the same text drops it.
     edit_uncopied: Option<String>,
-    /// The file of each block an editor save left in transit (§5.2), with
-    /// the length of `undo` once that save's entry was in (§10.10).
-    edit_transit: Vec<(String, usize)>,
     /// The sync-conflict copies the last look at the files listed, and
     /// still there after it: a new one is a change to take in (§11.2).
     conflict_copies: Vec<String>,
@@ -332,14 +328,12 @@ impl Session {
         Ok(Arc::new(Session {
             state: Mutex::new(State {
                 vault,
-                undo: Vec::new(),
-                redo: Vec::new(),
+                log: ops::OpLog::default(),
                 register: None,
                 editor: None,
                 edit_generation: 0,
                 edit_refused: false,
                 edit_uncopied: None,
-                edit_transit: Vec::new(),
                 // none yet: the first look at the files merges any there
                 // (§12.2, the startup scan)
                 conflict_copies: Vec::new(),
@@ -512,8 +506,8 @@ impl Session {
     pub fn undo(&self, mark: Option<UndoMark>) -> OpResult {
         let mut s = self.lock();
         if let Some(m) = mark {
-            let top = s.undo.last().map(|e| e.description.as_str());
-            if s.undo.len() as u32 != m.depth || top != Some(m.description.as_str()) {
+            let top = s.log.last_undo().map(|e| e.description.as_str());
+            if s.log.depth() as u32 != m.depth || top != Some(m.description.as_str()) {
                 return State::refused(match top {
                     Some(d) => format!("not undone: the last change is now {}", d),
                     None => "nothing to undo".into(),
@@ -799,9 +793,9 @@ impl State {
             crumbs: zoom.map(|z| self.crumbs(z)).unwrap_or_default(),
             rows,
             conflicts: fold_core::merge::conflict_pairs(&self.vault).len() as u32,
-            undo: self.undo.last().map(|e| e.description.clone()),
-            redo: self.redo.last().map(|e| e.description.clone()),
-            undo_depth: self.undo.len() as u32,
+            undo: self.log.last_undo().map(|e| e.description.clone()),
+            redo: self.log.last_redo().map(|e| e.description.clone()),
+            undo_depth: self.log.depth() as u32,
             copied: self.register.as_ref().map(|(_, name, _)| name.clone()),
         }
     }
@@ -1163,10 +1157,7 @@ impl State {
     }
 
     fn record_undo(&mut self, snap: ops::Snapshot) {
-        if let Some(inv) = ops::Inverse::since(snap, &self.vault) {
-            self.undo.push(inv);
-            self.redo.clear();
-        }
+        self.log.record(ops::Inverse::since(snap, &self.vault));
     }
 
     fn toggle_task(&mut self, key: &str) -> OpResult {
@@ -1615,25 +1606,12 @@ impl State {
         if self.editor.is_some() {
             return Self::refused("finish editing first");
         }
-        // the entries a block in transit was remembered with may go
-        self.edit_transit.clear();
-        let entry = if undo { self.undo.pop() } else { self.redo.pop() };
-        let Some(inv) = entry else {
-            return Self::refused(if undo { "nothing to undo" } else { "nothing to redo" });
-        };
-        let res = if undo { inv.undo(&mut self.vault) } else { inv.redo(&mut self.vault) };
         let (done, verb) = if undo { ("undone", "undo") } else { ("redone", "redo") };
-        match res {
-            Ok(()) => {
-                let message = format!("{}: {}", done, inv.description);
-                if undo { self.redo.push(inv) } else { self.undo.push(inv) }
-                OpResult::new(true, message, None)
-            }
-            Err(e) => {
-                // refused: an external change since; the entry stays
-                if undo { self.undo.push(inv) } else { self.redo.push(inv) }
-                Self::refused(format!("{} refused: {}", verb, e))
-            }
+        match self.log.step(&mut self.vault, undo) {
+            None => Self::refused(format!("nothing to {}", verb)),
+            Some(Ok(what)) => OpResult::new(true, format!("{}: {}", done, what), None),
+            // refused: an external change since; the entry stays
+            Some(Err(e)) => Self::refused(format!("{} refused: {}", verb, e)),
         }
     }
 
@@ -1856,97 +1834,17 @@ impl State {
         res.map(|_| ()).map_err(|e| format!("error: {}", e))
     }
 
-    /// `record_undo` for a save of the editor (`fold-tui`'s `record_edit`,
-    /// §10.10): a block an earlier save left in transit and this one
-    /// deletes is deleted in the entry of that save, which wrote its embed
-    /// out; one this save pastes back makes that save, this one and those
-    /// between one entry.
+    /// `record_undo` for a save of the editor, which keeps a block cut in
+    /// it in one entry with its file (`OpLog::record_edit`, §10.10).
     fn record_edit(&mut self, snap: ops::Snapshot) {
-        let mut at = None;
-        if let Some(mut inv) = ops::Inverse::since(snap, &self.vault) {
-            let (transit, undo) = (&self.edit_transit, &mut self.undo);
-            inv.changes.retain(|c| {
-                let entry = transit.iter().find(|(p, _)| *p == c.path && c.after.is_none());
-                let Some(&(_, n)) = entry.filter(|&&(_, n)| n > 0 && n <= undo.len()) else { return true };
-                if undo[n - 1..].iter().any(|e| e.changes.iter().any(|x| x.path == c.path)) {
-                    return true;
-                }
-                undo[n - 1].changes.push(c.clone());
-                false
-            });
-            if !inv.changes.is_empty() {
-                self.undo.push(inv);
-                at = Some(self.undo.len());
-            }
-            self.redo.clear();
-        }
-        let mut back: Vec<usize> =
-            self.edit_transit.iter().filter(|(p, _)| self.embedded(p) == Some(true)).map(|&(_, n)| n).collect();
-        back.sort_unstable();
-        if let Some(n) = back.into_iter().find(|&n| n > 0 && self.join_undo(n - 1)) {
-            let joined = self.undo.len() == n;
-            at = at.and(joined.then_some(n));
-            self.edit_transit.retain_mut(|(_, m)| {
-                *m = (*m).min(n);
-                *m < n || joined
-            });
-        }
-        let open = self.editor.is_some();
-        let transit = std::mem::take(&mut self.edit_transit);
-        self.edit_transit = transit.into_iter().filter(|(p, _)| open && self.embedded(p) == Some(false)).collect();
-        if let Some(n) = at {
-            for (_, p) in self.transit() {
-                if !self.edit_transit.iter().any(|(q, _)| *q == p) {
-                    self.edit_transit.push((p, n));
-                }
-            }
-        }
+        let inv = ops::Inverse::since(snap, &self.vault);
+        let in_transit = self.transit().into_iter().map(|(_, path)| path).collect();
+        self.log.record_edit(inv, &self.vault, self.editor.is_some(), in_transit);
     }
 
-    /// Whether the block whose file is `path` is embedded now; `None` where
-    /// the file is gone.
-    fn embedded(&self, path: &str) -> Option<bool> {
-        let tree = &self.vault.tree;
-        let f = self.vault.file_index(path)?;
-        let (_, id) = tree.blocks.iter().find(|(r, _)| r.0 == f)?;
-        Some(tree.embed_of(id).is_some())
-    }
-
-    /// Make the op-log entries from `from` on one (§10.10); false where a
-    /// file changed from outside between two of them.
-    fn join_undo(&mut self, from: usize) -> bool {
-        let Some(first) = self.undo.get(from) else { return false };
-        let description = first.description.clone();
-        let mut changes: Vec<ops::Change> = Vec::new();
-        for c in self.undo[from..].iter().flat_map(|e| &e.changes) {
-            match changes.iter_mut().find(|x| x.path == c.path) {
-                Some(x) if x.after == c.before => x.after = c.after.clone(),
-                Some(_) => return false,
-                None => changes.push(c.clone()),
-            }
-        }
-        changes.retain(|c| c.before != c.after);
-        self.undo.truncate(from);
-        if !changes.is_empty() {
-            self.undo.push(ops::Inverse { changes, description });
-        }
-        true
-    }
-
-    /// The blocks the open editor holds in transit (§5.2), with their files:
-    /// nested there, with no line left in it, embedded nowhere, and still in
-    /// the vault.
+    /// The blocks the open editor holds in transit (§5.2), with their files.
     fn transit(&self) -> Vec<(Id, String)> {
-        let Some(ed) = self.editor.as_ref() else { return Vec::new() };
-        let tree = &self.vault.tree;
-        ed.buf
-            .owners
-            .iter()
-            .filter(|&(o, i)| i.parent.is_some() && !ed.buf.lines.iter().any(|l| l.owner == *o))
-            .filter_map(|(_, i)| i.id.as_ref())
-            .filter(|id| tree.embed_of(id).is_none())
-            .filter_map(|id| Some((id.clone(), tree.files[tree.block_by_id(id)?.0].path.clone())))
-            .collect()
+        self.editor.as_ref().map(|ed| ed.buf.transit(&self.vault)).unwrap_or_default()
     }
 
     /// The editor's render root in the tree as the editor last read or

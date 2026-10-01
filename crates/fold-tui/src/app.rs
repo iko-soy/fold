@@ -107,9 +107,8 @@ pub struct App {
     copied: (String, Kind),
     status: String,
     status_time: Instant,
-    undo: Vec<ops::Inverse>,
-    redo: Vec<ops::Inverse>,
-    // snapshot taken when a verb started, settled into `undo` after it
+    log: ops::OpLog,
+    // snapshot taken when a verb started, settled into `log` after it
     pending_undo: Option<ops::Snapshot>,
     filter: String,
     filter_rows: Vec<NRef>,
@@ -138,13 +137,6 @@ pub struct App {
     /// The editor's text as it was when *Revert* could not copy it to the
     /// trash: *Revert* again on the same text drops it without one.
     edit_uncopied: Option<String>,
-    /// The file of each block an editor save left in transit (§5.2): its
-    /// title line cut, the block it was in written without its embed. With
-    /// the op-log entry of that save, by the length of `undo` once it was
-    /// in: the save that deletes the block puts the deletion there, and
-    /// the one that writes its embed back makes the entries from there to
-    /// its own one.
-    edit_transit: Vec<(String, usize)>,
     /// Every editor save panics where it writes: for tests of what fold
     /// keeps when it crashes (`panic_in_saves`).
     save_panics: bool,
@@ -248,8 +240,7 @@ impl App {
             copied: (String::new(), Kind::Item),
             status: HINT.into(),
             status_time: Instant::now(),
-            undo: Vec::new(),
-            redo: Vec::new(),
+            log: ops::OpLog::default(),
             pending_undo: None,
             filter: String::new(),
             filter_rows: Vec::new(),
@@ -268,7 +259,6 @@ impl App {
             edit_moved: None,
             edit_refused: false,
             edit_uncopied: None,
-            edit_transit: Vec::new(),
             save_panics: false,
             props_target: None,
             props_rows: Vec::new(),
@@ -2634,48 +2624,31 @@ impl App {
     }
 
     fn act_undo(&mut self) {
-        self.settle_undo();
-        // the entries a block in transit was remembered with may go
-        self.edit_transit.clear();
-        let Some(inv) = self.undo.pop() else {
-            self.say("nothing to undo");
-            return;
-        };
-        self.mark_self_write();
-        self.anchor_zoom();
-        match inv.undo(&mut self.vault) {
-            Ok(()) => {
-                self.say(format!("undone: {}", inv.description));
-                self.redo.push(inv);
-                self.clamp_cursor();
-            }
-            Err(e) => {
-                // refused: an external change since; the entry stays
-                self.say(format!("undo refused: {}", e));
-                self.undo.push(inv);
-            }
-        }
+        self.undo_redo(true);
     }
 
     fn act_redo(&mut self) {
+        self.undo_redo(false);
+    }
+
+    /// Undo the last change, or redo the last one undone (§10.10), and say
+    /// which in words. One refused — a file it touched changed since —
+    /// stays, and says why.
+    fn undo_redo(&mut self, undo: bool) {
         self.settle_undo();
-        self.edit_transit.clear();
-        let Some(inv) = self.redo.pop() else {
-            self.say("nothing to redo");
-            return;
-        };
-        self.mark_self_write();
-        self.anchor_zoom();
-        match inv.redo(&mut self.vault) {
-            Ok(()) => {
-                self.say(format!("redone: {}", inv.description));
-                self.undo.push(inv);
+        let (done, verb) = if undo { ("undone", "undo") } else { ("redone", "redo") };
+        if if undo { self.log.last_undo() } else { self.log.last_redo() }.is_some() {
+            // what it writes is ours, and may renumber the zoom's nodes
+            self.mark_self_write();
+            self.anchor_zoom();
+        }
+        match self.log.step(&mut self.vault, undo) {
+            None => self.say(format!("nothing to {}", verb)),
+            Some(Ok(what)) => {
+                self.say(format!("{}: {}", done, what));
                 self.clamp_cursor();
             }
-            Err(e) => {
-                self.say(format!("redo refused: {}", e));
-                self.redo.push(inv);
-            }
+            Some(Err(e)) => self.say(format!("{} refused: {}", verb, e)),
         }
     }
 
@@ -2699,124 +2672,25 @@ impl App {
     }
 
     fn record_undo(&mut self, snap: ops::Snapshot) {
-        if let Some(inv) = ops::Inverse::since(snap, &self.vault) {
-            self.undo.push(inv);
-            self.redo.clear();
+        if self.log.record(ops::Inverse::since(snap, &self.vault)) {
             self.mark_self_write();
         }
     }
 
     /// `record_undo` for a save of the editor, its *Revert*, or a reload
-    /// that re-renders it (§11.2): a block an earlier save left in transit
-    /// (§5.2) and this one deletes is deleted in the entry of that save,
-    /// which wrote its embed out, so one undo puts back its file and its
-    /// embed together, never the file embedded nowhere (§10.10). One this
-    /// save pastes back, writing its embed again, makes that save, this
-    /// one and those between one entry, so no undo stops where its file is
-    /// embedded nowhere either. The blocks this save leaves in transit are
-    /// remembered with its entry, until their file is deleted or embedded
-    /// again.
+    /// that re-renders it (§11.2), which keeps a block cut in the editor in
+    /// one entry with its file (`OpLog::record_edit`).
     fn record_edit(&mut self, snap: ops::Snapshot) {
-        // the length of `undo` once this save's entry is in, if it has one
-        let mut at = None;
-        if let Some(mut inv) = ops::Inverse::since(snap, &self.vault) {
-            let (transit, undo) = (&self.edit_transit, &mut self.undo);
-            inv.changes.retain(|c| {
-                let entry = transit.iter().find(|(p, _)| *p == c.path && c.after.is_none());
-                // that entry, and none since, left the file as it was
-                let Some(&(_, n)) = entry.filter(|&&(_, n)| n > 0 && n <= undo.len()) else { return true };
-                if undo[n - 1..].iter().any(|e| e.changes.iter().any(|x| x.path == c.path)) {
-                    return true;
-                }
-                undo[n - 1].changes.push(c.clone());
-                false
-            });
-            if !inv.changes.is_empty() {
-                self.undo.push(inv);
-                at = Some(self.undo.len());
-            }
-            self.redo.clear();
+        let inv = ops::Inverse::since(snap, &self.vault);
+        let in_transit = self.transit().into_iter().map(|(_, path)| path).collect();
+        if self.log.record_edit(inv, &self.vault, self.editor.is_some(), in_transit) {
             self.mark_self_write();
         }
-        // pasted back: joined from the earliest save that wrote out the
-        // embed of a block embedded again now
-        let mut back: Vec<usize> =
-            self.edit_transit.iter().filter(|(p, _)| self.embedded(p) == Some(true)).map(|&(_, n)| n).collect();
-        back.sort_unstable();
-        if let Some(n) = back.into_iter().find(|&n| n > 0 && self.join_undo(n - 1)) {
-            // the entries from `n - 1` on are the one at `n - 1` now, if any
-            let joined = self.undo.len() == n;
-            at = at.and(joined.then_some(n));
-            self.edit_transit.retain_mut(|(_, m)| {
-                *m = (*m).min(n);
-                *m < n || joined
-            });
-        }
-        // still in transit, or pasted back with its embed not written yet
-        let open = self.editor.is_some();
-        let transit = std::mem::take(&mut self.edit_transit);
-        self.edit_transit = transit.into_iter().filter(|(p, _)| open && self.embedded(p) == Some(false)).collect();
-        if let Some(n) = at {
-            for p in self.transit_files() {
-                if !self.edit_transit.iter().any(|(q, _)| *q == p) {
-                    self.edit_transit.push((p, n));
-                }
-            }
-        }
     }
 
-    /// Whether the block whose file is `path` is embedded now; `None`
-    /// where the file is gone.
-    fn embedded(&self, path: &str) -> Option<bool> {
-        let tree = &self.vault.tree;
-        let f = self.vault.file_index(path)?;
-        let (_, id) = tree.blocks.iter().find(|(r, _)| r.0 == f)?;
-        Some(tree.embed_of(id).is_some())
-    }
-
-    /// Make the op-log entries from `from` on one (§10.10): for each file,
-    /// its text before the first and after the last; one that ends as it
-    /// began is left out, and an entry left with none is dropped. False,
-    /// with the entries as they were, where a file changed from outside
-    /// between two of them: undoing them as one would drop that change.
-    fn join_undo(&mut self, from: usize) -> bool {
-        let Some(first) = self.undo.get(from) else { return false };
-        let description = first.description.clone();
-        let mut changes: Vec<ops::Change> = Vec::new();
-        for c in self.undo[from..].iter().flat_map(|e| &e.changes) {
-            match changes.iter_mut().find(|x| x.path == c.path) {
-                Some(x) if x.after == c.before => x.after = c.after.clone(),
-                Some(_) => return false,
-                None => changes.push(c.clone()),
-            }
-        }
-        changes.retain(|c| c.before != c.after);
-        self.undo.truncate(from);
-        if !changes.is_empty() {
-            self.undo.push(ops::Inverse { changes, description });
-        }
-        true
-    }
-
-    /// The files of the blocks the open editor holds in transit (§5.2).
-    fn transit_files(&self) -> Vec<String> {
-        self.transit().into_iter().map(|(_, path)| path).collect()
-    }
-
-    /// The blocks the open editor holds in transit (§5.2), with their
-    /// files: nested there, with no line left in it, embedded nowhere, and
-    /// still in the vault.
+    /// The blocks the open editor holds in transit (§5.2), with their files.
     fn transit(&self) -> Vec<(Id, String)> {
-        let Some(ed) = self.editor.as_ref() else { return Vec::new() };
-        let tree = &self.vault.tree;
-        ed.buf
-            .owners
-            .iter()
-            .filter(|&(o, i)| i.parent.is_some() && !ed.buf.lines.iter().any(|l| l.owner == *o))
-            .filter_map(|(_, i)| i.id.as_ref())
-            .filter(|id| tree.embed_of(id).is_none())
-            .filter_map(|id| Some((id.clone(), tree.files[tree.block_by_id(id)?.0].path.clone())))
-            .collect()
+        self.editor.as_ref().map(|ed| ed.buf.transit(&self.vault)).unwrap_or_default()
     }
 
     /// Parent and siblings are found on the flattened rows rather than in

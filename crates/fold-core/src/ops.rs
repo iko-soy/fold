@@ -110,6 +110,159 @@ impl Inverse {
     }
 }
 
+/// The session op log (§10.10): what undo would take back and redo would
+/// do again, and the blocks an editor save left in transit (§5.2), each
+/// by its file, with the length of `undo` once the entry of the save that
+/// wrote its embed out was in. What the TUI and the app hold between
+/// verbs.
+#[derive(Debug, Default)]
+pub struct OpLog {
+    undo: Vec<Inverse>,
+    redo: Vec<Inverse>,
+    transit: Vec<(String, usize)>,
+}
+
+impl OpLog {
+    /// The entry undo would take back.
+    pub fn last_undo(&self) -> Option<&Inverse> {
+        self.undo.last()
+    }
+
+    /// The entry redo would do again.
+    pub fn last_redo(&self) -> Option<&Inverse> {
+        self.redo.last()
+    }
+
+    /// How many entries undo can take back.
+    pub fn depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// An operation's entry. `None`, an operation that changed nothing,
+    /// leaves the log as it is, the redo stack too. True when recorded.
+    pub fn record(&mut self, inv: Option<Inverse>) -> bool {
+        let Some(inv) = inv else { return false };
+        self.undo.push(inv);
+        self.redo.clear();
+        true
+    }
+
+    /// `record` for a save of the editor, its *Revert*, or a reload that
+    /// re-renders it (§11.2): a block an earlier save left in transit
+    /// (§5.2) and this one deletes is deleted in the entry of that save,
+    /// which wrote its embed out, so one undo puts back its file and its
+    /// embed together, never the file embedded nowhere. One this save
+    /// pastes back, writing its embed again, makes that save, this one and
+    /// those between one entry, so no undo stops where its file is embedded
+    /// nowhere either. `in_transit` are the files of the blocks the editor
+    /// holds in transit now, remembered with this save's entry until their
+    /// file is deleted or embedded again; `editing`, whether it is still
+    /// open. True when there was an entry to record.
+    pub fn record_edit(&mut self, inv: Option<Inverse>, vault: &Vault, editing: bool, in_transit: Vec<String>) -> bool {
+        // the length of `undo` once this save's entry is in, if it has one
+        let mut at = None;
+        let recorded = inv.is_some();
+        if let Some(mut inv) = inv {
+            let (transit, undo) = (&self.transit, &mut self.undo);
+            inv.changes.retain(|c| {
+                let entry = transit.iter().find(|(p, _)| *p == c.path && c.after.is_none());
+                // that entry, and none since, left the file as it was
+                let Some(&(_, n)) = entry.filter(|&&(_, n)| n > 0 && n <= undo.len()) else { return true };
+                if undo[n - 1..].iter().any(|e| e.changes.iter().any(|x| x.path == c.path)) {
+                    return true;
+                }
+                undo[n - 1].changes.push(c.clone());
+                false
+            });
+            if !inv.changes.is_empty() {
+                self.undo.push(inv);
+                at = Some(self.undo.len());
+            }
+            self.redo.clear();
+        }
+        // pasted back: joined from the earliest save that wrote out the
+        // embed of a block embedded again now
+        let mut back: Vec<usize> =
+            self.transit.iter().filter(|(p, _)| embedded(vault, p) == Some(true)).map(|&(_, n)| n).collect();
+        back.sort_unstable();
+        if let Some(n) = back.into_iter().find(|&n| n > 0 && self.join(n - 1)) {
+            // the entries from `n - 1` on are the one at `n - 1` now, if any
+            let joined = self.undo.len() == n;
+            at = at.and(joined.then_some(n));
+            self.transit.retain_mut(|(_, m)| {
+                *m = (*m).min(n);
+                *m < n || joined
+            });
+        }
+        // still in transit, or pasted back with its embed not written yet
+        self.transit.retain(|(p, _)| editing && embedded(vault, p) == Some(false));
+        if let Some(n) = at {
+            for p in in_transit {
+                if !self.transit.iter().any(|(q, _)| *q == p) {
+                    self.transit.push((p, n));
+                }
+            }
+        }
+        recorded
+    }
+
+    /// Make the entries from `from` on one: for each file, its text before
+    /// the first and after the last; one that ends as it began is left
+    /// out, and an entry left with none is dropped. False, with the entries
+    /// as they were, where a file changed from outside between two of
+    /// them: undoing them as one would drop that change.
+    fn join(&mut self, from: usize) -> bool {
+        let Some(first) = self.undo.get(from) else { return false };
+        let description = first.description.clone();
+        let mut changes: Vec<Change> = Vec::new();
+        for c in self.undo[from..].iter().flat_map(|e| &e.changes) {
+            match changes.iter_mut().find(|x| x.path == c.path) {
+                Some(x) if x.after == c.before => x.after = c.after.clone(),
+                Some(_) => return false,
+                None => changes.push(c.clone()),
+            }
+        }
+        changes.retain(|c| c.before != c.after);
+        self.undo.truncate(from);
+        if !changes.is_empty() {
+            self.undo.push(Inverse { changes, description });
+        }
+        true
+    }
+
+    /// Undo the last entry, or with `undo` false redo the last one undone
+    /// (§10.10), and say which by its description. `None` when there is
+    /// none. Refused — a file it touched changed since — it stays where
+    /// it was. Either way the blocks in transit are let go: the entries
+    /// they were remembered with may go.
+    pub fn step(&mut self, vault: &mut Vault, undo: bool) -> Option<std::io::Result<String>> {
+        self.transit.clear();
+        let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+        let inv = from.pop()?;
+        let res = if undo { inv.undo(vault) } else { inv.redo(vault) };
+        Some(match res {
+            Ok(()) => {
+                let done = inv.description.clone();
+                to.push(inv);
+                Ok(done)
+            }
+            Err(e) => {
+                from.push(inv);
+                Err(e)
+            }
+        })
+    }
+}
+
+/// Whether the block whose file is `path` is embedded now; `None` where
+/// the file is gone.
+fn embedded(vault: &Vault, path: &str) -> Option<bool> {
+    let tree = &vault.tree;
+    let f = vault.file_index(path)?;
+    let (_, id) = tree.blocks.iter().find(|(r, _)| r.0 == f)?;
+    Some(tree.embed_of(id).is_some())
+}
+
 fn today() -> String {
     jiff::Zoned::now().date().to_string()
 }
