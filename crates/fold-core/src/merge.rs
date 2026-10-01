@@ -502,7 +502,7 @@ fn emit_subtree(t: &Tree, r: NRef, level: usize, indent: usize) -> String {
 
 // ------------------------------------------------------------ vault-level
 
-/// Process every `*.sync-conflict-*.md` in the vault (§12.2, §13 `notes merge`).
+/// Process every `*.sync-conflict-*.md` in the vault (§12.2, §13 `fold merge`).
 /// Returns a list of human-readable outcomes.
 pub fn merge_sync_conflicts(vault: &mut Vault, dry_run: bool) -> std::io::Result<Vec<String>> {
     merge_sync_conflicts_moving(vault, dry_run, &[])

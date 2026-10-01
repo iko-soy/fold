@@ -135,7 +135,7 @@ impl Vault {
             }))
     }
 
-    /// Files ignored by the parser, for `notes check` (§4.1).
+    /// Files ignored by the parser, for `fold check` (§4.1).
     pub fn ignored_files(&self) -> std::io::Result<Vec<IgnoredFile>> {
         let mut out = Vec::new();
         for e in std::fs::read_dir(&self.dir)?.filter_map(|e| e.ok()) {

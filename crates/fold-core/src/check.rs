@@ -1,4 +1,4 @@
-//! `notes check` diagnostics (§15.7) and `--fix` canonicalization (§4.2).
+//! `fold check` diagnostics (§15.7) and `--fix` canonicalization (§4.2).
 
 use crate::ident::{filename, slug, split_filename, Id};
 use crate::parse::{ends_with_blank_line, Content, Kind};

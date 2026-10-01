@@ -341,7 +341,7 @@ fn retitled_block_root_conflicts_and_keep_theirs_keeps_the_filename() {
 #[test]
 fn deep_headings_are_canonical() {
     // §3.1 / §4.2: no upper bound on heading level; levels beyond six are ours
-    // (§4.2 "What is ours"), not non-canonical syntax for `notes check` to report.
+    // (§4.2 "What is ours"), not non-canonical syntax for `fold check` to report.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("root.md"),

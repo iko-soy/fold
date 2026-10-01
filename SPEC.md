@@ -17,8 +17,8 @@ same tree.
 Principles, in priority order:
 
 1. **The files are the database.** Every fact the app knows is recoverable from the Markdown.
-   There are no caches, no configuration, and no per-device state beyond the trash. The
-   app never writes a byte it didn't need to change.
+   There are no caches, no configuration, and no per-device state beyond the trash and the
+   remembered view (§10.1). The app never writes a byte it didn't need to change.
 2. **Markdown-shaped, with our own syntax where it pays.** Headings, bullets, checkboxes,
    fences and YAML frontmatter are used as they are. On top of them the format owns a small,
    closed set of things a standard renderer will not understand: `![[id]]` embeds, headings
@@ -1034,7 +1034,7 @@ few keys fold has no use for, where one often reaches for them, say what to pres
 ### 10.5 Filter box
 
 `/`, or *Filter* in the top bar, opens a popup with an input and the hits below it:
-fuzzy title match (nucleo) and full-text match over every text child, each hit shown as its
+fuzzy title match (the typed letters in order) and full-text match over every text child, each hit shown as its
 title with its path dimmed, and `⚠` after the title of a hit in a conflict copy (§12.5).
 Clicking a hit — or `↑`/`↓` and `Enter` — unfolds its ancestors and selects it. `Esc` or a
 click outside closes. Creating nodes is `n` / `N` (§10.3).
@@ -1411,7 +1411,7 @@ All commands take `--vault PATH` (default: `$FOLD_VAULT`, else the nearest ances
 |---|---|
 | `fold [--keys normal\|vim\|helix]` | open the TUI; creates `root.md` if the directory is empty (§4.1.1); `--keys` picks the editor's keymap (§10.6) |
 | `fold capture [TEXT] [--to TARGET] [--task]` | append to the inbox (stdin if no TEXT) |
-| `fold check [--fix]` | diagnostics with source spans (§15.7); `--fix` rewrites the vault in canonical form (§4.2) and repairs filenames (§6.4) |
+| `fold check [--fix]` | diagnostics (§15.7); `--fix` rewrites the vault in canonical form (§4.2) and repairs filenames (§6.4) |
 | `fold merge [--dry-run]` | process sync-conflict files non-interactively; list leftovers |
 | `fold trash list \| restore ID` | trash management |
 
@@ -1430,17 +1430,19 @@ are property-triggered or manual only; `done:` records a date; conflict copies a
 blocks marked `conflict:`. Each was a knob nobody needs to agree on with a file. Two vaults that
 contain the same Markdown behave identically.
 
-There are no device settings either. The app reads no file outside the vault. What other
-tools keep in configuration is:
+There are no device settings either. The app reads no file outside the vault but the view it
+remembers (§10.1). What other tools keep in configuration is:
 
 - the vault: `--vault PATH`, else `$FOLD_VAULT`, else the nearest ancestor of `$PWD`
   containing `root.md`, else `~/fold`;
 - the trash location: `$XDG_STATE_HOME/fold/trash/` (§11.5);
 - the editor's keymap: `--keys`, else `$FOLD_KEYS` (`normal`, `vim`, `helix`), else
   `normal` (§10.6);
-- everything visual: fixed (§10.1) or a session toggle (`zd`, `zr`).
+- everything visual: fixed, or a toggle the view remembers per vault (`zp`, `zw`, `zd`,
+  §10.1), or one for the session (`zr`).
 
-The only thing the app keeps outside the vault is the trash.
+The only things the app keeps outside the vault are the trash and the remembered view,
+both on the device and never synced.
 
 ---
 
@@ -1450,12 +1452,15 @@ The only thing the app keeps outside the vault is the trash.
 
 ```
 crates/
-  fold-core/    parsing, tree, render/splice, index, store, merge — no TUI deps
-  fold-tui/     ratatui application
-  fold-cli/     clap binary; depends on both
+  fold-core/     parsing, tree, render/splice, index, store, merge, op log — no TUI deps
+  fold-tui/      ratatui application
+  fold-cli/      clap binary; depends on both
+  fold-ffi/      a session over fold-core for other languages, through UniFFI
+android/         the Android app, over fold-ffi
 ```
 
-`fold-core` is the stable API a future Android client or Helix extension would use.
+`fold-core` is the API every front end uses; `fold-ffi` wraps it in a session that holds
+what the TUI holds between keys, for the Android app or a Helix extension.
 
 ### 15.2 Core types (sketch)
 
@@ -1514,13 +1519,13 @@ recorded per node as "non-canonical", which `fold check` reports and touching re
 
 ### 15.4 Dependencies
 
-`ratatui`, `crossterm`, `tui-textarea` (built-in editor), `notify` (watcher),
+`ratatui`, `crossterm`, `notify` (watcher), `signal-hook` (§10.6),
 `tree-sitter` + `tree-sitter-highlight` and the grammar crates of §10.9 (code highlighting), `jiff`
-(today's date), `clap`, `indexmap`, `nucleo` (fuzzy
-filter), `similar` (sequence alignment and diff3 for merge), `blake3`, `tempfile`,
-`unicode-normalization`, `unicode-width`, `directories` (XDG),
+(today's date), `clap`, `indexmap`, `similar` (line diff, to find a block's span after an
+outside change, §5.2), `blake3`, `unicode-normalization`, `unicode-width`, `directories` (XDG),
 `getrandom` (64-bit ids; the `@p` syllable tables are a 512-entry constant in `fold-core`),
-`ariadne` (diagnostics), `proptest` + `insta` (tests).
+`uniffi` (`fold-ffi`), `tempfile`, `assert_cmd` + `predicates` (tests). The built-in editor
+(§10.6) and the filter's fuzzy match (§10.5) are fold's own.
 
 ### 15.5 Performance targets
 
@@ -1536,7 +1541,8 @@ filter), `similar` (sequence alignment and diff3 for merge), `blake3`, `tempfile
 
 ### 15.6 Testing
 
-Property-based, since the whole design rests on a few laws:
+The whole design rests on a few laws, and the tests check them on examples; property-based
+tests over generated trees are the natural next step:
 
 - `parse(render(t, 1, false))` equals `t` re-levelled, for all generated trees `t`.
 - `render(parse(s), 1, false) == s` for all canonical blocks `s`, frontmatter included.
@@ -1556,7 +1562,7 @@ of real-world Markdown (Obsidian, Logseq, FSNotes exports) that must parse witho
 
 ### 15.7 Diagnostics
 
-`fold check` reports, with `ariadne`-rendered source spans: non-canonical syntax, empty
+`fold check` reports, file by file: non-canonical syntax, empty
 titles, titles containing `/`, broken, duplicate or cyclic embeds, embeds with children in the
 parent file, embeds whose form (bare or heading) does not match their block's spelling,
 heading embeds whose level is not the level of their position, text directly after a child
@@ -1583,7 +1589,7 @@ gets wrong. What other tools see:
 
 ## 17. Non-goals for 1.0
 
-Encryption; CRDT / operation-log sync; a mobile client (the file format is its contract);
+Encryption; CRDT / operation-log sync;
 a query language, saved views and `--json` output (the ```` ```query ```` fence is reserved); attachment management beyond ignoring `assets/`; full Markdown
 rendering or WYSIWYG; plugins; task recurrence; spaced repetition; whiteboards; multiple
 vaults open at once; general transclusion; an external `$EDITOR` handoff; properties on non-blocks; export or lowering
