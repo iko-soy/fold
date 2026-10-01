@@ -1197,7 +1197,6 @@ impl State {
             format!("add a node {} {}", if child { "under" } else { "after" }, self.named(at))
         };
         let words = format!("added {}", quoted(title));
-        let title = title.to_string();
         self.verb(
             &desc,
             Box::new(move |s| {
@@ -1206,27 +1205,13 @@ impl State {
                     return Ok((words, Some(s.key(r))));
                 }
                 // a sibling, spelled like the node it follows (§10.3 `n`)
-                let line = match s.vault.tree.node(at).kind {
+                let kind = s.vault.tree.node(at).kind;
+                let line = match kind {
                     Kind::Section => format!("# {}\n", shown),
                     _ => format!("- {}\n", shown),
                 };
-                let k = s.vault.key_of(at);
-                let moved = ops::paste(&mut s.vault, at, &line, true).map_err(|e| format!("error: {}", e))?;
-                // the new sibling: the node after the one it follows among
-                // its siblings, past any conflict copy of it (§12.5)
-                let at = s.vault.find_by_key(&k).unwrap_or(at);
-                let parent = s.outline_parent(at).unwrap_or(s.vault.tree.root);
-                let tree = &s.vault.tree;
-                let kids = tree.resolved_children(parent);
-                let new = kids
-                    .iter()
-                    .skip_while(|&&c| c != at)
-                    .skip(1)
-                    .find(|&&c| tree.node(c).conflict().is_none() && tree.node(c).title == title)
-                    .copied()
-                    .or_else(|| kids.iter().rev().find(|&&c| tree.node(c).title == title).copied());
-                let kind = tree.node(at).kind;
-                Ok((with_rule_note(&words, moved, kind), new.map(|r| s.key(r))))
+                let p = ops::paste(&mut s.vault, at, &line, true).map_err(|e| format!("error: {}", e))?;
+                Ok((with_rule_note(&words, p.clamped, kind), Some(s.key(p.node))))
             }),
         )
     }
@@ -1272,8 +1257,8 @@ impl State {
         self.verb(
             &format!("paste {}", name),
             Box::new(move |s| {
-                let moved = ops::paste(&mut s.vault, r, &text, after).map_err(|e| format!("error: {}", e))?;
-                Ok((with_rule_note(&format!("pasted {}", name), moved, kind), None))
+                let p = ops::paste(&mut s.vault, r, &text, after).map_err(|e| format!("error: {}", e))?;
+                Ok((with_rule_note(&format!("pasted {}", name), p.clamped, kind), None))
             }),
         )
     }
@@ -1296,7 +1281,7 @@ impl State {
         let Some(sub) = self.find(key) else { return Self::gone() };
         let tree = &self.vault.tree;
         let r = tree.resolved_child(sub);
-        let (k, kind) = (self.vault.key_of(r), tree.node(r).kind);
+        let kind = tree.node(r).kind;
         // it goes under the node before it (§10.3), with its conflict
         // pair, which moves as one (§12.5)
         let sibs = tree.resolved_children(self.outline_parent(r).unwrap_or(tree.root));
@@ -1308,14 +1293,12 @@ impl State {
         if tree.node(prev).conflict().is_some() {
             return Self::refused(format!("can't indent {} into a conflict copy", self.named(r)));
         }
-        let prev = self.vault.key_of(prev);
         let name = self.named(r);
         self.verb(
             &format!("indent {}", name),
             Box::new(move |s| {
-                let moved = ops::demote(&mut s.vault, sub).map_err(|e| format!("can't indent {}: {}", name, e))?;
-                let node = s.moved_node(&k, kind, &prev, None).map(|r| s.key(r));
-                Ok((with_rule_note(&format!("indented {}", name), moved, kind), node))
+                let p = ops::demote(&mut s.vault, sub).map_err(|e| format!("can't indent {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("indented {}", name), p.clamped, kind), Some(s.key(p.node))))
             }),
         )
     }
@@ -1324,25 +1307,17 @@ impl State {
         let Some(sub) = self.find(key) else { return Self::gone() };
         let tree = &self.vault.tree;
         let r = tree.resolved_child(sub);
-        let (k, kind) = (self.vault.key_of(r), tree.node(r).kind);
+        let kind = tree.node(r).kind;
         // it goes beside its parent, right after it (§10.3)
-        let parent = self.outline_parent(r);
-        let grand = parent.map(|p| self.outline_parent(p).unwrap_or(tree.root));
-        let rank = parent.zip(grand).and_then(|(p, g)| {
-            let kids = tree.resolved_children(g);
-            let at = kids.iter().position(|&c| c == p)?;
-            Some(self.namesakes_before(r, g, self.past_copies(&kids, at + 1, r)))
-        });
-        let Some(grand) = grand.map(|g| self.vault.key_of(g)) else {
+        if self.outline_parent(r).is_none() {
             return Self::refused(format!("can't outdent {}: it's at the top level", self.named(r)));
-        };
+        }
         let name = self.named(r);
         self.verb(
             &format!("outdent {}", name),
             Box::new(move |s| {
-                let moved = ops::promote(&mut s.vault, sub).map_err(|e| format!("can't outdent {}: {}", name, e))?;
-                let node = s.moved_node(&k, kind, &grand, rank).map(|r| s.key(r));
-                Ok((with_rule_note(&format!("outdented {}", name), moved, kind), node))
+                let p = ops::promote(&mut s.vault, sub).map_err(|e| format!("can't outdent {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("outdented {}", name), p.clamped, kind), Some(s.key(p.node))))
             }),
         )
     }
@@ -1351,60 +1326,16 @@ impl State {
         let Some(r) = self.find(key) else { return Self::gone() };
         let Some(dest) = self.find(dest) else { return Self::refused("that destination is gone") };
         let tree = &self.vault.tree;
-        let (rr, dest_key) = (tree.resolved_child(r), self.vault.key_of(tree.resolved_child(dest)));
-        let (k, kind) = (self.vault.key_of(rr), tree.node(rr).kind);
+        let rr = tree.resolved_child(r);
+        let kind = tree.node(rr).kind;
         let (name, to) = (self.named(rr), self.named(dest));
         self.verb(
             &format!("move {} to {}", name, to),
             Box::new(move |s| {
-                let moved = ops::refile(&mut s.vault, r, dest).map_err(|e| format!("can't move {}: {}", name, e))?;
-                let node = s.moved_node(&k, kind, &dest_key, None).map(|r| s.key(r));
-                Ok((with_rule_note(&format!("moved {} to {}", name, to), moved, kind), node))
+                let p = ops::refile(&mut s.vault, r, dest).map_err(|e| format!("can't move {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("moved {} to {}", name, to), p.clamped, kind), Some(s.key(p.node))))
             }),
         )
-    }
-
-    /// Where a node a verb moved under `dest` landed (`fold-tui`'s
-    /// `moved_node`): a block by its id; else, among `dest`'s children with
-    /// its title and kind, but no conflict copy, the one the ordering rule
-    /// put it at.
-    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, rank: Option<usize>) -> Option<NRef> {
-        let title = match key {
-            NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
-            NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
-            NodeKey::Root => None,
-        }?;
-        let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
-        let mut hits = kids.iter().filter(|&&c| {
-            let n = self.vault.tree.node(c);
-            n.title == title && n.kind == kind && n.conflict().is_none()
-        });
-        match rank {
-            Some(i) => hits.nth(i).copied(),
-            None => hits.next_back().copied(),
-        }
-    }
-
-    fn namesakes_before(&self, r: NRef, dest: NRef, at: usize) -> usize {
-        let n = self.vault.tree.node(r);
-        let kids = self.vault.tree.resolved_children(dest);
-        kids.iter()
-            .take(at)
-            .filter(|&&c| {
-                let m = self.vault.tree.node(c);
-                c != r && m.title == n.title && m.kind == n.kind && m.conflict().is_none()
-            })
-            .count()
-    }
-
-    fn past_copies(&self, kids: &[NRef], at: usize, r: NRef) -> usize {
-        let mut at = at;
-        if at.checked_sub(1).map(|i| kids[i]) != Some(r) {
-            while kids.get(at).is_some_and(|&c| self.vault.tree.node(c).conflict().is_some()) {
-                at += 1;
-            }
-        }
-        at
     }
 
     fn archive(&mut self, key: &str) -> OpResult {
@@ -1414,8 +1345,8 @@ impl State {
         self.verb(
             &format!("archive {}", name),
             Box::new(move |s| {
-                let moved = ops::archive(&mut s.vault, r).map_err(|e| format!("can't archive {}: {}", name, e))?;
-                Ok((with_rule_note(&format!("archived {}", name), moved, kind), None))
+                let p = ops::archive(&mut s.vault, r).map_err(|e| format!("can't archive {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("archived {}", name), p.clamped, kind), None))
             }),
         )
     }

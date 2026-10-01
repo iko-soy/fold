@@ -314,35 +314,16 @@ impl App {
             return;
         };
         let (rr, rt) = (self.vault.tree.resolved_child(r), self.vault.tree.resolved_child(target));
-        let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
+        let kind = self.vault.tree.node(rr).kind;
         let name = self.named(rr);
-        // it goes into the target, last, or just before it, under the
-        // target's parent
-        let (dest, rank) = match how {
-            Drop::Into => (rt, None),
-            Drop::Before => {
-                let p = self.outline_parent(rt).unwrap_or(self.vault.tree.root);
-                let kids = self.vault.tree.resolved_children(p);
-                let at = kids.iter().position(|&c| c == rt).map(|at| self.past_copies(&kids, at, rr));
-                (p, at.map(|at| self.namesakes_before(rr, p, at)))
-            }
-        };
-        let dest = self.vault.key_of(dest);
         let on = self.on_node(r);
         self.push_undo(&format!("move {} {} {}", name, if how == Drop::Into { "into" } else { "before" }, self.named(rt)));
         match ops::move_node(&mut self.vault, r, target, how) {
-            Ok(moved) => {
-                self.say(super::with_rule_note(&format!("moved {}", name), moved, kind));
-                // find it where it landed, by its kind and place too: a
-                // namesake of it may be there already
-                match self.moved_node(&key, kind, &dest, rank) {
-                    Some(n) => {
-                        // the editor open on it follows it (§10.6)
-                        self.follow(on, n);
-                        self.reveal(n);
-                    }
-                    None => self.clamp_cursor(),
-                }
+            Ok(p) => {
+                self.say(super::with_rule_note(&format!("moved {}", name), p.clamped, kind));
+                // the editor open on it follows it (§10.6)
+                self.follow(on, p.node);
+                self.reveal(p.node);
             }
             Err(e) => self.say(format!("can't move: {}", e)),
         }

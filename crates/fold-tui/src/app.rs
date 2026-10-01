@@ -1160,7 +1160,7 @@ impl App {
         let (name, kind) = self.copied.clone();
         self.push_undo(&format!("paste {}", name));
         match ops::paste(&mut self.vault, r, &text, after) {
-            Ok(moved) => self.refresh_after(&with_rule_note(&format!("pasted {}", name), moved, kind)),
+            Ok(p) => self.refresh_after(&with_rule_note(&format!("pasted {}", name), p.clamped, kind)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -1208,7 +1208,7 @@ impl App {
         let Some(s) = self.subject() else { return };
         let r = self.vault.tree.resolved_child(s);
         self.push_undo(&format!("indent {}", self.named(r)));
-        let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
+        let kind = self.vault.tree.node(r).kind;
         // it goes under the node before it (§10.3), with its conflict
         // pair, which moves as one (§12.5)
         let sibs = self.vault.tree.resolved_children(self.outline_parent(r).unwrap_or(self.vault.tree.root));
@@ -1224,18 +1224,15 @@ impl App {
             self.say(format!("can't indent {} into a conflict copy", self.named(r)));
             return;
         }
-        let prev = self.vault.key_of(prev);
         let name = self.named(r);
         let on = self.on_node(r);
         match ops::demote(&mut self.vault, s) {
-            Ok(moved) => {
+            Ok(p) => {
                 // the cursor (a zoom, the editor) stays on the node where it
                 // landed
-                if let Some(nr) = self.moved_node(&key, kind, &prev, None) {
-                    self.follow(on, nr);
-                    self.move_cursor_to(nr);
-                }
-                self.say(with_rule_note(&format!("indented {}", name), moved, kind));
+                self.follow(on, p.node);
+                self.move_cursor_to(p.node);
+                self.say(with_rule_note(&format!("indented {}", name), p.clamped, kind));
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
@@ -1245,31 +1242,22 @@ impl App {
         let Some(s) = self.subject() else { return };
         let r = self.vault.tree.resolved_child(s);
         self.push_undo(&format!("outdent {}", self.named(r)));
-        let (key, kind) = (self.vault.key_of(r), self.vault.tree.node(r).kind);
+        let kind = self.vault.tree.node(r).kind;
         // it goes beside its parent, right after it, under the parent's
         // parent (§10.3)
-        let parent = self.outline_parent(r);
-        let grand = parent.map(|p| self.outline_parent(p).unwrap_or(self.vault.tree.root));
-        let rank = parent.zip(grand).and_then(|(p, g)| {
-            let kids = self.vault.tree.resolved_children(g);
-            let at = kids.iter().position(|&c| c == p)?;
-            Some(self.namesakes_before(r, g, self.past_copies(&kids, at + 1, r)))
-        });
-        let Some(grand) = grand.map(|g| self.vault.key_of(g)) else {
+        if self.outline_parent(r).is_none() {
             self.say(format!("can't outdent {}: it's at the top level", self.named(r)));
             return;
-        };
+        }
         let name = self.named(r);
         let on = self.on_node(r);
         match ops::promote(&mut self.vault, s) {
-            Ok(moved) => {
+            Ok(p) => {
                 // the cursor (a zoom, the editor) stays on the node where it
                 // landed
-                if let Some(nr) = self.moved_node(&key, kind, &grand, rank) {
-                    self.follow(on, nr);
-                    self.move_cursor_to(nr);
-                }
-                self.say(with_rule_note(&format!("outdented {}", name), moved, kind));
+                self.follow(on, p.node);
+                self.move_cursor_to(p.node);
+                self.say(with_rule_note(&format!("outdented {}", name), p.clamped, kind));
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
@@ -1280,7 +1268,7 @@ impl App {
         let (name, kind) = (self.named(r), self.vault.tree.node(self.vault.tree.resolved_child(r)).kind);
         self.push_undo(&format!("archive {}", name));
         match ops::archive(&mut self.vault, r) {
-            Ok(moved) => self.refresh_after(&with_rule_note(&format!("archived {}", name), moved, kind)),
+            Ok(p) => self.refresh_after(&with_rule_note(&format!("archived {}", name), p.clamped, kind)),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }
@@ -1300,77 +1288,19 @@ impl App {
 
     /// *Move to…* (§6.5): the prompt's moving node goes under `dest`.
     fn refile_to(&mut self, r: NRef, dest: NRef) {
-        let (rr, dest_key) = (self.vault.tree.resolved_child(r), self.vault.key_of(self.vault.tree.resolved_child(dest)));
-        let (key, kind) = (self.vault.key_of(rr), self.vault.tree.node(rr).kind);
+        let rr = self.vault.tree.resolved_child(r);
+        let kind = self.vault.tree.node(rr).kind;
         let words = format!("moved {} to {}", self.named(rr), self.named(dest));
         self.push_undo(&format!("move {} to {}", self.named(rr), self.named(dest)));
         let on = self.on_node(rr);
         match ops::refile(&mut self.vault, r, dest) {
-            Ok(moved) => {
-                self.refresh_after(&with_rule_note(&words, moved, kind));
-                if let Some(nr) = self.moved_node(&key, kind, &dest_key, None) {
-                    self.follow(on, nr);
-                    self.reveal(nr);
-                }
+            Ok(p) => {
+                self.refresh_after(&with_rule_note(&words, p.clamped, kind));
+                self.follow(on, p.node);
+                self.reveal(p.node);
             }
             Err(e) => self.say(format!("error: {}", e)),
         }
-    }
-
-    /// Where a node a verb moved under `dest` (a key taken before the move:
-    /// the move renumbers the nodes of the files it writes) landed: a block
-    /// by its id; else, among `dest`'s children with the node's title and
-    /// kind, but no conflict copy (one that moved with it has its title,
-    /// §12.5), the one the ordering rule (§3.1) put it at. Moved in as the
-    /// last child, that is the last of them (an item goes after the items,
-    /// a section after the sections); put at a place among them, the one
-    /// after the `rank` namesakes that `namesakes_before` counted there.
-    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, rank: Option<usize>) -> Option<NRef> {
-        let title = match key {
-            NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
-            NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
-            NodeKey::Root => None,
-        }?;
-        let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
-        let mut hits = kids.iter().filter(|&&c| {
-            let n = self.vault.tree.node(c);
-            n.title == title && n.kind == kind && n.conflict().is_none()
-        });
-        match rank {
-            Some(i) => hits.nth(i).copied(),
-            None => hits.next_back().copied(),
-        }
-    }
-
-    /// Before a verb puts `r` among `dest`'s children, just before the
-    /// `at`-th: how many of them, other than `r` and conflict copies,
-    /// share its title and kind and come before that place, for
-    /// `moved_node`. Clamped by the ordering rule (§3.1), an item goes no
-    /// later than the first section and a section no earlier than after
-    /// the last item, so it still comes right after these namesakes.
-    fn namesakes_before(&self, r: NRef, dest: NRef, at: usize) -> usize {
-        let n = self.vault.tree.node(r);
-        let kids = self.vault.tree.resolved_children(dest);
-        kids.iter()
-            .take(at)
-            .filter(|&&c| {
-                let m = self.vault.tree.node(c);
-                c != r && m.title == n.title && m.kind == n.kind && m.conflict().is_none()
-            })
-            .count()
-    }
-
-    /// Where a node that a verb puts just before the `at`-th of `kids`
-    /// lands: past the conflict copies there, which pair with the node
-    /// before them (§12.5), unless it is `r`, that node, back in its place.
-    fn past_copies(&self, kids: &[NRef], at: usize, r: NRef) -> usize {
-        let mut at = at;
-        if at.checked_sub(1).map(|i| kids[i]) != Some(r) {
-            while kids.get(at).is_some_and(|&c| self.vault.tree.node(c).conflict().is_some()) {
-                at += 1;
-            }
-        }
-        at
     }
 
     /// The node an action applies to: a menu's target, else the cursor's.
@@ -1381,52 +1311,26 @@ impl App {
     fn act_new_node(&mut self, child: bool) {
         let Some(r) = self.subject() else { return };
         self.push_undo(&format!("add a node {} {}", if child { "under" } else { "after" }, self.named(r)));
-        let res = if child {
-            match ops::append_child_public(&mut self.vault, r, "") {
-                Ok(nr) => {
-                    self.edit_new_node(nr);
-                    return;
-                }
-                Err(e) => Err(e),
-            }
+        let made = if child {
+            ops::append_child_public(&mut self.vault, r, "")
         } else {
-            let n = self.vault.tree.node(r);
-            let line = match n.kind {
+            let line = match self.vault.tree.node(r).kind {
                 Kind::Section => format!("{} ", "#".repeat(self.vault.tree.level(r))),
                 _ => "- ".to_string(),
             };
             let key = self.vault.key_of(r);
-            match ops::paste(&mut self.vault, r, &format!("{}\n", line), true) {
-                Ok(_) => {
-                    // the new sibling: the node after the cursor node among
-                    // its siblings in the outline, past any conflict copy
-                    // of it (§12.5), with an empty title
-                    let r = self.vault.find_by_key(&key).unwrap_or(r);
-                    let parent = self.outline_parent(r).unwrap_or(self.vault.tree.root);
-                    let kids = self.vault.tree.resolved_children(parent);
-                    let new = kids
-                        .iter()
-                        .skip_while(|&&c| c != r)
-                        .skip(1)
-                        .find(|&&c| self.vault.tree.node(c).conflict().is_none())
-                        .copied()
-                        .filter(|&c| self.vault.tree.node(c).title.is_empty());
-                    if let Some(nr) = new {
-                        // a sibling of the zoomed node is outside the zoom:
-                        // widen it to their parent
-                        if self.zoom() == Some(r) {
-                            self.set_zoom(self.outline_parent(r));
-                        }
-                        self.edit_new_node(nr);
-                        return;
-                    }
-                    Ok(())
+            ops::paste(&mut self.vault, r, &format!("{}\n", line), true).map(|p| {
+                // a sibling of the zoomed node is outside the zoom: widen
+                // it to their parent
+                let r = self.vault.find_by_key(&key).unwrap_or(r);
+                if self.zoom() == Some(r) {
+                    self.set_zoom(self.outline_parent(r));
                 }
-                Err(e) => Err(e),
-            }
+                p.node
+            })
         };
-        match res {
-            Ok(()) => self.refresh_after("node created"),
+        match made {
+            Ok(nr) => self.edit_new_node(nr),
             Err(e) => self.say(format!("error: {}", e)),
         }
     }

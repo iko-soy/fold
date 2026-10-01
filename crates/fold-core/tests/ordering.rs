@@ -219,7 +219,7 @@ fn paste_item_after_a_section_is_clamped() {
     let (_d, mut v) = vault_with("# P\n\n- a\n\n## S\n");
     let r = at(&v, "P/S");
     // clamped, and reported as such
-    assert!(ops::paste(&mut v, r, "- new\n", true).unwrap());
+    assert!(ops::paste(&mut v, r, "- new\n", true).unwrap().clamped);
     assert!(v.find_by_path(&["P".into(), "new".into()]).is_some(), "{}", root_text(&v));
     assert!(v.find_by_path(&["P".into(), "S".into(), "new".into()]).is_none());
     assert_ordered(&v);
@@ -505,7 +505,7 @@ fn check_reports_and_fixes_heading_embed_levels() {
 fn placement_as_asked_is_not_reported_as_moved() {
     let (_d, mut v) = vault_with("# P\n\n- a\n- b\n");
     let r = at(&v, "P/a");
-    assert!(!ops::paste(&mut v, r, "- new\n", true).unwrap());
+    assert!(!ops::paste(&mut v, r, "- new\n", true).unwrap().clamped);
     let kids: Vec<String> = v
         .tree
         .resolved_children(at(&v, "P"))
@@ -544,7 +544,7 @@ fn drop_refuses_own_subtree() {
 fn drop_section_before_an_item_is_clamped() {
     let (_d, mut v) = vault_with("# P\n\n- a\n- b\n\n# S\n");
     let (r, t) = (at(&v, "S"), at(&v, "P/a"));
-    assert!(ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap());
+    assert!(ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap().clamped);
     assert_ordered(&v);
     assert!(v.find_by_path(&["P".into(), "S".into()]).is_some(), "{}", root_text(&v));
 }
@@ -554,7 +554,7 @@ fn drop_before_a_later_sibling_lands_before_it() {
     let src = "# A\n\n- a\n- b\n- c\n";
     let (_d, mut v) = vault_with(src);
     let (r, t) = (at(&v, "A/a"), at(&v, "A/c"));
-    assert!(!ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap());
+    assert!(!ops::move_node(&mut v, r, t, ops::Drop::Before).unwrap().clamped);
     assert_eq!(root_text(&v), "# A\n\n- b\n- a\n- c\n");
     // dropping a node before its immediate next sibling leaves it in place,
     // in a tight list or a loose one (§4.2: preserved as found)
@@ -855,4 +855,80 @@ fn drop_second_of_two_loose_items_before_the_first_keeps_the_list_loose() {
     let (b, a) = (at(&v, "A/b"), at(&v, "A/a"));
     ops::move_node(&mut v, b, a, ops::Drop::Before).unwrap();
     assert_eq!(root_text(&v), "# A\n\n- b\n- a\n");
+}
+
+// ---------------------------------------------------------------- placed
+
+/// The node a verb moved, where it landed, found by where it was written
+/// (§3.4), never again by its title: beside a namesake it is still itself.
+#[test]
+fn a_moved_node_is_found_where_it_landed_beside_a_namesake() {
+    let (_d, mut v) = vault_with("# A\n\n- x\n  moved\n\n# B\n\n- x\n  stays\n");
+    let (x, b) = (at(&v, "A/x"), at(&v, "B"));
+    let p = ops::refile(&mut v, x, b).unwrap();
+    assert!(!p.clamped);
+    assert_eq!(v.tree.node(p.node).title, "x");
+    assert_eq!(v.tree.node(p.node).text_lines(v.tree.text_of(p.node)), ["  moved"]);
+    let b = at(&v, "B");
+    assert_eq!(v.tree.resolved_children(b).last(), Some(&p.node));
+}
+
+#[test]
+fn a_pasted_node_is_found_where_it_landed() {
+    let (_d, mut v) = vault_with("# A\n\n- x\n- y\n\n## S\n");
+    let x = at(&v, "A/x");
+    let p = ops::paste(&mut v, x, "- x\n", true).unwrap();
+    assert!(!p.clamped);
+    assert_eq!(v.tree.resolved_children(at(&v, "A"))[1], p.node);
+    // after a section it goes before the sections, and says so (§3.1)
+    let s = at(&v, "A/S");
+    let p = ops::paste(&mut v, s, "- z\n", true).unwrap();
+    assert!(p.clamped);
+    assert_eq!(v.tree.node(p.node).title, "z");
+    assert_eq!(v.tree.resolved_children(at(&v, "A"))[3], p.node);
+}
+
+/// A block moves by its embed, and the node is the block, as the outline
+/// shows it; out of a block's file, it lands in the parent file.
+#[test]
+fn a_moved_block_is_the_block_and_promoting_leaves_its_file() {
+    let (d, mut v) = vault_with("# A\n\n![[racfer-hattes-mislup-nodrys]]\n\n# B\n");
+    std::fs::write(
+        d.path().join("racfer~blk.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\n---\n\n- blk\n  - inner\n",
+    )
+    .unwrap();
+    v.reload().unwrap();
+    let (blk, b) = (at(&v, "A/blk"), at(&v, "B"));
+    let p = ops::refile(&mut v, blk, b).unwrap();
+    assert!(v.tree.node(p.node).is_block());
+    assert_eq!(v.tree.node(p.node).title, "blk");
+    let inner = at(&v, "B/blk/inner");
+    let p = ops::promote(&mut v, inner).unwrap();
+    assert_eq!(p.node.0, 0, "in root.md");
+    assert_eq!(v.tree.node(p.node).title, "inner");
+    assert_eq!(v.tree.resolved_children(at(&v, "B")), [at(&v, "B/blk"), p.node]);
+}
+
+/// A node and its conflict copy move as one (§12.5): the node a verb
+/// reports is the one it was asked to move, the node or its copy.
+#[test]
+fn a_node_and_its_copy_are_each_found_where_they_landed() {
+    let (d, mut v) = vault_with("# A\n\n- x\n![[racfer-hattes-mislup-nodrys]]\n\n# B\n");
+    std::fs::write(
+        d.path().join("racfer~x.md"),
+        "---\nid: racfer-hattes-mislup-nodrys\nconflict: \"PHONE 20260927-100000\"\n---\n\n- x\n",
+    )
+    .unwrap();
+    v.reload().unwrap();
+    let x = v.tree.resolved_children(at(&v, "A"))[0];
+    let b = at(&v, "B");
+    let p = ops::refile(&mut v, x, b).unwrap();
+    assert!(v.tree.node(p.node).conflict().is_none(), "the node, not its copy");
+    let copy = v.tree.resolved_children(at(&v, "B"))[1];
+    assert!(v.tree.node(copy).conflict().is_some());
+    let a = at(&v, "A");
+    let p = ops::refile(&mut v, copy, a).unwrap();
+    assert!(v.tree.node(p.node).conflict().is_some(), "the copy, not its node");
+    assert_eq!(v.tree.resolved_children(at(&v, "A")).len(), 2);
 }

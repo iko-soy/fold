@@ -160,7 +160,7 @@ fn a_node_placed_between_a_node_and_its_conflict_copy_goes_after_the_copy() {
     // pasted after ours, or before the copy
     let (_d, mut v) = pair_among_siblings();
     let task = node(&v, &["A", "task"]);
-    assert!(!ops::paste(&mut v, task, "- new\n", true).unwrap());
+    assert!(!ops::paste(&mut v, task, "- new\n", true).unwrap().clamped);
     assert_eq!(order(&v), after_copy);
     let (_d, mut v) = pair_among_siblings();
     let c = copy(&v);
