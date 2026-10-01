@@ -3135,7 +3135,8 @@ impl App {
             Action::GoTo => self.open_prompt("go to", PromptAction::GoTo, String::new()),
             Action::ClearDone => self.act_clear_done(),
             Action::Canonicalize => {
-                self.anchor_zoom();
+                // one op-log entry, as in the app (§10.10)
+                self.push_undo("canonicalize");
                 match fold_core::check::fix(&mut self.vault) {
                     Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
                     Err(e) => self.say(format!("error: {}", e)),

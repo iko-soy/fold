@@ -614,3 +614,15 @@ fn one_undo_after_leaving_with_a_cut_block_title_leaves_no_block_file_embedded_n
     assert_eq!(r, format!("# A\n\n- one\n{}\n- two\n", embed));
     assert!(block.exists());
 }
+
+/// *Canonicalize* is one op-log entry, as every verb is (§10.10): `u`
+/// puts the files back as they were.
+#[test]
+fn canonicalize_is_undone_by_u() {
+    let (d, mut app) = app_with("# A\n\n* x\n");
+    app.run_action(fold_tui::app::Action::Canonicalize);
+    let read = || std::fs::read_to_string(d.path().join("root.md")).unwrap();
+    assert_eq!(read(), "# A\n\n- x\n");
+    press(&mut app, "u");
+    assert_eq!(read(), "# A\n\n* x\n");
+}
