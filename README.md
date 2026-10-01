@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" height="128" alt="fold"></p>
+
 # fold
 
 One outline of notes and tasks, stored as plain Markdown, in the terminal.

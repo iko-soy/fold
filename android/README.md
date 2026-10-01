@@ -1,3 +1,5 @@
+<p align="center"><img src="../docs/icon.png" width="96" height="96" alt="fold"></p>
+
 # fold for Android
 
 The same outline on your phone: fold for Android opens the vault the desktop app

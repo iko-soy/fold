@@ -15,6 +15,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
+import com.github.takahirom.roborazzi.captureRoboImage
 import com.github.takahirom.roborazzi.captureScreenRoboImage
 import java.io.File
 import org.junit.Assert.assertTrue
@@ -231,6 +232,21 @@ class UiTest {
         compose.onNodeWithContentDescription("Done").performClick()
         await { vm.editor == null }
         assertTrue(root.readText(), root.readText().contains("Today: - [ ] Call the plumber\n"))
+    }
+
+    @Test
+    fun launcherIcon() {
+        // the adaptive icon as a launcher draws it, through a round mask
+        val icon = app.getDrawable(R.mipmap.ic_launcher) as android.graphics.drawable.AdaptiveIconDrawable
+        val size = 432
+        val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        val round = android.graphics.Path().apply { addCircle(size / 2f, size / 2f, size / 2f, android.graphics.Path.Direction.CW) }
+        canvas.clipPath(round)
+        icon.setBounds(0, 0, size, size)
+        icon.draw(canvas)
+        assertTrue(icon.monochrome != null)
+        bitmap.captureRoboImage("build/outputs/roborazzi/13-launcher-icon.png")
     }
 
     @Test
