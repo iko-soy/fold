@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- ▾ the fold marker -->
+    <path
+        android:fillColor="@color/icon_accent"
+        android:pathData="M33,37 L45,37 L39,45 Z" />
+    <!-- the rows of an outline, nested -->
+    <path
+        android:fillColor="@color/icon_foreground"
+        android:pathData="M50,37 L77,37 A3,3 0 0 1 77,43 L50,43 A3,3 0 0 1 50,37 Z" />
+    <path
+        android:fillColor="@color/icon_foreground"
+        android:pathData="M45,51 L72,51 A3,3 0 0 1 72,57 L45,57 A3,3 0 0 1 45,51 Z" />
+    <path
+        android:fillColor="@color/icon_foreground"
+        android:pathData="M45,65 L66,65 A3,3 0 0 1 66,71 L45,71 A3,3 0 0 1 45,65 Z" />
+    <path
+        android:fillColor="@color/icon_accent"
+        android:pathData="M36,51 L39,51 L39,71 L36,71 Z" />
+</vector>
