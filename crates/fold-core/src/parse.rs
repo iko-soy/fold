@@ -73,8 +73,6 @@ pub struct Node {
     /// The node children alone, in order (derived from `content`).
     pub children: Vec<usize>,
     pub parent: Option<usize>,
-    /// Which file's text this node's spans index into.
-    pub file: usize,
     /// `Some` if this node is the root of its own file.
     pub block: Option<Block>,
     /// `Some(id)` if this node is an embed reference in a parent file.
@@ -435,10 +433,10 @@ struct Frame {
     is_embed: bool,
 }
 
-/// Parse one file's text into nodes. `file_idx` tags every node's `file`.
-/// `block` (with `id: Some`) marks a block file; `id: None` is `root.md`;
-/// `None` means "plain text, no block attachment" (used by tests).
-pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>) -> ParsedFile {
+/// Parse one file's text into nodes. `block` (with `id: Some`) marks a
+/// block file; `id: None` is `root.md`; `None` means "plain text, no block
+/// attachment" (used by tests).
+pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
     let lines = split_lines(text);
     let n = lines.len();
     let mut nodes: Vec<Node> = Vec::new();
@@ -457,7 +455,6 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         },
         children: Vec::new(),
         parent: None,
-        file: file_idx,
         block: None,
         embed: None,
         indent: 0,
@@ -626,7 +623,6 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     },
                     children: Vec::new(),
                     parent: Some(parent),
-                    file: file_idx,
                     block: None,
                     embed: match &info.kind {
                         TitleKind::Embed(id, _) => Some(id.clone()),
@@ -933,7 +929,6 @@ fn make_setext_section(
         },
         children: Vec::new(),
         parent: Some(parent),
-        file: nodes[parent].file,
         block: None,
         embed: None,
         indent: title_indent,

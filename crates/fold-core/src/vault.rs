@@ -56,7 +56,7 @@ impl Vault {
                 frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
                 frontmatter_span: fm.as_ref().map(|f| f.span),
             };
-            files.push(parse_file(&name, &text, idx, Some(block)));
+            files.push(parse_file(&name, &text, Some(block)));
         }
 
         // Stitch: collect blocks, resolve embed edges (§4.7).
@@ -230,7 +230,7 @@ impl Vault {
                 b
             })
         };
-        self.tree.files[file] = parse_file(&path, text, file, block);
+        self.tree.files[file] = parse_file(&path, text, block);
         self.tree.restitch();
         Ok(())
     }
@@ -269,12 +269,6 @@ impl Vault {
         let target = trash_target(&trash, &path);
         move_file(&self.dir.join(&path), &target)?;
         self.tree.files.remove(file);
-        // the files after it move down one place
-        for (fi, f) in self.tree.files.iter_mut().enumerate().skip(file) {
-            for n in &mut f.nodes {
-                n.file = fi;
-            }
-        }
         self.tree.restitch();
         Ok(())
     }

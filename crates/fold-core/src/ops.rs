@@ -782,7 +782,7 @@ pub fn shift_document(text: &str, parent_level: usize, indent: usize) -> String 
         frontmatter_raw: String::new(),
         frontmatter_span: None,
     };
-    let pf = crate::parse::parse_file("clip.md", text, 0, Some(block));
+    let pf = crate::parse::parse_file("clip.md", text, Some(block));
     let tree = crate::tree::Tree::new(vec![pf]);
     let mut out = String::new();
     let kids = tree.resolved_children(tree.root);
@@ -1039,7 +1039,7 @@ fn child_indent(tree: &crate::tree::Tree, parent: NRef) -> usize {
 /// Spellings of a document's top-level nodes, in order. A heading embed is
 /// a section, a bare embed an item (§4.7).
 fn top_kinds(doc: &str) -> Vec<Kind> {
-    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    let pf = crate::parse::parse_file("clip.md", doc, None);
     pf.nodes[pf.root_node]
         .children
         .iter()
@@ -1049,7 +1049,7 @@ fn top_kinds(doc: &str) -> Vec<Kind> {
 
 /// The indent a document's first top-level node is written at.
 fn top_indent(doc: &str) -> Option<usize> {
-    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    let pf = crate::parse::parse_file("clip.md", doc, None);
     pf.nodes[pf.root_node].children.first().map(|&c| pf.nodes[c].indent)
 }
 
@@ -1085,7 +1085,7 @@ fn level_among(tree: &crate::tree::Tree, prev: Option<NRef>, next: Option<NRef>,
     if most.is_none() && least.is_none() {
         return doc.to_string();
     }
-    let pf = crate::parse::parse_file("clip.md", doc, 0, None);
+    let pf = crate::parse::parse_file("clip.md", doc, None);
     let tops = &pf.nodes[pf.root_node].children;
     // a document's sections come after its items (§3.1)
     let Some(first) = tops.iter().map(|&c| &pf.nodes[c]).find(|n| n.kind == Kind::Section) else {

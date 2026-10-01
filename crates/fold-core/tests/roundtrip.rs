@@ -11,7 +11,7 @@ fn tree_of(text: &str) -> Tree {
         frontmatter_raw: String::new(),
         frontmatter_span: None,
     };
-    let pf = parse_file("root.md", text, 0, Some(block));
+    let pf = parse_file("root.md", text, Some(block));
     assert!(pf.diagnostics.is_empty(), "diags: {:?}", pf.diagnostics);
     Tree::new(vec![pf])
 }
@@ -171,7 +171,7 @@ fn block_file_tree() -> Tree {
         frontmatter_raw: String::new(),
         frontmatter_span: None,
     };
-    let root = parse_file("root.md", root_text, 0, Some(root_block));
+    let root = parse_file("root.md", root_text, Some(root_block));
 
     let block_text = "---\nid: dozzod-binwes-talsun-worbec\nsince: 2024-03\ntags: [storage, homelab]   # user comment\n---\n\n# ZFS layout\n\nMirrored pairs, no raidz. Snapshots hourly via sanoid.\n\n## [ ] Snapshot policy\n\n- hourly, keep 24\n- [x] Move scratch to its own dataset\n";
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
@@ -183,7 +183,7 @@ fn block_file_tree() -> Tree {
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
     };
-    let bf = parse_file("dozzod~zfs-layout.md", block_text, 1, Some(block));
+    let bf = parse_file("dozzod~zfs-layout.md", block_text, Some(block));
     assert!(bf.diagnostics.is_empty(), "diags: {:?}", bf.diagnostics);
     Tree::new(vec![root, bf])
 }
@@ -236,7 +236,7 @@ fn bullet_root_block_file() {
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
     };
-    let pf = parse_file("racfer~order-new-switch.md", text, 0, Some(block));
+    let pf = parse_file("racfer~order-new-switch.md", text, Some(block));
     assert!(pf.diagnostics.is_empty(), "diags: {:?}", pf.diagnostics);
     let root_node = pf.nodes[0].children[0];
     let n = &pf.nodes[root_node];
@@ -258,7 +258,7 @@ fn tree_with_block(root_text: &str, block_text: &str, block_path: &str) -> Tree 
         frontmatter_raw: String::new(),
         frontmatter_span: None,
     };
-    let root = parse_file("root.md", root_text, 0, Some(root_block));
+    let root = parse_file("root.md", root_text, Some(root_block));
     let fm = fold_core::parse::parse_frontmatter(block_text).unwrap();
     let id = Id::parse(fm.props.get("id").unwrap()).unwrap();
     let block = Block {
@@ -268,7 +268,7 @@ fn tree_with_block(root_text: &str, block_text: &str, block_path: &str) -> Tree 
         frontmatter_raw: fm.raw,
         frontmatter_span: Some(fm.span),
     };
-    let bf = parse_file(block_path, block_text, 1, Some(block));
+    let bf = parse_file(block_path, block_text, Some(block));
     Tree::new(vec![root, bf])
 }
 
@@ -412,7 +412,7 @@ fn empty_title_nodes_parse_everywhere() {
         ("# A\n\n- x\n  - \n", 1),
     ];
     for (text, kids) in cases {
-        let pf = parse_file("root.md", text, 0, None);
+        let pf = parse_file("root.md", text, None);
         let t = Tree::new(vec![pf]);
         let a = t.resolved_children(t.root)[0];
         let ch = t.resolved_children(a);
@@ -424,10 +424,10 @@ fn empty_title_nodes_parse_everywhere() {
         assert_eq!(t.node(n).title, "", "{:?}", text);
         // rendering keeps the node (without trailing whitespace)
         let r = render(&t, t.root, 1, false);
-        let pf2 = parse_file("root.md", &r, 0, None);
+        let pf2 = parse_file("root.md", &r, None);
         assert_eq!(pf2.nodes.len(), t.files[0].nodes.len(), "{:?} → {:?}", text, r);
     }
-    let pf = parse_file("root.md", "# A\n\n- [ ] \n", 0, None);
+    let pf = parse_file("root.md", "# A\n\n- [ ] \n", None);
     assert!(pf.nodes.iter().any(|n| n.task == Some(TaskState::Open) && n.title.is_empty()));
 }
 

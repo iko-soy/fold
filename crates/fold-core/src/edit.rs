@@ -660,7 +660,7 @@ impl EditBuffer {
         // re-spelled as a heading) is refused, not hidden, unless the file
         // had it so already
         let crowded = crowded_embeds(f);
-        if crowded_embeds(&parse_file(&path, &out, file, None)).iter().any(|id| !crowded.contains(id)) {
+        if crowded_embeds(&parse_file(&path, &out, None)).iter().any(|id| !crowded.contains(id)) {
             return Err(std::io::Error::other(format!(
                 "{}: a line would be nested under a block's embed, out of the outline; not saved",
                 path
@@ -675,7 +675,7 @@ impl EditBuffer {
                     frontmatter_span: None,
                     ..b.clone()
                 };
-                if malformed_block_file(&parse_file(&path, &out, file, Some(b))) {
+                if malformed_block_file(&parse_file(&path, &out, Some(b))) {
                     return Err(std::io::Error::other(format!(
                         "{}: the block's text must start with its title line; not saved",
                         path

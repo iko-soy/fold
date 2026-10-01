@@ -100,7 +100,7 @@ fn standalone_tree(text: &str) -> Tree {
         frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
         frontmatter_span: fm.as_ref().map(|f| f.span),
     };
-    let pf = parse_file("m.md", text, 0, Some(block));
+    let pf = parse_file("m.md", text, Some(block));
     Tree::new(vec![pf])
 }
 
