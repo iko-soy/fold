@@ -282,7 +282,9 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
                 is Screen.Reading -> reading = core { it.reading(screen.key) } ?: emptyList()
                 is Screen.Properties -> props = core { it.properties(screen.key) } ?: emptyList()
                 Screen.Conflicts -> conflicts = core { it.conflicts() } ?: emptyList()
-                Screen.Search -> if (searchQuery.isNotBlank()) hits = core { it.search(searchQuery) } ?: emptyList()
+                // the topmost of these holds `hits`, as `searchQuery`
+                Screen.Search -> hits = if (searchQuery.isBlank()) emptyList() else core { it.search(searchQuery) } ?: emptyList()
+                is Screen.MoveTo -> hits = core { it.targets(searchQuery, screen.key) } ?: emptyList()
                 else -> {}
             }
         }
@@ -477,7 +479,10 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
                     trash = core { it.trash() } ?: emptyList()
                 }
                 Screen.Checks -> checks()
-                is Screen.MoveTo -> hits = core { it.targets("", screen.key) } ?: emptyList()
+                is Screen.MoveTo -> {
+                    searchQuery = ""
+                    hits = core { it.targets("", screen.key) } ?: emptyList()
+                }
                 Screen.Search -> {
                     searchQuery = ""
                     hits = emptyList()
@@ -495,6 +500,9 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
             return true
         }
         screens.removeAt(screens.lastIndex)
+        // one field holds what every Reading screen shows (and Properties):
+        // the screen now on top shows its own node again
+        viewModelScope.launch { reloadOpenScreens() }
         return true
     }
 
