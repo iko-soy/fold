@@ -116,27 +116,9 @@ impl Walk<'_> {
         } else {
             (owner, outer)
         };
-        let title = match n.kind {
-            Kind::Root => None,
-            _ if n.is_embed() => Some((embed_line(n, dlevel, dindent), LineKind::Embed)),
-            Kind::Section => {
-                let mut s = " ".repeat(dindent);
-                s.push_str(&"#".repeat(dlevel.max(1)));
-                s.push(' ');
-                push_checkbox(n.task, &mut s);
-                s.push_str(&n.title);
-                Some((s.trim_end().to_string(), LineKind::Title))
-            }
-            Kind::Item => {
-                let mut s = " ".repeat(dindent);
-                s.push_str("- ");
-                push_checkbox(n.task, &mut s);
-                s.push_str(&n.title);
-                Some((s.trim_end().to_string(), LineKind::Title))
-            }
-        };
-        if let Some((text, kind)) = title {
-            self.push(text, kind, r, owner, outer, dlevel, dindent);
+        if let Some(line) = title_line(n, dlevel, dindent) {
+            let kind = if n.is_embed() { LineKind::Embed } else { LineKind::Title };
+            self.push(line.trim_end().to_string(), kind, r, owner, outer, dlevel, dindent);
         }
         for c in &n.content {
             match *c {
@@ -248,13 +230,34 @@ impl Walk<'_> {
     }
 }
 
-/// An embed line at a display position: a heading embed (`## ![[id]]`) for
-/// a section-position embed, a bare `![[id]]` for an item position (§4.7).
-pub fn embed_line(n: &crate::parse::Node, dlevel: usize, dindent: usize) -> String {
-    let id = n.embed.as_ref().expect("embed node");
+/// A node's title line at a display level and indent (§4.3): an embed's
+/// line, else `#`s (one at least) for a section or `- ` for an item, then
+/// its checkbox and its title. None for a file's root.
+pub fn title_line(n: &crate::parse::Node, level: usize, indent: usize) -> Option<String> {
+    let mut s = " ".repeat(indent);
     match n.kind {
-        Kind::Section => format!("{}{} ![[{}]]", " ".repeat(dindent), "#".repeat(dlevel.max(1)), id),
-        _ => format!("{}![[{}]]", " ".repeat(dindent), id),
+        Kind::Root => return None,
+        _ if n.is_embed() => {
+            let id = n.embed.as_ref().expect("embed node");
+            return Some(embed_line(id, (n.kind == Kind::Section).then_some(level), indent));
+        }
+        Kind::Section => {
+            s.push_str(&"#".repeat(level.max(1)));
+            s.push(' ');
+        }
+        Kind::Item => s.push_str("- "),
+    }
+    push_checkbox(n.task, &mut s);
+    s.push_str(&n.title);
+    Some(s)
+}
+
+/// An embed line (§4.7): a heading embed, `## ![[id]]`, at a section's
+/// level, or a bare `![[id]]` in an item's place.
+pub fn embed_line(id: &crate::Id, section_level: Option<usize>, indent: usize) -> String {
+    match section_level {
+        Some(level) => format!("{}{} ![[{}]]", " ".repeat(indent), "#".repeat(level.max(1)), id),
+        None => format!("{}![[{}]]", " ".repeat(indent), id),
     }
 }
 

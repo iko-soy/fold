@@ -4,7 +4,7 @@
 
 use crate::ident::{slug, Id};
 use crate::parse::{Kind, Span, TaskState};
-use crate::render::render;
+use crate::render::{embed_line, render};
 use crate::tree::NRef;
 use crate::vault::Vault;
 
@@ -1561,7 +1561,6 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     // replace the node's span with an embed in the node's form (§6.1.3,
     // §4.7), keeping the blank lines that separated it from what follows
     let span = n.span;
-    let indent = " ".repeat(n.indent);
     // at its level, but kept a sibling of the sections around it as they
     // are written: no deeper than the one before it, which would take the
     // embed as its child, nor shallower than the one after it
@@ -1569,13 +1568,11 @@ pub fn make_block(vault: &mut Vault, r: NRef) -> std::io::Result<Id> {
     let at = kids.iter().position(|&c| c == r);
     let prev = at.and_then(|i| i.checked_sub(1)).map(|i| kids[i]);
     let next = at.and_then(|i| kids.get(i + 1).copied());
-    let mut embed = match n.kind {
-        Kind::Section => {
-            let line = format!("{}{} ![[{}]]\n", indent, "#".repeat(vault.tree.level(r)), id);
-            level_among(&vault.tree, prev, next, &line)
-        }
-        _ => format!("{}![[{}]]\n", indent, id),
-    };
+    let section = (n.kind == Kind::Section).then(|| vault.tree.level(r));
+    let mut embed = format!("{}\n", embed_line(&id, section, n.indent));
+    if section.is_some() {
+        embed = level_among(&vault.tree, prev, next, &embed);
+    }
     let old = span.text(&vault.tree.files[file].text);
     let trailing = old.len() - old.trim_end_matches('\n').len();
     for _ in 1..trailing {
@@ -1840,13 +1837,8 @@ pub fn respell_embed(vault: &mut Vault, e: NRef, to_section: bool) -> std::io::R
     let text = &vault.tree.files[e.0].text;
     let old = Span { start: en.span.start, end: en.span.end.min(text.len()) }.text(text);
     let rest = old.find('\n').map(|i| &old[i..]).unwrap_or("\n");
-    let indent = " ".repeat(en.indent);
-    let line = if to_section {
-        format!("{}{} ![[{}]]", indent, "#".repeat(vault.tree.level(parent) + 1), id)
-    } else {
-        format!("{}![[{}]]", indent, id)
-    };
-    let new = format!("{}{}", line, rest);
+    let level = to_section.then(|| vault.tree.level(parent) + 1);
+    let new = format!("{}{}", embed_line(&id, level, en.indent), rest);
     reposition(vault, e, parent, new, to_section)
 }
 
