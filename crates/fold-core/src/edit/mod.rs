@@ -14,6 +14,9 @@ use crate::tree::NRef;
 use crate::vault::Vault;
 use std::collections::{BTreeMap, HashMap};
 
+mod text;
+pub use text::{order, Pos, Snapshot};
+
 /// One buffer line and its owner.
 #[derive(Debug, Clone)]
 pub struct EditLine {
