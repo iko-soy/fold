@@ -1,25 +1,13 @@
 //! The Helix keymap: selection first. Motions select, actions act on the
 //! selection; `v` makes motions extend it. One selection (no multi-cursor).
 
-use super::{class, order, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, take_count, Editor, Group, Mode, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
 pub struct State {
     count: String,
     prefix: Option<char>,
-}
-
-/// The largest count: more digits than that are this.
-const MAX_COUNT: usize = 999_999_999;
-
-/// The most text a count may make `>` add.
-const MAX_TEXT: usize = 4 << 20;
-
-/// The count typed before a key, 1 if none.
-fn take_count(st: &mut State) -> usize {
-    let s = std::mem::take(&mut st.count);
-    if s.is_empty() { 1 } else { s.parse().map_or(MAX_COUNT, |n: usize| n.clamp(1, MAX_COUNT)) }
 }
 
 /// The selection as `[start, end)`: the anchor to the cursor, both included;
@@ -225,7 +213,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.helix.count.push(c);
         return out;
     }
-    let n = take_count(&mut e.helix);
+    let n = take_count(&mut e.helix.count).unwrap_or(1);
     let p = e.cursor;
     match (c, alt) {
         ('h', _) => move_to(e, Pos::new(p.line, p.col.saturating_sub(n))),
@@ -378,27 +366,11 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
             e.change_case(s, en, how);
         }
         ('>' | '<', false) => {
-            // a count of levels (two spaces each) in one change, as Helix does
+            // a count of levels in one change, as Helix does
             let (s, en) = range(e);
             let l2 = if en.col == 0 && en.line > s.line { en.line - 1 } else { en.line };
-            let width = n.saturating_mul(2);
-            if c == '>' && n > 1 && width.saturating_mul(l2 - s.line + 1) > MAX_TEXT {
-                e.message = Some("text too long".into());
-                return out;
-            }
             let a = e.anchor;
-            e.checkpoint();
-            for l in s.line..=l2 {
-                if c == '>' {
-                    if !e.line(l).is_empty() {
-                        e.insert(Pos::new(l, 0), &" ".repeat(width));
-                    }
-                } else {
-                    let k = e.line(l).chars().take(width).take_while(|ch| *ch == ' ').count();
-                    e.delete(Pos::new(l, 0), Pos::new(l, k));
-                }
-            }
-            e.cursor.col = if c == '>' { e.cursor.col + width } else { e.cursor.col.saturating_sub(width) };
+            e.indent(s.line, l2, if c == '>' { n as i32 } else { -(n as i32) });
             e.anchor = a;
         }
         ('J', false) => {
@@ -479,7 +451,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 /// The key after `g`, `f`/`t`/`F`/`T`, `r` or `m`.
 fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
-    let n = take_count(&mut e.helix);
+    let n = take_count(&mut e.helix.count).unwrap_or(1);
     let cur = e.cursor;
     match p {
         'g' => {
@@ -538,6 +510,26 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
 mod tests {
     use super::super::test_util::{body, editor, keys};
     use super::super::{Keys, Mode, Pos};
+
+    #[test]
+    fn an_insert_is_one_undo_step_ctrl_w_and_all() {
+        let (_d, mut e) = editor("x\n", Keys::Helix);
+        keys(&mut e, "iab cd<C-w>ef<Esc>");
+        assert_eq!(body(&e), "ab efx");
+        keys(&mut e, "u");
+        assert_eq!(body(&e), "x");
+    }
+
+    #[test]
+    fn a_count_shifts_by_that_many_levels() {
+        let (_d, mut e) = editor("a\nb\n", Keys::Helix);
+        keys(&mut e, "3>");
+        assert_eq!(body(&e), "      a\nb");
+        keys(&mut e, "2<lt>");
+        assert_eq!(body(&e), "  a\nb");
+        keys(&mut e, "u");
+        assert_eq!(body(&e), "      a\nb");
+    }
 
     #[test]
     fn select_then_act() {

@@ -930,30 +930,39 @@ impl Editor {
         }
     }
 
-    /// Delete back to the start of the word (Ctrl-W, Alt-Backspace).
+    /// Delete back to the start of the word (Ctrl-W, Alt-Backspace): part
+    /// of a run of typing, as Backspace is.
     pub fn delete_word_back(&mut self) {
-        self.checkpoint();
+        self.checkpoint_typing();
         self.forget_goal();
         let start = self.word_back(self.cursor, false);
         self.delete(start, self.cursor);
         self.cursor = start;
     }
 
-    /// Indent (`dir > 0`) or dedent lines `l1..=l2` by two spaces.
-    pub fn indent(&mut self, l1: usize, l2: usize, dir: i32) {
+    /// Shift lines `l1..=l2` by `levels` levels of two spaces, as one
+    /// change: in where positive (an empty line stays empty), out where
+    /// negative (as far as each line's spaces go). A count that would put in
+    /// more than `MAX_TEXT` is refused.
+    pub fn indent(&mut self, l1: usize, l2: usize, levels: i32) {
+        let l2 = l2.min(self.lines() - 1);
+        let width = levels.unsigned_abs() as usize * 2;
+        if levels > 1 && width.saturating_mul(l2.saturating_sub(l1) + 1) > MAX_TEXT {
+            self.message = Some("text too long".into());
+            return;
+        }
         self.checkpoint();
-        for l in l1..=l2.min(self.lines() - 1) {
-            if dir > 0 {
+        for l in l1..=l2 {
+            if levels > 0 {
                 if !self.line(l).is_empty() {
-                    self.insert(Pos::new(l, 0), "  ");
+                    self.insert(Pos::new(l, 0), &" ".repeat(width));
                 }
             } else {
-                let n = self.line(l).chars().take(2).take_while(|c| *c == ' ').count();
+                let n = self.line(l).chars().take(width).take_while(|c| *c == ' ').count();
                 self.delete(Pos::new(l, 0), Pos::new(l, n));
             }
         }
-        let shift = if dir > 0 { 2 } else { 0 };
-        self.cursor.col = if dir > 0 { self.cursor.col + shift } else { self.cursor.col.saturating_sub(2) };
+        self.cursor.col = if levels > 0 { self.cursor.col + width } else { self.cursor.col.saturating_sub(width) };
     }
 
     /// Join `count` lines below onto line `l` with single spaces (`J`).
@@ -1051,8 +1060,16 @@ impl Editor {
         None
     }
 
-    /// Jump to the next match of the last search.
+    /// Jump to the next match of the last search, forward or back.
     pub fn search_next(&mut self, fwd: bool) -> Option<Pos> {
+        let p = self.next_match(fwd)?;
+        self.set_cursor(p);
+        Some(p)
+    }
+
+    /// Where the next match of the last search is, forward or back; none,
+    /// and a message saying so, where there is none.
+    pub fn next_match(&mut self, fwd: bool) -> Option<Pos> {
         let pat = self.search.clone()?;
         // Helix searches on from the selection's end, or back from its start,
         // so the match it has selected is not found again
@@ -1062,16 +1079,11 @@ impl Editor {
             }
             _ => self.cursor,
         };
-        match self.find(&pat, from, fwd) {
-            Some(p) => {
-                self.set_cursor(p);
-                Some(p)
-            }
-            None => {
-                self.message = Some(format!("not found: {}", pat));
-                None
-            }
+        let found = self.find(&pat, from, fwd);
+        if found.is_none() {
+            self.message = Some(format!("not found: {}", pat));
         }
+        found
     }
 
     // -------------------------------------------------------------- command line
@@ -1150,6 +1162,18 @@ impl Editor {
         }
         out
     }
+}
+
+/// The largest count, as in Vim: more digits than that are this.
+const MAX_COUNT: usize = 999_999_999;
+
+/// The most text a count may make one command put in (Vim's "text too long").
+const MAX_TEXT: usize = 4 << 20;
+
+/// The count typed before a key, taken: none where no digit was typed.
+fn take_count(count: &mut String) -> Option<usize> {
+    let s = std::mem::take(count);
+    (!s.is_empty()).then(|| s.parse().map_or(MAX_COUNT, |c: usize| c.min(MAX_COUNT)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

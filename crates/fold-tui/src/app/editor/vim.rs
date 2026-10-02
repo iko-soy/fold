@@ -1,7 +1,7 @@
 //! The Vim keymap: normal, insert and visual modes; counts; motions,
 //! operators and text objects; `.` repeat; `:` and `/`.
 
-use super::{class, order, Class, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, take_count, Class, Editor, Group, Mode, Outcome, Pos, MAX_COUNT, MAX_TEXT};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
@@ -136,12 +136,9 @@ fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     match key.code {
         KeyCode::Esc => leave_insert(e),
         KeyCode::Char('c') | KeyCode::Char('[') if ctl => leave_insert(e),
-        KeyCode::Char('w') if ctl => {
-            let start = e.word_back(e.cursor, false);
-            e.delete(start, e.cursor);
-            e.cursor = start;
-        }
+        KeyCode::Char('w') if ctl => e.delete_word_back(),
         KeyCode::Char('u') if ctl => {
+            e.checkpoint_typing();
             let start = Pos::new(e.cursor.line, e.first_non_blank(e.cursor.line).min(e.cursor.col));
             e.delete(start, e.cursor);
             e.cursor = start;
@@ -169,17 +166,6 @@ fn leave_insert(e: &mut Editor) {
     e.mode = Mode::Normal;
     e.group = Group::None;
     e.cursor.col = e.cursor.col.saturating_sub(1);
-}
-
-/// The largest count, as in Vim: more digits than that are this.
-const MAX_COUNT: usize = 999_999_999;
-
-/// The most text a count may make one command put in (Vim's "text too long").
-const MAX_TEXT: usize = 4 << 20;
-
-fn take_count(st: &mut State) -> Option<usize> {
-    let s = std::mem::take(&mut st.count);
-    (!s.is_empty()).then(|| s.parse().map_or(MAX_COUNT, |c: usize| c.min(MAX_COUNT)))
 }
 
 /// `f` applied `n` times from `x`, stopping once it no longer moves: a count
@@ -241,10 +227,7 @@ fn motion(e: &mut Editor, c: char, count: Option<usize>) -> Option<(Pos, Kind)> 
         '{' => (Pos::new(repeat(n, p.line, |l| e.paragraph(l, false)), 0), Kind::Excl),
         '%' => (e.match_bracket(p)?, Kind::Incl),
         // `n` the way the last search went, `N` the other way
-        'n' | 'N' => {
-            let pat = e.search.clone()?;
-            (e.find(&pat, p, (c == 'n') == e.search_fwd)?, Kind::Excl)
-        }
+        'n' | 'N' => (e.next_match((c == 'n') == e.search_fwd)?, Kind::Excl),
         ';' | ',' => {
             let (kind, ch) = e.vim.last_find?;
             let kind = if c == ',' {
@@ -361,7 +344,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         e.vim.count.push(c);
         return out;
     }
-    let count = take_count(&mut e.vim);
+    let count = take_count(&mut e.vim.count);
 
     // an operator waiting for its motion
     if let Some(op) = e.vim.op {
@@ -569,7 +552,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
 /// and `i`/`a` + object after an operator or in visual mode.
 fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
     let mut out = Outcome::default();
-    let count = take_count(&mut e.vim);
+    let count = take_count(&mut e.vim.count);
     match p {
         'f' | 'F' | 't' | 'T' => {
             e.vim.last_find = Some((p, c));
@@ -732,6 +715,7 @@ fn apply(e: &mut Editor, op: char, from: Pos, to: Pos, kind: Kind) {
         }
         '>' | '<' => {
             e.indent(s.line, en.line, if op == '>' { 1 } else { -1 });
+            e.cursor = Pos::new(s.line, e.first_non_blank(s.line));
         }
         _ => {}
     }
@@ -788,7 +772,8 @@ fn visual_cmd(e: &mut Editor, c: char, n: usize) -> Outcome {
             exit(e);
         }
         '>' | '<' => {
-            e.indent(s.line, en.line, if c == '>' { n as i32 } else { -1 });
+            e.indent(s.line, en.line, if c == '>' { n as i32 } else { -(n as i32) });
+            e.cursor = Pos::new(s.line, e.first_non_blank(s.line));
             exit(e);
         }
         '~' | 'u' | 'U' => {
@@ -889,6 +874,43 @@ mod tests {
         assert_eq!(body(&e), "a!\n  a!");
         keys(&mut e, "kJ");
         assert_eq!(body(&e), "a! a!");
+    }
+
+    #[test]
+    fn ctrl_w_and_ctrl_u_after_a_move_are_an_undo_step_of_their_own() {
+        let (_d, mut e) = editor("x\n", Keys::Vim);
+        keys(&mut e, "iab<Left><C-w><Esc>");
+        assert_eq!(body(&e), "bx");
+        keys(&mut e, "u");
+        assert_eq!(body(&e), "abx");
+        keys(&mut e, "A<Left><C-u><Esc>u");
+        assert_eq!(body(&e), "abx");
+    }
+
+    #[test]
+    fn shifts_take_a_count_and_leave_the_cursor_on_the_first_line() {
+        let (_d, mut e) = editor("a\nb\n", Keys::Vim);
+        keys(&mut e, "Vj3>");
+        assert_eq!(body(&e), "      a\n      b");
+        assert_eq!(e.cursor, Pos::new(2, 6));
+        keys(&mut e, "Vj2<lt>");
+        assert_eq!(body(&e), "  a\n  b");
+        keys(&mut e, "j<lt>k");
+        assert_eq!(body(&e), "a\nb");
+        assert_eq!(e.cursor, Pos::new(2, 0));
+    }
+
+    #[test]
+    fn n_says_when_there_is_no_match() {
+        let (_d, mut e) = editor("a b\n", Keys::Vim);
+        keys(&mut e, "/b<CR>");
+        assert_eq!(e.cursor, Pos::new(2, 2));
+        e.search = Some("zz".into());
+        keys(&mut e, "n");
+        assert_eq!(e.message.as_deref(), Some("not found: zz"));
+        keys(&mut e, "dN");
+        assert_eq!(e.message.as_deref(), Some("not found: zz"));
+        assert_eq!(body(&e), "a b");
     }
 
     #[test]
