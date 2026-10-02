@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.collectLatest
 import soy.iko.fold.FoldViewModel
 import soy.iko.fold.Message
 import soy.iko.fold.Screen
@@ -30,7 +31,9 @@ fun Root(vm: FoldViewModel) {
     // the outline's place, kept while another screen is open
     val outlineList = rememberLazyListState()
     LaunchedEffect(vm) {
-        vm.messages.collect { m ->
+        // a new message takes the place of the one showing, never queues
+        // behind it: an old Undo offer showing late would name an old change
+        vm.messages.collectLatest { m ->
             snackbar.currentSnackbarData?.dismiss()
             val result = snackbar.showSnackbar(
                 message = m.text,
