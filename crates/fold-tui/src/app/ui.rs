@@ -438,41 +438,7 @@ impl App {
 
     /// Ancestors of the zoom root through embeds, top first.
     fn crumbs(&self) -> Vec<NRef> {
-        self.zoom_root.map(|z| self.chain(z)).unwrap_or_default()
-    }
-
-    /// A node and its ancestors, top first, following block roots up to the
-    /// embeds that stitch them in (so a block's path is its place in the
-    /// tree, not its file).
-    pub(super) fn chain(&self, r: NRef) -> Vec<NRef> {
-        let tree = &self.vault.tree;
-        let mut out = Vec::new();
-        let mut cur = Some(r);
-        let mut guard = 0;
-        while let Some(c) = cur {
-            guard += 1;
-            if guard > 1000 {
-                break;
-            }
-            let n = tree.node(c);
-            if n.kind == Kind::Root {
-                break;
-            }
-            if !n.is_embed() {
-                out.push(c);
-            }
-            cur = match n.parent.map(|p| (c.0, p)) {
-                Some(p) if tree.node(p).kind != Kind::Root => Some(p),
-                Some(_) if c.0 != tree.root.0 => n
-                    .block
-                    .as_ref()
-                    .and_then(|b| b.id.as_ref())
-                    .and_then(|id| tree.embed_of(id)),
-                _ => None,
-            };
-        }
-        out.reverse();
-        out
+        self.zoom_root.map(|z| self.vault.tree.chain(z)).unwrap_or_default()
     }
 
     fn button(&mut self, buf: &mut Buffer, x: u16, y: u16, a: Action, target: Option<NRef>, compact: bool, max: u16) -> u16 {
@@ -497,7 +463,7 @@ impl App {
 
     /// A node's path through embeds, as titles.
     pub(super) fn path_titles(&self, r: NRef) -> Vec<String> {
-        self.chain(r).iter().map(|&c| self.vault.tree.node(c).title.clone()).collect()
+        self.vault.tree.chain(r).iter().map(|&c| self.vault.tree.node(c).title.clone()).collect()
     }
 
     /// Width a row of buttons needs.
@@ -1086,7 +1052,7 @@ impl App {
         // or the node the editor is open on in one: a node of a copy's
         // file, or a block within it
         if device.is_none() {
-            let up = self.editor_node().map(|r| self.chain(r)).unwrap_or_default();
+            let up = self.editor_node().map(|r| self.vault.tree.chain(r)).unwrap_or_default();
             device = up.iter().rev().find_map(|&c| self.vault.tree.node(c).conflict()).map(|c| copy_device(c).to_string());
         }
         let mut tail = vec![if ed.buf.dirty.is_empty() { Span::raw(" ") } else { Span::styled(" ● ", Style::default().fg(theme::WARN)) }];
@@ -1382,7 +1348,7 @@ impl App {
 
     /// A list row for a node: its title, then its parents dimmed.
     fn path_spans(&self, r: NRef) -> Vec<(String, Style)> {
-        let chain = self.chain(r);
+        let chain = self.vault.tree.chain(r);
         let path: Vec<String> = chain.iter().map(|&c| title_text(&self.vault.tree.node(c).title)).collect();
         let (last, parents) = path.split_last().map(|(l, p)| (l.clone(), p.join(" › "))).unwrap_or_default();
         let last = if last.is_empty() { "(untitled)".into() } else { last };

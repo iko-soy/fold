@@ -164,6 +164,37 @@ impl Tree {
         segs
     }
 
+    /// A node's parent in the outline: its parent in its file, or for a
+    /// block's top node the embed that stitches it in (§4.7); none at the
+    /// top of the vault.
+    pub fn resolved_parent(&self, r: NRef) -> Option<NRef> {
+        let p = (r.0, self.node(r).parent?);
+        if self.node(p).kind != Kind::Root {
+            Some(p)
+        } else if r.0 != self.root.0 {
+            self.embed_of(self.node(r).block.as_ref()?.id.as_ref()?)
+        } else {
+            None
+        }
+    }
+
+    /// A node and its ancestors in the outline, top first, through the
+    /// embeds that stitch blocks in, the embeds left out: a block's path is
+    /// its place in the tree, not its file. An embed cycle (§6.2) ends it
+    /// where it comes round.
+    pub fn chain(&self, r: NRef) -> Vec<NRef> {
+        let mut out = Vec::new();
+        let mut cur = Some(r).filter(|&c| self.node(c).kind != Kind::Root);
+        while let Some(c) = cur.filter(|c| !out.contains(c)) {
+            if !self.node(c).is_embed() {
+                out.push(c);
+            }
+            cur = self.resolved_parent(c);
+        }
+        out.reverse();
+        out
+    }
+
     /// Resolve an embed node to the block it references (one level). Only
     /// the block's own embed (`embed_of`) resolves: any other embed of its
     /// id is left as it is and reads as broken everywhere, as §6.2 says,

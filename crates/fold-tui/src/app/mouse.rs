@@ -335,8 +335,8 @@ impl App {
     /// row in it. Left of the copy's own row, it goes after the copy.
     fn drop_into_copy(&self, r: NRef, target: NRef, how: Drop) -> bool {
         let tree = &self.vault.tree;
-        let own = self.chain(tree.resolved_child(r));
-        let mut dest = self.chain(tree.resolved_child(target));
+        let own = self.vault.tree.chain(tree.resolved_child(r));
+        let mut dest = self.vault.tree.chain(tree.resolved_child(target));
         if how == Drop::Before {
             dest.pop();
         }

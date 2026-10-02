@@ -702,46 +702,14 @@ impl State {
         quoted(&tree.node(tree.resolved_child(r)).title)
     }
 
-    /// A node and its ancestors, top first, following block roots up to the
-    /// embeds that stitch them in (so a block's path is its place in the
-    /// tree, not its file).
-    fn chain(&self, r: NRef) -> Vec<NRef> {
-        let tree = &self.vault.tree;
-        let mut out = Vec::new();
-        let mut cur = Some(r);
-        let mut guard = 0;
-        while let Some(c) = cur {
-            guard += 1;
-            if guard > 1000 {
-                break;
-            }
-            let n = tree.node(c);
-            if n.kind == Kind::Root {
-                break;
-            }
-            if !n.is_embed() {
-                out.push(c);
-            }
-            cur = match n.parent.map(|p| (c.0, p)) {
-                Some(p) if tree.node(p).kind != Kind::Root => Some(p),
-                Some(_) if c.0 != tree.root.0 => {
-                    n.block.as_ref().and_then(|b| b.id.as_ref()).and_then(|id| tree.embed_of(id))
-                }
-                _ => None,
-            };
-        }
-        out.reverse();
-        out
-    }
-
     /// A node's parent in the outline, `None` at the top.
     fn outline_parent(&self, r: NRef) -> Option<NRef> {
-        let chain = self.chain(r);
+        let chain = self.vault.tree.chain(r);
         chain.len().checked_sub(2).map(|i| chain[i])
     }
 
     fn crumbs(&self, r: NRef) -> Vec<Crumb> {
-        self.chain(r)
+        self.vault.tree.chain(r)
             .into_iter()
             .map(|c| Crumb { key: self.key(c), title: self.vault.tree.node(c).title.clone() })
             .collect()
@@ -971,7 +939,7 @@ impl State {
     fn hit(&self, r: NRef, excerpt: Option<String>) -> Hit {
         let tree = &self.vault.tree;
         let n = tree.node(r);
-        let mut chain = self.chain(r);
+        let mut chain = self.vault.tree.chain(r);
         chain.pop();
         Hit {
             key: self.key(r),
@@ -1037,7 +1005,7 @@ impl State {
         });
         let mut scored: Vec<(u8, usize, NRef)> = Vec::new();
         for r in nodes {
-            let chain = self.chain(r);
+            let chain = self.vault.tree.chain(r);
             if moving.iter().any(|m| chain.contains(m)) {
                 continue;
             }

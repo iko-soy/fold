@@ -69,7 +69,6 @@ enum Focus {
 pub struct FlatRow {
     pub nref: NRef,
     pub depth: usize,
-    pub via_embed: bool,
 }
 
 /// The status bar's greeting, and a shorter one where it doesn't fit.
@@ -815,7 +814,7 @@ impl App {
     pub fn rows(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
         let root = self.zoom().unwrap_or(self.vault.tree.root);
-        self.flatten(root, 0, false, &mut out, &mut Vec::new());
+        self.flatten(root, 0, &mut out, &mut Vec::new());
         out
     }
 
@@ -861,14 +860,14 @@ impl App {
     /// tree parent is its own file's root, but its outline parent is the
     /// node that embeds it (as the breadcrumbs show).
     fn outline_parent(&self, r: NRef) -> Option<NRef> {
-        let chain = self.chain(r);
+        let chain = self.vault.tree.chain(r);
         chain.len().checked_sub(2).map(|i| chain[i])
     }
 
     /// `seen` holds the blocks already shown: an embed cycle or a second
     /// embed of a block (§6.2 diagnostics) shows it once, as walk and render
     /// do. Only a block can be reached twice, so only blocks are recorded.
-    fn flatten(&self, r: NRef, depth: usize, via_embed: bool, out: &mut Vec<FlatRow>, seen: &mut Vec<NRef>) {
+    fn flatten(&self, r: NRef, depth: usize, out: &mut Vec<FlatRow>, seen: &mut Vec<NRef>) {
         let n = self.vault.tree.node(r);
         if n.is_block() {
             if seen.contains(&r) {
@@ -878,25 +877,19 @@ impl App {
         }
         if n.kind == Kind::Root {
             for c in self.vault.tree.resolved_children(r) {
-                self.flatten(c, depth, false, out, seen);
+                self.flatten(c, depth, out, seen);
             }
             return;
         }
         if self.hide_done && n.task == Some(TaskState::Done) {
             return;
         }
-        out.push(FlatRow {
-            nref: r,
-            depth,
-            via_embed,
-        });
+        out.push(FlatRow { nref: r, depth });
         if self.is_folded(r) {
             return;
         }
         for c in self.vault.tree.resolved_children(r) {
-            let through_embed = self.vault.tree.node(c).is_embed()
-                && self.vault.tree.resolved_child(c) != c;
-            self.flatten(c, depth + 1, through_embed || via_embed, out, seen);
+            self.flatten(c, depth + 1, out, seen);
         }
     }
 
@@ -1972,7 +1965,7 @@ impl App {
         });
         let mut scored: Vec<(u8, usize, NRef)> = Vec::new();
         for r in nodes {
-            let chain = self.chain(r);
+            let chain = self.vault.tree.chain(r);
             if moving.iter().any(|m| chain.contains(m)) {
                 continue;
             }
@@ -2005,7 +1998,7 @@ impl App {
     /// ancestors unfolded are its outline ancestors, through the embeds
     /// that stitch in the blocks it sits in, not only those in its file.
     fn reveal(&mut self, r: NRef) {
-        let mut chain = self.chain(r);
+        let mut chain = self.vault.tree.chain(r);
         chain.pop();
         for a in chain {
             self.set_folded(a, false);

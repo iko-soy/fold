@@ -1018,7 +1018,7 @@ pub fn refile(vault: &mut Vault, r: NRef, dest: NRef) -> std::io::Result<Placed>
         if guard > 10_000 {
             break; // embed cycle: `check` reports it (§6.2)
         }
-        anc = resolved_parent(&vault.tree, a);
+        anc = vault.tree.resolved_parent(a);
     }
     // a block moves by its embed line (§6.5); a plain node by its span, in
     // its on-disk spelling, so nested blocks travel as their embed lines
@@ -1148,7 +1148,7 @@ fn within(tree: &crate::tree::Tree, a: NRef, r: NRef) -> bool {
         if guard > 10_000 {
             return false;
         }
-        cur = resolved_parent(tree, c);
+        cur = tree.resolved_parent(c);
     }
     false
 }
@@ -1159,7 +1159,7 @@ fn within(tree: &crate::tree::Tree, a: NRef, r: NRef) -> bool {
 /// block root's embed (§4.7), else `r` itself.
 fn stand_in(tree: &crate::tree::Tree, r: NRef) -> NRef {
     if r.0 != tree.root.0 && tree.node(r).is_block() {
-        if let Some(e) = resolved_parent(tree, r) {
+        if let Some(e) = tree.resolved_parent(r) {
             if tree.node(e).is_embed() {
                 return e;
             }
@@ -1492,14 +1492,14 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
         .iter()
         .copied()
         .filter(|&r| {
-            let mut a = resolved_parent(&vault.tree, r);
+            let mut a = vault.tree.resolved_parent(r);
             let mut guard = 0;
             while let Some(p) = a {
                 if to_clear.contains(&p) || guard > 10_000 {
                     return false;
                 }
                 guard += 1;
-                a = resolved_parent(&vault.tree, p);
+                a = vault.tree.resolved_parent(p);
             }
             true
         })
@@ -1534,20 +1534,6 @@ pub fn clear_done(vault: &mut Vault, target: NRef) -> std::io::Result<usize> {
     }
     trash_nested(vault, &nested)?;
     Ok(done + n_block_tops)
-}
-
-/// A node's parent in the resolved tree: within its file, or — for a block
-/// root — the embed that stitches it in (§4.7).
-fn resolved_parent(tree: &crate::tree::Tree, r: NRef) -> Option<NRef> {
-    let p = tree.node(r).parent?;
-    let pr = (r.0, p);
-    if tree.node(pr).kind == Kind::Root && r.0 != tree.root.0 {
-        tree.embed_of(tree.node(r).block.as_ref()?.id.as_ref()?)
-    } else if tree.node(pr).kind == Kind::Root {
-        None
-    } else {
-        Some(pr)
-    }
 }
 
 // --------------------------------------------------------------- make block
