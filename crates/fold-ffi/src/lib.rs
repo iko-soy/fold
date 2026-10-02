@@ -428,7 +428,7 @@ impl Session {
     }
 
     pub fn copy(&self, key: String) -> OpResult {
-        self.lock().copy(&key)
+        self.lock().with_editor_as_is(|s| s.copy(&key))
     }
 
     pub fn paste(&self, key: String, after: bool) -> OpResult {
@@ -504,21 +504,11 @@ impl Session {
     /// Undo the last change; with `mark`, only if it is still the change
     /// the mark names.
     pub fn undo(&self, mark: Option<UndoMark>) -> OpResult {
-        let mut s = self.lock();
-        if let Some(m) = mark {
-            let top = s.log.last_undo().map(|e| e.description.as_str());
-            if s.log.depth() as u32 != m.depth || top != Some(m.description.as_str()) {
-                return State::refused(match top {
-                    Some(d) => format!("not undone: the last change is now {}", d),
-                    None => "nothing to undo".into(),
-                });
-            }
-        }
-        s.undo_redo(true)
+        self.lock().with_editor_as_is(|s| s.undo(mark))
     }
 
     pub fn redo(&self) -> OpResult {
-        self.lock().undo_redo(false)
+        self.lock().with_editor_as_is(|s| s.undo_redo(false))
     }
 
     // ------------------------------------------------------------ files
@@ -1112,6 +1102,15 @@ impl State {
         r
     }
 
+    /// Run a verb that writes nothing an open editor shows, or is refused
+    /// while it is open: the result names the generation the text field's
+    /// updates carry still, as every result does (§10.6).
+    fn with_editor_as_is(&mut self, f: impl FnOnce(&mut State) -> OpResult) -> OpResult {
+        let mut r = f(self);
+        r.editor_generation = self.edit_generation;
+        r
+    }
+
     /// Run a verb as one op-log entry (§10.10): the entry holds exactly the
     /// files the verb changed, written before a failure too.
     fn verb(&mut self, desc: &str, f: Verb<'_>) -> OpResult {
@@ -1507,6 +1506,21 @@ impl State {
                 Ok((format!("{} file{} rewritten or renamed", n, if n == 1 { "" } else { "s" }), None))
             }),
         )
+    }
+
+    /// Undo the last change; with `mark`, only if it is still the change
+    /// the mark names.
+    fn undo(&mut self, mark: Option<UndoMark>) -> OpResult {
+        if let Some(m) = mark {
+            let top = self.log.last_undo().map(|e| e.description.as_str());
+            if self.log.depth() as u32 != m.depth || top != Some(m.description.as_str()) {
+                return Self::refused(match top {
+                    Some(d) => format!("not undone: the last change is now {}", d),
+                    None => "nothing to undo".into(),
+                });
+            }
+        }
+        self.undo_redo(true)
     }
 
     fn undo_redo(&mut self, undo: bool) -> OpResult {

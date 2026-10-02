@@ -381,11 +381,12 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
             say("the node being edited is gone")
             return
         }
+        // a new generation comes with new text, as in `refresh`
         r.editorText?.let { text ->
             val sel = ed.value.selection
             ed.value = TextFieldValue(text, TextRange(sel.start.coerceAtMost(text.length), sel.end.coerceAtMost(text.length)))
+            ed.generation = r.editorGeneration
         }
-        ed.generation = r.editorGeneration
     }
 
     fun openMenu(key: String) {
