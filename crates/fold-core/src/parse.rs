@@ -529,10 +529,6 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
     // file produces.
     let mut block_root: Option<usize> = None;
 
-    // Pending setext: (title line index, title line indent) — a plain body
-    // line that may become a section if the next line is an underline.
-    let mut pending_setext: Option<(usize, usize)> = None;
-
     let mut i = start_line;
     while i < n {
         let raw = lines[i].raw.clone();
@@ -541,7 +537,6 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
         let lnext = lines[i].next;
 
         if fence_transition(&raw, &mut fence) {
-            pending_setext = None;
             push_body(&mut nodes, &mut stack, &lines, i, block_root);
             i += 1;
             continue;
@@ -551,42 +546,14 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
             i += 1;
             continue;
         }
-        // Setext underline?
-        if let Some(level) = setext_level(&raw) {
-            if let Some((title_li, title_indent)) = pending_setext.take() {
-                let idx = make_setext_section(
-                    &mut nodes,
-                    &mut stack,
-                    &lines,
-                    title_li,
-                    title_indent,
-                    i,
-                    level,
-                    block_root,
-                );
-                // like any title line, a setext heading can be a block
-                // file's root (§4.9); its title line was then reported as
-                // text before the root, which it is not
-                if nodes[idx].parent == Some(root_idx) {
-                    root_level_nodes += 1;
-                    if is_block_file && !root_title_seen {
-                        root_title_seen = true;
-                        block_root = Some(idx);
-                        let at = nodes[idx].title_span.start;
-                        diagnostics.retain(|d: &Diag| d.span.start != at);
-                    }
-                }
-                i += 1;
-                continue;
-            }
-            // Not a setext: a `---` after a blank or structure is a break (body).
+        // an underline under no plain line is text
+        if setext_level(&raw).is_some() {
             push_body(&mut nodes, &mut stack, &lines, i, block_root);
             i += 1;
             continue;
         }
         match classify_title(&raw) {
             Some((indent, info)) => {
-                pending_setext = None;
                 let is_embed = matches!(info.kind, TitleKind::Embed(..));
                 // Pop until the top can contain this node (§3.1). A node's
                 // parent is the nearest section above it, or the nearest item
@@ -730,12 +697,20 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
                 i += 1;
             }
             None => {
-                // Candidate setext title: a single non-blank plain line that
-                // belongs to the current node (its indent reaches the node).
-                if !raw.trim().is_empty() {
-                    pending_setext = Some((i, indent_cols(&raw, &mut false)));
-                } else {
-                    pending_setext = None;
+                // a plain line over an underline is a setext heading, and
+                // like any title line can be a block file's root (§4.9)
+                let underline = lines.get(i + 1).and_then(|l| setext_level(&l.raw));
+                if let Some(level) = underline.filter(|_| !raw.trim().is_empty()) {
+                    let idx = make_setext_section(&mut nodes, &mut stack, &lines, i, level, block_root);
+                    if nodes[idx].parent == Some(root_idx) {
+                        root_level_nodes += 1;
+                        if is_block_file && !root_title_seen {
+                            root_title_seen = true;
+                            block_root = Some(idx);
+                        }
+                    }
+                    i += 2;
+                    continue;
                 }
                 if is_block_file && !root_title_seen && !raw.trim().is_empty() {
                     diagnostics.push(Diag {
@@ -818,44 +793,7 @@ fn push_body(
     block_root: Option<usize>,
 ) {
     let line = &lines[i];
-    // A body line belongs to the deepest node whose region it reaches
-    // (§3.3): for items, lines indented at least indent+2; for sections and
-    // the root, anything that is not a more-indented item's region. Items
-    // that own the line stop the walk; items that don't are looked through.
-    while stack.len() > 1 {
-        let top = stack.last().unwrap();
-        let tnode = &nodes[top.node];
-        let blank = line.raw.trim().is_empty();
-        let reaches = if blank {
-            true
-        } else {
-            match tnode.kind {
-                Kind::Item => {
-                    let mut t = false;
-                    let ind = indent_cols(&line.raw, &mut t);
-                    if ind >= top.indent + 2 {
-                        true // the item owns this line
-                    } else {
-                        stack.pop();
-                        continue; // look through to the item's parent
-                    }
-                }
-                Kind::Section => {
-                    let mut t = false;
-                    if indent_cols(&line.raw, &mut t) < top.indent {
-                        stack.pop();
-                        continue; // outdented past a section under an item
-                    }
-                    true
-                }
-                Kind::Root => true,
-            }
-        };
-        if reaches {
-            break;
-        }
-        stack.pop();
-    }
+    pop_to_owner(nodes, stack, line);
     let mut top = stack.last().unwrap().node;
     // column-0 text after a block file's root belongs to that root (§4.9)
     if top == 0 {
@@ -880,61 +818,46 @@ fn push_body(
     extend_spans(nodes, top, line.next);
 }
 
-/// Turn the pending title line and its underline into a section; returns
-/// its index.
-#[allow(clippy::too_many_arguments)]
+/// The frames a body line does not reach come off the stack (§3.3): it
+/// belongs to the deepest node whose region it reaches — an item's, lines
+/// indented to its child indent (indent + 2), a section's under an item,
+/// lines at its indent, the root's, any. Items and sections it does not
+/// reach are looked through. A blank line stays where it is.
+fn pop_to_owner(nodes: &[Node], stack: &mut Vec<Frame>, line: &Line) {
+    if line.raw.trim().is_empty() {
+        return;
+    }
+    let ind = indent_cols(&line.raw, &mut false);
+    while stack.len() > 1 {
+        let top = stack.last().unwrap();
+        let reaches = match nodes[top.node].kind {
+            Kind::Item => ind >= top.indent + 2,
+            Kind::Section => ind >= top.indent,
+            Kind::Root => true,
+        };
+        if reaches {
+            break;
+        }
+        stack.pop();
+    }
+}
+
+/// A plain line over a `=` underline: a section (§4.2); returns its index.
+/// It goes where the line would go as text, but in no frame that could not
+/// hold the ATX heading of its level there, so writing it as one keeps it
+/// where it is.
 fn make_setext_section(
     nodes: &mut Vec<Node>,
     stack: &mut Vec<Frame>,
     lines: &[Line],
     title_li: usize,
-    title_indent: usize,
-    underline_li: usize,
     level: usize,
     block_root: Option<usize>,
 ) -> usize {
-    // The title line is the last text line pushed, so it ends the last text
-    // child of the node push_body gave it to: the top frame's, or a block
-    // file's root when that is the Root (§4.9). Take it back out, with the
-    // adoption note that came with it.
     let title = lines[title_li].raw.trim().to_string();
-    let underline = &lines[underline_li];
-    let tl = &lines[title_li];
-    {
-        let mut owner = stack.last().unwrap().node;
-        if owner == 0 {
-            if let Some(br) = block_root {
-                owner = br;
-                let note = "column-0 text in a block file, adopted by its root";
-                if nodes[br].noncanonical.last().is_some_and(|n| n == note) {
-                    nodes[br].noncanonical.pop();
-                }
-            }
-        }
-        let nd = &mut nodes[owner];
-        if let Some(Content::Text(sp)) = nd.content.last_mut() {
-            if sp.end == tl.next {
-                sp.end = tl.start;
-                if sp.start >= sp.end {
-                    nd.content.pop();
-                }
-            }
-        }
-        // push_body grew the owner's span, and its ancestors', over the
-        // title line: give that back too, so a node the new section does not
-        // sit in ends before it (sibling spans never overlap). The section's
-        // own ancestors are grown again below.
-        let mut cur = Some(owner);
-        while let Some(c) = cur {
-            if nodes[c].span.end == tl.next {
-                nodes[c].span.end = tl.start;
-            }
-            cur = nodes[c].parent;
-        }
-    }
-    // Pop frames that can't contain a section at this position: those that
-    // could not contain the ATX heading of its level there (§4.2), so
-    // writing it as one keeps it where it is.
+    let title_indent = indent_cols(&lines[title_li].raw, &mut false);
+    let underline = &lines[title_li + 1];
+    pop_to_owner(nodes, stack, &lines[title_li]);
     loop {
         let top = stack.last().unwrap();
         let tnode = &nodes[top.node];
