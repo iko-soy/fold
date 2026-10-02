@@ -54,6 +54,9 @@ pub struct OpResult {
     pub message: String,
     /// The node the verb acted on or made, where it is now.
     pub node: Option<String>,
+    /// The op-log entry the verb made, for its message to offer to undo
+    /// (§10.10): taken with the verb, so a change made since is never it.
+    pub undo: Option<UndoMark>,
     /// A verb run while the editor is open saves it first and re-renders it
     /// over what it wrote (§10.6): its new text, the generation the text
     /// field's updates now name, and whether its node is gone and it closed.
@@ -68,6 +71,7 @@ impl OpResult {
             ok,
             message: message.into(),
             node,
+            undo: None,
             editor_text: None,
             editor_generation: 0,
             editor_closed: false,
@@ -1116,11 +1120,16 @@ impl State {
     fn verb(&mut self, desc: &str, f: Verb<'_>) -> OpResult {
         let snap = ops::Snapshot::take(&self.vault, desc);
         let res = f(self);
-        self.record_undo(snap);
-        match res {
+        let recorded = self.log.record(ops::Inverse::since(snap, &self.vault));
+        let mut r = match res {
             Ok((message, node)) => OpResult::new(true, message, node),
             Err(message) => OpResult::new(false, message, None),
-        }
+        };
+        r.undo = self.log.last_undo().filter(|_| recorded).map(|e| UndoMark {
+            depth: self.log.depth() as u32,
+            description: e.description.clone(),
+        });
+        r
     }
 
     fn refused(message: impl Into<String>) -> OpResult {
@@ -1129,10 +1138,6 @@ impl State {
 
     fn gone() -> OpResult {
         Self::refused("that node is gone")
-    }
-
-    fn record_undo(&mut self, snap: ops::Snapshot) {
-        self.log.record(ops::Inverse::since(snap, &self.vault));
     }
 
     fn toggle_task(&mut self, key: &str) -> OpResult {

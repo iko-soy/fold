@@ -175,11 +175,9 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
         _messages.tryEmit(Message(text, action))
     }
 
-    /** Offer to undo what was just done: the change now on top of the op log. */
-    private fun sayUndoable(text: String) {
-        val o = outline
-        val mark = o?.undo?.let { UndoMark(o.undoDepth, it) }
-        _messages.tryEmit(Message(text, if (mark != null) Message.Action.Undo else null, mark))
+    /** Offer to undo what a verb just did: the op-log entry it made, named with it. */
+    private fun sayUndoable(r: OpResult) {
+        _messages.tryEmit(Message(r.message, if (r.undo != null) Message.Action.Undo else null, r.undo))
     }
 
     private suspend fun <T> core(f: (Session) -> T): T? {
@@ -364,7 +362,7 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
             }
             reload()
             if (r.ok) r.node?.let { highlight = it }
-            if (r.ok && undoable) sayUndoable(r.message) else say(r.message)
+            if (r.ok && undoable) sayUndoable(r) else say(r.message)
         }
     }
 
@@ -538,7 +536,7 @@ class FoldViewModel(app: Application) : AndroidViewModel(app) {
                 if (view.zoom == key) applyView(view.copy(zoom = r.node))
             }
             reload()
-            if (r.ok) sayUndoable(r.message) else say(r.message)
+            if (r.ok) sayUndoable(r) else say(r.message)
         }
     }
 

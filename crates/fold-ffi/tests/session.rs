@@ -1,6 +1,4 @@
-//! The text field's generation (§10.6), as the app uses it: every result
-//! of a verb run while the editor is open names the generation the field's
-//! updates carry from then on (`FoldViewModel.settle`).
+//! The session as the app uses it (`FoldViewModel`).
 
 use fold_ffi::{OutlineQuery, Session};
 use std::sync::Arc;
@@ -17,6 +15,9 @@ fn key(s: &Session, title: &str) -> String {
     s.outline(q).rows.into_iter().find(|r| r.title == title).unwrap().key
 }
 
+/// Every result of a verb run while the editor is open names the
+/// generation the text field's updates carry from then on (§10.6), and the
+/// app takes it (`settle`).
 #[test]
 fn verbs_that_leave_the_editor_alone_keep_its_generation() {
     let (dir, s) = open("- [ ] a\n- b\n");
@@ -34,4 +35,23 @@ fn verbs_that_leave_the_editor_alone_keep_its_generation() {
     assert!(s.edit_close().ok);
     let text = std::fs::read_to_string(dir.path().join("root.md")).unwrap();
     assert!(text.contains("- b and c"), "{}", text);
+}
+
+/// A message offers to undo the entry its own verb made (§10.10), named
+/// with the verb: a second change made before the message shows does not
+/// take its place.
+#[test]
+fn each_verb_names_its_own_undo_entry() {
+    let (_dir, s) = open("- [ ] a\n- [ ] b\n");
+    let first = s.toggle_task(key(&s, "a")).undo.unwrap();
+    let second = s.toggle_task(key(&s, "b")).undo.unwrap();
+    assert_ne!(first.description, second.description);
+    // nothing written, nothing to offer
+    assert!(s.copy(key(&s, "a")).undo.is_none());
+    // the first message's Undo, tapped after the second change, takes
+    // nothing back; the second's takes back its own
+    assert!(!s.undo(Some(first)).ok);
+    let r = s.undo(Some(second));
+    assert!(r.ok, "{}", r.message);
+    assert!(r.message.contains("b"), "{}", r.message);
 }
