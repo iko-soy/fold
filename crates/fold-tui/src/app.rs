@@ -301,16 +301,13 @@ impl App {
         use notify::{RecursiveMode, Watcher};
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = self.vault.dir.clone();
-        match notify::recommended_watcher(move |res| {
+        if let Ok(mut w) = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         }) {
-            Ok(mut w) => {
-                if w.watch(&dir, RecursiveMode::Recursive).is_ok() {
-                    self.watcher = Some(w);
-                    self.watch_rx = Some(rx);
-                }
+            if w.watch(&dir, RecursiveMode::Recursive).is_ok() {
+                self.watcher = Some(w);
+                self.watch_rx = Some(rx);
             }
-            Err(_) => {}
         }
     }
 

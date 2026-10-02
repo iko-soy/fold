@@ -70,7 +70,7 @@ impl Inverse {
                 });
             }
         }
-        (!changes.is_empty()).then(|| Inverse {
+        (!changes.is_empty()).then_some(Inverse {
             changes,
             description: snap.description,
         })
@@ -450,8 +450,7 @@ fn append_child_line(
     // §4.2 puts one blank line between a node's body and its first child:
     // an item with no body has its first child right under its title
     let bare_item = node.kind == Kind::Item && node.body_lines(&text).is_empty();
-    let index;
-    match (first_section, section_ok) {
+    let index = match (first_section, section_ok) {
         (Some(_), true) => {
             // a section sibling of the last section child
             let last = *kids.last().unwrap();
@@ -471,7 +470,7 @@ fn append_child_line(
             );
             let pos = trimmed_end(&text, node.span);
             insert_at(vault, file, pos, "\n\n", &heading)?;
-            index = kids.len();
+            kids.len()
         }
         (Some(fs), false) => {
             // before the first section child, after the items and body
@@ -487,7 +486,7 @@ fn append_child_line(
                 Span { start: pos, end: pos },
                 &format!("{}{}\n", sep, line_indented),
             )?;
-            index = fs;
+            fs
         }
         (None, _) => {
             let line_indented = format!("{}{}", " ".repeat(indent), line);
@@ -497,9 +496,9 @@ fn append_child_line(
             let prev_is_item = kids.last().map(|&c| !is_section(c)).unwrap_or(bare_item);
             let sep = if prev_is_item { "\n" } else { "\n\n" };
             insert_at(vault, file, pos, sep, &line_indented)?;
-            index = kids.len();
+            kids.len()
         }
-    }
+    };
     let parent = vault
         .find_by_key(&parent_key)
         .ok_or_else(|| io_err("parent lost after the write"))?;
@@ -1972,5 +1971,5 @@ fn not_a_break(line: &str) -> std::io::Result<()> {
 }
 
 fn io_err(msg: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, msg.to_string())
+    std::io::Error::other(msg.to_string())
 }

@@ -730,12 +730,9 @@ pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
     // A text child right after a child node, with no blank line between,
     // reads here as the parent's text but in CommonMark as a continuation of
     // that node: canonical form separates them (§4.2).
-    for n in 0..nodes.len() {
-        let tight = unseparated_text(&nodes[n], text);
-        if !tight.is_empty() {
-            nodes[n]
-                .noncanonical
-                .push("text right after a child node without a blank line".into());
+    for node in nodes.iter_mut() {
+        if !unseparated_text(node, text).is_empty() {
+            node.noncanonical.push("text right after a child node without a blank line".into());
         }
     }
 
@@ -786,7 +783,7 @@ pub(crate) fn ends_with_blank_line(s: &str) -> bool {
 }
 
 fn push_body(
-    nodes: &mut Vec<Node>,
+    nodes: &mut [Node],
     stack: &mut Vec<Frame>,
     lines: &[Line],
     i: usize,
@@ -914,7 +911,7 @@ fn make_setext_section(
     idx
 }
 
-fn extend_spans(nodes: &mut Vec<Node>, idx: usize, end: usize) {
+fn extend_spans(nodes: &mut [Node], idx: usize, end: usize) {
     let mut cur = Some(idx);
     while let Some(c) = cur {
         if nodes[c].span.end < end {

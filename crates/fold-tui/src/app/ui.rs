@@ -441,22 +441,24 @@ impl App {
         self.zoom_root.map(|z| self.vault.tree.chain(z)).unwrap_or_default()
     }
 
-    fn button(&mut self, buf: &mut Buffer, x: u16, y: u16, a: Action, target: Option<NRef>, compact: bool, max: u16) -> u16 {
+    /// A button for `a` at the start of `room`, as wide as its text and no
+    /// wider than `room`; returns its width.
+    fn button(&mut self, buf: &mut Buffer, room: Rect, a: Action, target: Option<NRef>, compact: bool) -> u16 {
         let compact = compact || a == Action::NodeMenu;
         let text = match (a.icon(), compact) {
             (Some(i), true) => format!(" {} ", i),
             (Some(i), false) => format!(" {} {} ", i, a.label()),
             (None, _) => format!(" {} ", a.label()),
         };
-        let w = (text.width() as u16).min(max);
-        let r = Rect { x, y, width: w, height: 1 };
+        let w = (text.width() as u16).min(room.width);
+        let r = Rect { width: w, height: 1, ..room };
         let bg = if self.ui.hovered(r) { theme::BUTTON_HOVER } else { theme::BUTTON };
         let style = match self.action_on(a) {
             // a toggle that is on reads like a pressed key
             Some(true) => Style::default().bg(theme::SEL).fg(ratatui::style::Color::White).add_modifier(Modifier::BOLD),
             _ => Style::default().bg(bg).fg(ratatui::style::Color::White),
         };
-        put(buf, x, y, &text, w, style);
+        put(buf, r.x, r.y, &text, w, style);
         self.ui.push(r, Hit::Button(a, target));
         w
     }
@@ -489,7 +491,8 @@ impl App {
         let mut x = right.saturating_sub(w);
         let start = x;
         for &a in actions {
-            let used = self.button(buf, x, y, a, target, compact, right.saturating_sub(x));
+            let room = Rect { x, y, width: right.saturating_sub(x), height: 1 };
+            let used = self.button(buf, room, a, target, compact);
             x += used + 1;
             if x >= right {
                 break;

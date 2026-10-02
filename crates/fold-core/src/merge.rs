@@ -386,15 +386,12 @@ fn merge_pair(
     } else {
         None
     };
-    match t_props {
-        // a block conflict carries T's own properties (§12.4)
-        Some(props) => {
-            for (k, v) in props.iter().filter(|(k, _)| *k != "id" && *k != "conflict") {
-                block_text.push_str(&format!("{}: {}\n", k, v));
-            }
+    // a block conflict carries T's own properties (§12.4); a plain node's
+    // task state travels as the checkbox on its title line (§4.5)
+    if let Some(props) = t_props {
+        for (k, v) in props.iter().filter(|(k, _)| *k != "id" && *k != "conflict") {
+            block_text.push_str(&format!("{}: {}\n", k, v));
         }
-        // T's task state travels as the checkbox on its title line (§4.5)
-        None => {}
     }
     block_text.push_str("---\n\n");
     block_text.push_str(&emit_subtree(t, b, 1, 0));

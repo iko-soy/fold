@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 use fold_core::vault::{trash_dir, Vault};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "fold", version, about = "tree-shaped plain-text notes and tasks", disable_help_subcommand = true)]
@@ -227,7 +227,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn capture(dir: &PathBuf, text: &str, task: bool, to: Option<String>) -> anyhow::Result<()> {
+fn capture(dir: &Path, text: &str, task: bool, to: Option<String>) -> anyhow::Result<()> {
     let mut v = Vault::open(dir)?;
     match to {
         Some(target) => {

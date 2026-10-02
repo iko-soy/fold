@@ -99,7 +99,7 @@ pub fn slug(title: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
     for ch in title.nfc().flat_map(char::to_lowercase) {
-        if ch.is_whitespace() {
+        if ch.is_whitespace() || ch == '-' {
             if !last_dash && !out.is_empty() {
                 out.push('-');
                 last_dash = true;
@@ -107,11 +107,6 @@ pub fn slug(title: &str) -> String {
         } else if ch.is_alphanumeric() {
             out.push(ch);
             last_dash = false;
-        } else if ch == '-' {
-            if !last_dash && !out.is_empty() {
-                out.push('-');
-                last_dash = true;
-            }
         }
         // everything else is removed
     }

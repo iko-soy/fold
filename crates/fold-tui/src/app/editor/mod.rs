@@ -97,6 +97,15 @@ enum Group {
     Typing,
 }
 
+/// Every line's screen rows, for the text (`changes`) and the width they
+/// were made for, and which lines sit inside fenced code.
+struct Layout {
+    changes: u64,
+    width: Option<usize>,
+    rows: Vec<Vec<Row>>,
+    code: Vec<bool>,
+}
+
 /// The text before a change, and where the cursor was.
 struct Snap {
     text: Snapshot,
@@ -127,7 +136,7 @@ pub struct Editor {
     /// Columns to wrap at (set by the renderer); `None` means no wrapping.
     pub wrap_cols: Option<usize>,
     /// Screen rows of every line, for the text and width they were made for.
-    layout: Option<(u64, Option<usize>, Vec<Vec<Row>>, Vec<bool>)>,
+    layout: Option<Layout>,
     /// The screen column vertical moves by screen row aim for.
     want_x: Option<usize>,
     want_col: Option<usize>,
@@ -284,10 +293,7 @@ impl Editor {
     /// The selected range as `[start, end)` in document order, for drawing.
     pub fn selection(&self) -> Option<(Pos, Pos)> {
         let a = self.anchor?;
-        let inclusive = match self.keys {
-            Keys::Normal => false,
-            _ => true,
-        };
+        let inclusive = self.keys != Keys::Normal;
         if let Mode::Visual { line: true } = self.mode {
             let (s, e) = order(a, self.cursor);
             return Some((Pos::new(s.line, 0), Pos::new(e.line, self.len(e.line))));
@@ -537,7 +543,7 @@ impl Editor {
     /// Every line's screen rows (§10.1): prose wraps at spaces, lines inside
     /// fenced code break hard. Cached until the text or width changes.
     pub fn layout(&mut self) -> &Vec<Vec<Row>> {
-        let fresh = matches!(&self.layout, Some((c, w, _, _)) if *c == self.changes && *w == self.wrap_cols);
+        let fresh = matches!(&self.layout, Some(l) if l.changes == self.changes && l.width == self.wrap_cols);
         if !fresh {
             let mut rows = Vec::with_capacity(self.lines());
             let mut codes = Vec::with_capacity(self.lines());
@@ -553,15 +559,15 @@ impl Editor {
                     None => vec![Row { start: 0, end: text.chars().count(), indent: 0 }],
                 });
             }
-            self.layout = Some((self.changes, self.wrap_cols, rows, codes));
+            self.layout = Some(Layout { changes: self.changes, width: self.wrap_cols, rows, code: codes });
         }
-        &self.layout.as_ref().unwrap().2
+        &self.layout.as_ref().unwrap().rows
     }
 
     /// Which lines sit inside fenced code (they break hard, with `↪`).
     pub fn code_lines(&mut self) -> Vec<bool> {
         self.layout();
-        self.layout.as_ref().unwrap().3.clone()
+        self.layout.as_ref().unwrap().code.clone()
     }
 
     /// Screen row (counted over the whole buffer) and column of a position.
@@ -911,7 +917,7 @@ impl Editor {
             // a run of indentation goes back one level at a time
             let line = self.line(self.cursor.line);
             let col = self.cursor.col;
-            let n = if col >= 2 && col % 2 == 0 && line.chars().take(col).all(|c| c == ' ') { 2 } else { 1 };
+            let n = if col >= 2 && col.is_multiple_of(2) && line.chars().take(col).all(|c| c == ' ') { 2 } else { 1 };
             let start = if n == 2 { Pos::new(self.cursor.line, col - 2) } else { p };
             self.delete(start, self.cursor);
             self.cursor = start;
