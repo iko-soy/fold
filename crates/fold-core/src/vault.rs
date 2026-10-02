@@ -44,23 +44,43 @@ impl Vault {
 
     /// Rebuild the index from the vault (§11.3).
     pub fn reload(&mut self) -> std::io::Result<()> {
-        let mut files: Vec<ParsedFile> = Vec::new();
-        for (name, text) in self.read_files()? {
-            let fm = parse_frontmatter(&text);
-            let idx = files.len();
-            let block = Block {
-                // root.md is the one file without an id
-                id: if idx == 0 { None } else { fm.as_ref().and_then(file_id) },
-                path: name.clone(),
-                props: fm.as_ref().map(|f| f.props.clone()).unwrap_or_default(),
-                frontmatter_raw: fm.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
-                frontmatter_span: fm.as_ref().map(|f| f.span),
-            };
-            files.push(parse_file(&name, &text, idx, Some(block)));
-        }
-
+        let files = self.read_files()?.iter().map(|(name, text)| parse_vault_file(name, text)).collect();
         // Stitch: collect blocks, resolve embed edges (§4.7).
         self.tree = Tree::new(files);
+        Ok(())
+    }
+
+    /// Take a file this vault has just written into the index, where a
+    /// reload would put it (`root.md` first, then by name), without reading
+    /// any other file again: what another program changed in them since
+    /// they were read is not taken in as part of the operation, nor into its
+    /// op-log entry, so undoing the operation cannot revert it (§10.10).
+    /// Node references into the files after it move up one place. A file
+    /// the index holds already is parsed again in its place.
+    pub fn add_file(&mut self, name: &str, text: &str) {
+        if let Some(i) = self.file_index(name) {
+            self.tree.files[i] = parse_vault_file(name, text);
+            self.tree.restitch();
+            return;
+        }
+        let at = self
+            .tree
+            .files
+            .iter()
+            .skip(1)
+            .position(|f| f.path.as_str() > name)
+            .map_or(self.tree.files.len(), |i| i + 1);
+        self.tree.files.insert(at, parse_vault_file(name, text));
+        self.tree.restitch();
+    }
+
+    /// Rename a file the index holds, on disk and in the index, which
+    /// keeps the order a reload gives it; nothing else is read again (see
+    /// `add_file`). Node references into the files from it on may move.
+    pub fn rename_file(&mut self, file: usize, name: &str) -> std::io::Result<()> {
+        std::fs::rename(self.dir.join(&self.tree.files[file].path), self.dir.join(name))?;
+        let f = self.tree.files.remove(file);
+        self.add_file(name, &f.text);
         Ok(())
     }
 
@@ -96,7 +116,7 @@ impl Vault {
                 Some(t) => t,
                 None => continue,
             };
-            if parse_frontmatter(&text).as_ref().and_then(file_id).is_none() {
+            if parse_frontmatter(&text).as_ref().and_then(Frontmatter::id).is_none() {
                 continue; // ignored: never parsed (§4.1)
             }
             files.push((name, text));
@@ -115,7 +135,7 @@ impl Vault {
             }))
     }
 
-    /// Files ignored by the parser, for `notes check` (§4.1).
+    /// Files ignored by the parser, for `fold check` (§4.1).
     pub fn ignored_files(&self) -> std::io::Result<Vec<IgnoredFile>> {
         let mut out = Vec::new();
         for e in std::fs::read_dir(&self.dir)?.filter_map(|e| e.ok()) {
@@ -207,30 +227,16 @@ impl Vault {
             .nodes
             .iter()
             .find_map(|n| n.block.clone());
+        let fm = parse_frontmatter(text);
         let block = if path == "root.md" {
-            Some(Block {
-                id: None,
-                path: path.clone(),
-                props: parse_frontmatter(text).map(|f| f.props).unwrap_or_default(),
-                frontmatter_raw: parse_frontmatter(text).map(|f| f.raw).unwrap_or_default(),
-                frontmatter_span: parse_frontmatter(text).map(|f| f.span),
-            })
+            Some(Block::new(&path, None, fm.as_ref()))
         } else {
             old_block.map(|mut b| {
-                let fm = parse_frontmatter(text);
-                if let Some(f) = fm.as_ref() {
-                    b.props = f.props.clone();
-                    b.frontmatter_raw = f.raw.clone();
-                    b.frontmatter_span = Some(f.span);
-                } else {
-                    b.props.clear();
-                    b.frontmatter_raw.clear();
-                    b.frontmatter_span = None;
-                }
+                b.set_frontmatter(fm.as_ref());
                 b
             })
         };
-        self.tree.files[file] = parse_file(&path, text, file, block);
+        self.tree.files[file] = parse_file(&path, text, block);
         self.tree.restitch();
         Ok(())
     }
@@ -269,12 +275,6 @@ impl Vault {
         let target = trash_target(&trash, &path);
         move_file(&self.dir.join(&path), &target)?;
         self.tree.files.remove(file);
-        // the files after it move down one place
-        for (fi, f) in self.tree.files.iter_mut().enumerate().skip(file) {
-            for n in &mut f.nodes {
-                n.file = fi;
-            }
-        }
         self.tree.restitch();
         Ok(())
     }
@@ -320,7 +320,7 @@ fn trash_target(trash: &Path, name: &str) -> PathBuf {
 pub fn trash_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "fold")
         .map(|p| p.state_dir().unwrap_or(p.data_dir()).join("trash"))
-        .unwrap_or_else(|| PathBuf::from(".notes-trash"))
+        .unwrap_or_else(|| PathBuf::from(".fold-trash"))
 }
 
 /// Write to `.<name>.fold-tmp`, fsync, rename (§11.1).
@@ -350,9 +350,12 @@ pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// A file's id, from its frontmatter's `id` key, if it validates (§2).
-fn file_id(fm: &Frontmatter) -> Option<Id> {
-    fm.props.get("id").and_then(|v| Id::parse(v))
+/// Parse a vault file as a reload reads it: `root.md` is the one file
+/// without an id; any other is a block file, by the id it holds (§4.9).
+fn parse_vault_file(name: &str, text: &str) -> ParsedFile {
+    let fm = parse_frontmatter(text);
+    let id = if name == "root.md" { None } else { fm.as_ref().and_then(Frontmatter::id) };
+    parse_file(name, text, Some(Block::new(name, id, fm.as_ref())))
 }
 
 /// Read a vault `.md` file as text; `None` for anything that is not a
@@ -518,13 +521,10 @@ impl Vault {
         }
         // 2. path
         if text.contains('/') {
-            let rel = text.strip_prefix("./");
+            if text.starts_with("./") {
+                return Err("./ relative resolution needs a zoom root".into());
+            }
             let segs: Vec<String> = text.split('/').map(|s| s.trim().to_string()).collect();
-            let base = match rel {
-                Some(_) => return Err("./ relative resolution needs a zoom root".into()),
-                None => self.tree.root,
-            };
-            let _ = base;
             // a path that matches twice is an ambiguity, never a guess
             let found = self.find_all_by_path(&segs);
             return match found.len() {

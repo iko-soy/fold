@@ -296,19 +296,6 @@ fn title_text(title: &str) -> String {
     super::wrap::shown(title, 0, usize::MAX)
 }
 
-/// Where a conflict copy came from (§12.4), as the screen says it: the
-/// merge's *PHONE 20260927-100000* reads *PHONE 09-27 10:00*. A value
-/// written otherwise is shown as it is.
-fn copy_from(conflict: &str) -> String {
-    let Some((device, t)) = conflict.rsplit_once(' ') else { return conflict.to_string() };
-    let digits = |r: std::ops::Range<usize>| t.get(r).is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()));
-    if t.len() == 15 && t.as_bytes()[8] == b'-' && digits(0..8) && digits(9..15) {
-        format!("{} {}-{} {}:{}", device, &t[4..6], &t[6..8], &t[9..11], &t[11..13])
-    } else {
-        conflict.to_string()
-    }
-}
-
 /// A conflict copy's device alone, for *conflict copy from PHONE*.
 fn copy_device(conflict: &str) -> &str {
     conflict.rsplit_once(' ').map_or(conflict, |(d, _)| d)
@@ -797,7 +784,7 @@ impl App {
                 let px = if meta_w > 0 { meta_x + meta_w + 2 } else { meta_x };
                 // where a copy's text would go, whose copy it is
                 let (preview, look) = match copy {
-                    Some(c) => (format!("other device · {}", copy_from(c)), base.fg(theme::DIM)),
+                    Some(c) => (format!("other device · {}", fold_core::merge::copy_from(c)), base.fg(theme::DIM)),
                     None => (self.preview(row.nref), base.fg(theme::DIM).add_modifier(Modifier::ITALIC)),
                 };
                 if !preview.is_empty() && px + 4 < right {
@@ -904,7 +891,7 @@ impl App {
                 shown.push((Some(i), l.clone()));
                 if let fold_core::reading::LineRef::Title(t) = doc.refs[i] {
                     if let Some(c) = self.vault.tree.node(t).conflict() {
-                        copies.push((i, copy_from(c)));
+                        copies.push((i, fold_core::merge::copy_from(c)));
                     }
                 }
             }
@@ -1490,7 +1477,7 @@ impl App {
     }
 
     fn draw_conflict(&mut self, f: &mut Frame, area: Rect) {
-        let pairs = self.view_pairs();
+        let pairs = fold_core::merge::conflict_pairs_in_order(&self.vault);
         let buf = f.buffer_mut();
         let head = Rect { height: 1, ..area };
         buf.set_style(head, Style::default().bg(theme::BAR));
@@ -1514,7 +1501,7 @@ impl App {
         let half = body.width / 2;
         let left = Rect { width: half, ..body };
         let right = Rect { x: body.x + half, width: body.width - half, ..body };
-        let who = self.vault.tree.node(theirs).conflict().map(copy_from).unwrap_or_default();
+        let who = self.vault.tree.node(theirs).conflict().map(fold_core::merge::copy_from).unwrap_or_default();
         for (rect, r, title, color) in [
             (left, ours, " This device ".to_string(), theme::ACCENT),
             (right, theirs, format!(" Other device · {} ", who), theme::WARN),

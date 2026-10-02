@@ -8,11 +8,11 @@
 
 mod edit;
 mod keys;
-mod news;
 
 use edit::TextEditor;
 use fold_core::edit::{open_editor, OwnerInfo};
 use fold_core::ident::Id;
+use fold_core::news;
 use fold_core::ops;
 use fold_core::parse::{Kind, TaskState};
 use fold_core::render::{render, render_lines, LineKind};
@@ -301,8 +301,7 @@ pub struct Session {
 
 struct State {
     vault: Vault,
-    undo: Vec<ops::Inverse>,
-    redo: Vec<ops::Inverse>,
+    log: ops::OpLog,
     /// The register (§10.3 `y`/`d`): text, what it is, its spelling.
     register: Option<(String, String, Kind)>,
     editor: Option<TextEditor>,
@@ -315,9 +314,6 @@ struct State {
     /// The editor's text as it was when *Revert* could not copy it to the
     /// trash: *Revert* again on the same text drops it.
     edit_uncopied: Option<String>,
-    /// The file of each block an editor save left in transit (§5.2), with
-    /// the length of `undo` once that save's entry was in (§10.10).
-    edit_transit: Vec<(String, usize)>,
     /// The sync-conflict copies the last look at the files listed, and
     /// still there after it: a new one is a change to take in (§11.2).
     conflict_copies: Vec<String>,
@@ -332,14 +328,12 @@ impl Session {
         Ok(Arc::new(Session {
             state: Mutex::new(State {
                 vault,
-                undo: Vec::new(),
-                redo: Vec::new(),
+                log: ops::OpLog::default(),
                 register: None,
                 editor: None,
                 edit_generation: 0,
                 edit_refused: false,
                 edit_uncopied: None,
-                edit_transit: Vec::new(),
                 // none yet: the first look at the files merges any there
                 // (§12.2, the startup scan)
                 conflict_copies: Vec::new(),
@@ -407,12 +401,8 @@ impl Session {
 
     /// `fold check` (§15.7).
     pub fn diagnostics(&self) -> Vec<String> {
-        let s = self.lock();
-        let mut out: Vec<String> = fold_core::check::check(&s.vault).iter().map(|d| d.to_string()).collect();
-        if let Ok(ignored) = s.vault.ignored_files() {
-            out.extend(ignored.into_iter().map(|f| format!("{}: ignored: {}", f.path, f.reason)));
-        }
-        out
+        // ignored files among them (§4.1)
+        fold_core::check::check(&self.lock().vault).iter().map(|d| d.to_string()).collect()
     }
 
     // ------------------------------------------------------------ verbs
@@ -516,8 +506,8 @@ impl Session {
     pub fn undo(&self, mark: Option<UndoMark>) -> OpResult {
         let mut s = self.lock();
         if let Some(m) = mark {
-            let top = s.undo.last().map(|e| e.description.as_str());
-            if s.undo.len() as u32 != m.depth || top != Some(m.description.as_str()) {
+            let top = s.log.last_undo().map(|e| e.description.as_str());
+            if s.log.depth() as u32 != m.depth || top != Some(m.description.as_str()) {
                 return State::refused(match top {
                     Some(d) => format!("not undone: the last change is now {}", d),
                     None => "nothing to undo".into(),
@@ -674,18 +664,6 @@ fn spelling_of(k: Kind) -> Spelling {
     }
 }
 
-/// Where a conflict copy came from (§12.4), as the screen says it: the
-/// merge's *PHONE 20260927-100000* reads *PHONE 09-27 10:00*.
-fn copy_from(conflict: &str) -> String {
-    let Some((device, t)) = conflict.rsplit_once(' ') else { return conflict.to_string() };
-    let digits = |r: std::ops::Range<usize>| t.get(r).is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit()));
-    if t.len() == 15 && t.as_bytes()[8] == b'-' && digits(0..8) && digits(9..15) {
-        format!("{} {}-{} {}:{}", device, &t[4..6], &t[6..8], &t[9..11], &t[11..13])
-    } else {
-        conflict.to_string()
-    }
-}
-
 /// What a verb's message adds when the ordering rule chose the place (§3.1).
 fn with_rule_note(what: &str, moved: bool, kind: Kind) -> String {
     match (moved, kind) {
@@ -803,9 +781,9 @@ impl State {
             crumbs: zoom.map(|z| self.crumbs(z)).unwrap_or_default(),
             rows,
             conflicts: fold_core::merge::conflict_pairs(&self.vault).len() as u32,
-            undo: self.undo.last().map(|e| e.description.clone()),
-            redo: self.redo.last().map(|e| e.description.clone()),
-            undo_depth: self.undo.len() as u32,
+            undo: self.log.last_undo().map(|e| e.description.clone()),
+            redo: self.log.last_redo().map(|e| e.description.clone()),
+            undo_depth: self.log.depth() as u32,
             copied: self.register.as_ref().map(|(_, name, _)| name.clone()),
         }
     }
@@ -847,7 +825,7 @@ impl State {
             spelling: spelling_of(n.kind),
             task: task_of(n.task),
             block: n.is_block(),
-            conflict: n.conflict().map(copy_from),
+            conflict: n.conflict().map(fold_core::merge::copy_from),
             broken: n.is_embed(),
             has_children: !kids.is_empty(),
             folded: is_folded,
@@ -914,7 +892,7 @@ impl State {
             spelling: spelling_of(n.kind),
             task: task_of(n.task),
             block: n.is_block(),
-            conflict: n.conflict().map(copy_from),
+            conflict: n.conflict().map(fold_core::merge::copy_from),
             due: n.block.as_ref().and_then(|b| b.prop("due")).map(str::to_string),
             open,
             total,
@@ -931,7 +909,7 @@ impl State {
             spelling: spelling_of(n.kind),
             task: task_of(n.task),
             block: n.is_block(),
-            conflict: n.conflict().map(copy_from),
+            conflict: n.conflict().map(fold_core::merge::copy_from),
             paired: ops::conflict_pair(&self.vault.tree, r).len() > 1 || n.conflict().is_some(),
             path: self.crumbs(r),
         }
@@ -982,7 +960,7 @@ impl State {
                     };
                     line.task = task_of(n.task);
                     line.title = n.title.clone();
-                    line.conflict = n.conflict().map(copy_from);
+                    line.conflict = n.conflict().map(fold_core::merge::copy_from);
                     let props: Vec<String> = self
                         .properties(l.node)
                         .into_iter()
@@ -1095,27 +1073,15 @@ impl State {
         scored.into_iter().take(200).map(|(_, _, r)| self.hit(r, None)).collect()
     }
 
-    /// The unresolved pairs, first in the outline first (§10.7).
-    fn view_pairs(&self) -> Vec<(NRef, NRef)> {
-        let mut pairs = fold_core::merge::conflict_pairs(&self.vault);
-        if pairs.len() > 1 {
-            let tree = &self.vault.tree;
-            let mut order = Vec::new();
-            tree.walk(tree.root, &mut |_, r| order.push(r));
-            pairs.sort_by_key(|&(ours, _)| order.iter().position(|&r| r == ours));
-        }
-        pairs
-    }
-
     fn conflicts(&self) -> Vec<ConflictPair> {
         let tree = &self.vault.tree;
-        self.view_pairs()
+        fold_core::merge::conflict_pairs_in_order(&self.vault)
             .into_iter()
             .map(|(ours, theirs)| ConflictPair {
                 ours: self.key(ours),
                 theirs: self.key(theirs),
                 title: tree.node(ours).title.clone(),
-                from: tree.node(theirs).conflict().map(copy_from).unwrap_or_default(),
+                from: tree.node(theirs).conflict().map(fold_core::merge::copy_from).unwrap_or_default(),
                 ours_text: render(tree, ours, 1, true),
                 theirs_text: render(tree, theirs, 1, true),
             })
@@ -1167,10 +1133,7 @@ impl State {
     }
 
     fn record_undo(&mut self, snap: ops::Snapshot) {
-        if let Some(inv) = ops::Inverse::since(snap, &self.vault) {
-            self.undo.push(inv);
-            self.redo.clear();
-        }
+        self.log.record(ops::Inverse::since(snap, &self.vault));
     }
 
     fn toggle_task(&mut self, key: &str) -> OpResult {
@@ -1234,7 +1197,6 @@ impl State {
             format!("add a node {} {}", if child { "under" } else { "after" }, self.named(at))
         };
         let words = format!("added {}", quoted(title));
-        let title = title.to_string();
         self.verb(
             &desc,
             Box::new(move |s| {
@@ -1243,27 +1205,13 @@ impl State {
                     return Ok((words, Some(s.key(r))));
                 }
                 // a sibling, spelled like the node it follows (§10.3 `n`)
-                let line = match s.vault.tree.node(at).kind {
+                let kind = s.vault.tree.node(at).kind;
+                let line = match kind {
                     Kind::Section => format!("# {}\n", shown),
                     _ => format!("- {}\n", shown),
                 };
-                let k = s.vault.key_of(at);
-                let moved = ops::paste(&mut s.vault, at, &line, true).map_err(|e| format!("error: {}", e))?;
-                // the new sibling: the node after the one it follows among
-                // its siblings, past any conflict copy of it (§12.5)
-                let at = s.vault.find_by_key(&k).unwrap_or(at);
-                let parent = s.outline_parent(at).unwrap_or(s.vault.tree.root);
-                let tree = &s.vault.tree;
-                let kids = tree.resolved_children(parent);
-                let new = kids
-                    .iter()
-                    .skip_while(|&&c| c != at)
-                    .skip(1)
-                    .find(|&&c| tree.node(c).conflict().is_none() && tree.node(c).title == title)
-                    .copied()
-                    .or_else(|| kids.iter().rev().find(|&&c| tree.node(c).title == title).copied());
-                let kind = tree.node(at).kind;
-                Ok((with_rule_note(&words, moved, kind), new.map(|r| s.key(r))))
+                let p = ops::paste(&mut s.vault, at, &line, true).map_err(|e| format!("error: {}", e))?;
+                Ok((with_rule_note(&words, p.clamped, kind), Some(s.key(p.node))))
             }),
         )
     }
@@ -1309,8 +1257,8 @@ impl State {
         self.verb(
             &format!("paste {}", name),
             Box::new(move |s| {
-                let moved = ops::paste(&mut s.vault, r, &text, after).map_err(|e| format!("error: {}", e))?;
-                Ok((with_rule_note(&format!("pasted {}", name), moved, kind), None))
+                let p = ops::paste(&mut s.vault, r, &text, after).map_err(|e| format!("error: {}", e))?;
+                Ok((with_rule_note(&format!("pasted {}", name), p.clamped, kind), None))
             }),
         )
     }
@@ -1333,7 +1281,7 @@ impl State {
         let Some(sub) = self.find(key) else { return Self::gone() };
         let tree = &self.vault.tree;
         let r = tree.resolved_child(sub);
-        let (k, kind) = (self.vault.key_of(r), tree.node(r).kind);
+        let kind = tree.node(r).kind;
         // it goes under the node before it (§10.3), with its conflict
         // pair, which moves as one (§12.5)
         let sibs = tree.resolved_children(self.outline_parent(r).unwrap_or(tree.root));
@@ -1345,14 +1293,12 @@ impl State {
         if tree.node(prev).conflict().is_some() {
             return Self::refused(format!("can't indent {} into a conflict copy", self.named(r)));
         }
-        let prev = self.vault.key_of(prev);
         let name = self.named(r);
         self.verb(
             &format!("indent {}", name),
             Box::new(move |s| {
-                let moved = ops::demote(&mut s.vault, sub).map_err(|e| format!("can't indent {}: {}", name, e))?;
-                let node = s.moved_node(&k, kind, &prev, None).map(|r| s.key(r));
-                Ok((with_rule_note(&format!("indented {}", name), moved, kind), node))
+                let p = ops::demote(&mut s.vault, sub).map_err(|e| format!("can't indent {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("indented {}", name), p.clamped, kind), Some(s.key(p.node))))
             }),
         )
     }
@@ -1361,25 +1307,17 @@ impl State {
         let Some(sub) = self.find(key) else { return Self::gone() };
         let tree = &self.vault.tree;
         let r = tree.resolved_child(sub);
-        let (k, kind) = (self.vault.key_of(r), tree.node(r).kind);
+        let kind = tree.node(r).kind;
         // it goes beside its parent, right after it (§10.3)
-        let parent = self.outline_parent(r);
-        let grand = parent.map(|p| self.outline_parent(p).unwrap_or(tree.root));
-        let rank = parent.zip(grand).and_then(|(p, g)| {
-            let kids = tree.resolved_children(g);
-            let at = kids.iter().position(|&c| c == p)?;
-            Some(self.namesakes_before(r, g, self.past_copies(&kids, at + 1, r)))
-        });
-        let Some(grand) = grand.map(|g| self.vault.key_of(g)) else {
+        if self.outline_parent(r).is_none() {
             return Self::refused(format!("can't outdent {}: it's at the top level", self.named(r)));
-        };
+        }
         let name = self.named(r);
         self.verb(
             &format!("outdent {}", name),
             Box::new(move |s| {
-                let moved = ops::promote(&mut s.vault, sub).map_err(|e| format!("can't outdent {}: {}", name, e))?;
-                let node = s.moved_node(&k, kind, &grand, rank).map(|r| s.key(r));
-                Ok((with_rule_note(&format!("outdented {}", name), moved, kind), node))
+                let p = ops::promote(&mut s.vault, sub).map_err(|e| format!("can't outdent {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("outdented {}", name), p.clamped, kind), Some(s.key(p.node))))
             }),
         )
     }
@@ -1388,60 +1326,16 @@ impl State {
         let Some(r) = self.find(key) else { return Self::gone() };
         let Some(dest) = self.find(dest) else { return Self::refused("that destination is gone") };
         let tree = &self.vault.tree;
-        let (rr, dest_key) = (tree.resolved_child(r), self.vault.key_of(tree.resolved_child(dest)));
-        let (k, kind) = (self.vault.key_of(rr), tree.node(rr).kind);
+        let rr = tree.resolved_child(r);
+        let kind = tree.node(rr).kind;
         let (name, to) = (self.named(rr), self.named(dest));
         self.verb(
             &format!("move {} to {}", name, to),
             Box::new(move |s| {
-                let moved = ops::refile(&mut s.vault, r, dest).map_err(|e| format!("can't move {}: {}", name, e))?;
-                let node = s.moved_node(&k, kind, &dest_key, None).map(|r| s.key(r));
-                Ok((with_rule_note(&format!("moved {} to {}", name, to), moved, kind), node))
+                let p = ops::refile(&mut s.vault, r, dest).map_err(|e| format!("can't move {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("moved {} to {}", name, to), p.clamped, kind), Some(s.key(p.node))))
             }),
         )
-    }
-
-    /// Where a node a verb moved under `dest` landed (`fold-tui`'s
-    /// `moved_node`): a block by its id; else, among `dest`'s children with
-    /// its title and kind, but no conflict copy, the one the ordering rule
-    /// put it at.
-    fn moved_node(&self, key: &NodeKey, kind: Kind, dest: &NodeKey, rank: Option<usize>) -> Option<NRef> {
-        let title = match key {
-            NodeKey::Path { steps, .. } => steps.last().map(|(t, _)| t.clone()),
-            NodeKey::Id(id) => return self.vault.tree.block_by_id(id),
-            NodeKey::Root => None,
-        }?;
-        let kids = self.vault.tree.resolved_children(self.find_exact(dest)?);
-        let mut hits = kids.iter().filter(|&&c| {
-            let n = self.vault.tree.node(c);
-            n.title == title && n.kind == kind && n.conflict().is_none()
-        });
-        match rank {
-            Some(i) => hits.nth(i).copied(),
-            None => hits.next_back().copied(),
-        }
-    }
-
-    fn namesakes_before(&self, r: NRef, dest: NRef, at: usize) -> usize {
-        let n = self.vault.tree.node(r);
-        let kids = self.vault.tree.resolved_children(dest);
-        kids.iter()
-            .take(at)
-            .filter(|&&c| {
-                let m = self.vault.tree.node(c);
-                c != r && m.title == n.title && m.kind == n.kind && m.conflict().is_none()
-            })
-            .count()
-    }
-
-    fn past_copies(&self, kids: &[NRef], at: usize, r: NRef) -> usize {
-        let mut at = at;
-        if at.checked_sub(1).map(|i| kids[i]) != Some(r) {
-            while kids.get(at).is_some_and(|&c| self.vault.tree.node(c).conflict().is_some()) {
-                at += 1;
-            }
-        }
-        at
     }
 
     fn archive(&mut self, key: &str) -> OpResult {
@@ -1451,8 +1345,8 @@ impl State {
         self.verb(
             &format!("archive {}", name),
             Box::new(move |s| {
-                let moved = ops::archive(&mut s.vault, r).map_err(|e| format!("can't archive {}: {}", name, e))?;
-                Ok((with_rule_note(&format!("archived {}", name), moved, kind), None))
+                let p = ops::archive(&mut s.vault, r).map_err(|e| format!("can't archive {}: {}", name, e))?;
+                Ok((with_rule_note(&format!("archived {}", name), p.clamped, kind), None))
             }),
         )
     }
@@ -1579,7 +1473,7 @@ impl State {
 
     fn resolve(&mut self, theirs: &str, keep: Keep) -> OpResult {
         let Some(t) = self.find(theirs) else { return Self::gone() };
-        let Some((ours, theirs)) = self.view_pairs().into_iter().find(|&(_, x)| x == t) else {
+        let Some((ours, theirs)) = fold_core::merge::conflict_pairs_in_order(&self.vault).into_iter().find(|&(_, x)| x == t) else {
             return Self::refused("that conflict is resolved already");
         };
         let side = match keep {
@@ -1607,9 +1501,9 @@ impl State {
         self.verb(
             "canonicalize",
             Box::new(|s| {
+                // fix keeps the index as it renames: nothing else is read
+                // again, so the entry holds what it wrote and no more
                 let n = fold_core::check::fix(&mut s.vault).map_err(|e| format!("error: {}", e))?;
-                // fix renames files: the index is read again
-                s.vault.reload().map_err(|e| format!("error: {}", e))?;
                 Ok((format!("{} file{} rewritten or renamed", n, if n == 1 { "" } else { "s" }), None))
             }),
         )
@@ -1619,25 +1513,12 @@ impl State {
         if self.editor.is_some() {
             return Self::refused("finish editing first");
         }
-        // the entries a block in transit was remembered with may go
-        self.edit_transit.clear();
-        let entry = if undo { self.undo.pop() } else { self.redo.pop() };
-        let Some(inv) = entry else {
-            return Self::refused(if undo { "nothing to undo" } else { "nothing to redo" });
-        };
-        let res = if undo { inv.undo(&mut self.vault) } else { inv.redo(&mut self.vault) };
         let (done, verb) = if undo { ("undone", "undo") } else { ("redone", "redo") };
-        match res {
-            Ok(()) => {
-                let message = format!("{}: {}", done, inv.description);
-                if undo { self.redo.push(inv) } else { self.undo.push(inv) }
-                OpResult::new(true, message, None)
-            }
-            Err(e) => {
-                // refused: an external change since; the entry stays
-                if undo { self.undo.push(inv) } else { self.redo.push(inv) }
-                Self::refused(format!("{} refused: {}", verb, e))
-            }
+        match self.log.step(&mut self.vault, undo) {
+            None => Self::refused(format!("nothing to {}", verb)),
+            Some(Ok(what)) => OpResult::new(true, format!("{}: {}", done, what), None),
+            // refused: an external change since; the entry stays
+            Some(Err(e)) => Self::refused(format!("{} refused: {}", verb, e)),
         }
     }
 
@@ -1652,9 +1533,7 @@ impl State {
         // text the editor could not save has no id: moved in, it would be a
         // file fold ignores, so it stays in the trash (§11.5)
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let has_id = fold_core::parse::parse_frontmatter(&text)
-            .and_then(|fm| fm.props.get("id").and_then(|v| Id::parse(v)))
-            .is_some();
+        let has_id = fold_core::parse::parse_frontmatter(&text).and_then(|fm| fm.id()).is_some();
         if !has_id {
             return Self::refused("this is text, not a file fold reads: copy what you need from it");
         }
@@ -1764,11 +1643,10 @@ impl State {
     /// raised and what to say of them; a block cut in the editor and not
     /// pasted back is moved, and not put back where it was (§5.2).
     fn merge_conflict_files(&mut self) -> std::io::Result<(u32, String)> {
-        let before: Vec<NodeKey> = self.view_pairs().into_iter().map(|(_, t)| self.vault.key_of(t)).collect();
+        let before: Vec<NodeKey> = fold_core::merge::conflict_pairs_in_order(&self.vault).into_iter().map(|(_, t)| self.vault.key_of(t)).collect();
         let moving: Vec<Id> = self.transit().into_iter().map(|(id, _)| id).collect();
         fold_core::merge::merge_sync_conflicts_moving(&mut self.vault, false, &moving)?;
-        let raised: Vec<NRef> = self
-            .view_pairs()
+        let raised: Vec<NRef> = fold_core::merge::conflict_pairs_in_order(&self.vault)
             .into_iter()
             .filter(|&(_, t)| !before.contains(&self.vault.key_of(t)))
             .map(|(o, _)| o)
@@ -1862,97 +1740,17 @@ impl State {
         res.map(|_| ()).map_err(|e| format!("error: {}", e))
     }
 
-    /// `record_undo` for a save of the editor (`fold-tui`'s `record_edit`,
-    /// §10.10): a block an earlier save left in transit and this one
-    /// deletes is deleted in the entry of that save, which wrote its embed
-    /// out; one this save pastes back makes that save, this one and those
-    /// between one entry.
+    /// `record_undo` for a save of the editor, which keeps a block cut in
+    /// it in one entry with its file (`OpLog::record_edit`, §10.10).
     fn record_edit(&mut self, snap: ops::Snapshot) {
-        let mut at = None;
-        if let Some(mut inv) = ops::Inverse::since(snap, &self.vault) {
-            let (transit, undo) = (&self.edit_transit, &mut self.undo);
-            inv.changes.retain(|c| {
-                let entry = transit.iter().find(|(p, _)| *p == c.path && c.after.is_none());
-                let Some(&(_, n)) = entry.filter(|&&(_, n)| n > 0 && n <= undo.len()) else { return true };
-                if undo[n - 1..].iter().any(|e| e.changes.iter().any(|x| x.path == c.path)) {
-                    return true;
-                }
-                undo[n - 1].changes.push(c.clone());
-                false
-            });
-            if !inv.changes.is_empty() {
-                self.undo.push(inv);
-                at = Some(self.undo.len());
-            }
-            self.redo.clear();
-        }
-        let mut back: Vec<usize> =
-            self.edit_transit.iter().filter(|(p, _)| self.embedded(p) == Some(true)).map(|&(_, n)| n).collect();
-        back.sort_unstable();
-        if let Some(n) = back.into_iter().find(|&n| n > 0 && self.join_undo(n - 1)) {
-            let joined = self.undo.len() == n;
-            at = at.and(joined.then_some(n));
-            self.edit_transit.retain_mut(|(_, m)| {
-                *m = (*m).min(n);
-                *m < n || joined
-            });
-        }
-        let open = self.editor.is_some();
-        let transit = std::mem::take(&mut self.edit_transit);
-        self.edit_transit = transit.into_iter().filter(|(p, _)| open && self.embedded(p) == Some(false)).collect();
-        if let Some(n) = at {
-            for (_, p) in self.transit() {
-                if !self.edit_transit.iter().any(|(q, _)| *q == p) {
-                    self.edit_transit.push((p, n));
-                }
-            }
-        }
+        let inv = ops::Inverse::since(snap, &self.vault);
+        let in_transit = self.transit().into_iter().map(|(_, path)| path).collect();
+        self.log.record_edit(inv, &self.vault, self.editor.is_some(), in_transit);
     }
 
-    /// Whether the block whose file is `path` is embedded now; `None` where
-    /// the file is gone.
-    fn embedded(&self, path: &str) -> Option<bool> {
-        let tree = &self.vault.tree;
-        let f = self.vault.file_index(path)?;
-        let (_, id) = tree.blocks.iter().find(|(r, _)| r.0 == f)?;
-        Some(tree.embed_of(id).is_some())
-    }
-
-    /// Make the op-log entries from `from` on one (§10.10); false where a
-    /// file changed from outside between two of them.
-    fn join_undo(&mut self, from: usize) -> bool {
-        let Some(first) = self.undo.get(from) else { return false };
-        let description = first.description.clone();
-        let mut changes: Vec<ops::Change> = Vec::new();
-        for c in self.undo[from..].iter().flat_map(|e| &e.changes) {
-            match changes.iter_mut().find(|x| x.path == c.path) {
-                Some(x) if x.after == c.before => x.after = c.after.clone(),
-                Some(_) => return false,
-                None => changes.push(c.clone()),
-            }
-        }
-        changes.retain(|c| c.before != c.after);
-        self.undo.truncate(from);
-        if !changes.is_empty() {
-            self.undo.push(ops::Inverse { changes, description });
-        }
-        true
-    }
-
-    /// The blocks the open editor holds in transit (§5.2), with their files:
-    /// nested there, with no line left in it, embedded nowhere, and still in
-    /// the vault.
+    /// The blocks the open editor holds in transit (§5.2), with their files.
     fn transit(&self) -> Vec<(Id, String)> {
-        let Some(ed) = self.editor.as_ref() else { return Vec::new() };
-        let tree = &self.vault.tree;
-        ed.buf
-            .owners
-            .iter()
-            .filter(|&(o, i)| i.parent.is_some() && !ed.buf.lines.iter().any(|l| l.owner == *o))
-            .filter_map(|(_, i)| i.id.as_ref())
-            .filter(|id| tree.embed_of(id).is_none())
-            .filter_map(|id| Some((id.clone(), tree.files[tree.block_by_id(id)?.0].path.clone())))
-            .collect()
+        self.editor.as_ref().map(|ed| ed.buf.transit(&self.vault)).unwrap_or_default()
     }
 
     /// The editor's render root in the tree as the editor last read or

@@ -171,18 +171,11 @@ fn main() -> anyhow::Result<()> {
                     1 => {
                         let e = matches.remove(0);
                         let name = e.file_name().to_string_lossy().to_string();
-                        // strip the <timestamp>- prefix
-                        let restored = name
-                            .splitn(2, '-')
-                            .nth(1)
-                            .map(|s| s.splitn(2, |c: char| c.is_ascii_digit()).last().unwrap_or(s))
-                            .unwrap_or(&name)
-                            .to_string();
-                        // simpler: strip "yyyymmdd-hhmmss-"
+                        // strip the `<yyyymmdd-hhmmss>-` stamp (§11.5)
                         let restored = if name.len() > 16 && name.as_bytes()[8] == b'-' && name.as_bytes()[15] == b'-' {
                             name[16..].to_string()
                         } else {
-                            restored
+                            name.clone()
                         };
                         // text the editor could not save (§10.6) has no id:
                         // moved in, it would be a file fold ignores, so it
@@ -194,9 +187,7 @@ fn main() -> anyhow::Result<()> {
                             .then(|| std::fs::read_to_string(e.path()))
                             .transpose()?
                             .filter(|text| {
-                                fold_core::parse::parse_frontmatter(text)
-                                    .and_then(|fm| fm.props.get("id").and_then(|v| fold_core::Id::parse(v)))
-                                    .is_none()
+                                fold_core::parse::parse_frontmatter(text).and_then(|fm| fm.id()).is_none()
                             });
                         if let Some(text) = unsaved {
                             print!("{}", text);

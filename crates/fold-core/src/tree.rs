@@ -2,7 +2,7 @@
 
 use crate::ident::Id;
 use crate::parse::{Kind, Node, ParsedFile, TaskState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// The logical tree formed by all parsed files stitched together.
@@ -12,6 +12,8 @@ pub struct Tree {
     pub root: (usize, usize),
     /// (file, node) → id for every block.
     pub blocks: Vec<((usize, usize), Id)>,
+    /// `blocks` by id, for `block_by_id`; `restitch` rebuilds it.
+    block_index: HashMap<Id, NRef>,
     /// `embeds`, built at first use; `restitch` drops it.
     embed_index: OnceLock<HashMap<Id, NRef>>,
 }
@@ -26,6 +28,7 @@ impl Tree {
             files,
             root: (0, 0),
             blocks: Vec::new(),
+            block_index: HashMap::new(),
             embed_index: OnceLock::new(),
         };
         t.restitch();
@@ -49,7 +52,14 @@ impl Tree {
                 }
             }
         }
+        // the first file holding an id is its block, as a reload meets
+        // them; any other is a duplicate id, which `check` reports (§6.2)
+        let mut index = HashMap::with_capacity(blocks.len());
+        for (r, id) in &blocks {
+            index.entry(id.clone()).or_insert(*r);
+        }
         self.blocks = blocks;
+        self.block_index = index;
         self.embed_index = OnceLock::new();
     }
 
@@ -212,10 +222,7 @@ impl Tree {
     }
 
     pub fn block_by_id(&self, id: &Id) -> Option<NRef> {
-        self.blocks
-            .iter()
-            .find(|(_, bid)| bid == id)
-            .map(|(t, _)| *t)
+        self.block_index.get(id).copied()
     }
 
     /// Direct children of a node with embeds resolved (broken embeds, and
@@ -248,14 +255,13 @@ impl Tree {
             }
         };
         let copy = |t: &Tree, n: NRef| t.node(n).conflict().is_some();
-        self.walk_inner(r, &copy, &mut count, &mut Vec::new());
+        self.walk_inner(r, &copy, &mut count, &mut HashSet::new());
         (open, total)
     }
 
     /// Pre-order walk over the resolved tree (embeds followed, cycles guarded).
     pub fn walk(&self, r: NRef, f: &mut dyn FnMut(&Tree, NRef)) {
-        let mut seen = Vec::new();
-        self.walk_inner(r, &|_, _| false, f, &mut seen);
+        self.walk_inner(r, &|_, _| false, f, &mut HashSet::new());
     }
 
     /// `walk`, passing over each subtree below `r` whose top `skip` picks.
@@ -264,12 +270,11 @@ impl Tree {
         r: NRef,
         skip: &dyn Fn(&Tree, NRef) -> bool,
         f: &mut dyn FnMut(&Tree, NRef),
-        seen: &mut Vec<NRef>,
+        seen: &mut HashSet<NRef>,
     ) {
-        if seen.contains(&r) {
+        if !seen.insert(r) {
             return; // cycle guard
         }
-        seen.push(r);
         f(self, r);
         for cr in self.resolved_children(r) {
             if !skip(self, cr) {

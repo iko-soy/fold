@@ -4,6 +4,7 @@ pub mod check;
 pub mod edit;
 pub mod ident;
 pub mod merge;
+pub mod news;
 pub mod ops;
 pub mod parse;
 pub mod reading;

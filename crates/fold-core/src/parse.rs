@@ -44,6 +44,27 @@ pub struct Block {
 }
 
 impl Block {
+    /// The block of the file at `path`, as its frontmatter `fm` has it
+    /// (§4.4); `id` is `None` for `root.md`.
+    pub fn new(path: &str, id: Option<Id>, fm: Option<&Frontmatter>) -> Block {
+        let mut b = Block {
+            id,
+            path: path.to_string(),
+            props: IndexMap::new(),
+            frontmatter_raw: String::new(),
+            frontmatter_span: None,
+        };
+        b.set_frontmatter(fm);
+        b
+    }
+
+    /// Take the frontmatter as a file now has it; the id and path stay.
+    pub fn set_frontmatter(&mut self, fm: Option<&Frontmatter>) {
+        self.props = fm.map(|f| f.props.clone()).unwrap_or_default();
+        self.frontmatter_raw = fm.map(|f| f.raw.clone()).unwrap_or_default();
+        self.frontmatter_span = fm.map(|f| f.span);
+    }
+
     pub fn prop(&self, key: &str) -> Option<&str> {
         self.props.get(key).map(String::as_str)
     }
@@ -73,8 +94,6 @@ pub struct Node {
     /// The node children alone, in order (derived from `content`).
     pub children: Vec<usize>,
     pub parent: Option<usize>,
-    /// Which file's text this node's spans index into.
-    pub file: usize,
     /// `Some` if this node is the root of its own file.
     pub block: Option<Block>,
     /// `Some(id)` if this node is an embed reference in a parent file.
@@ -131,6 +150,22 @@ impl ParsedFile {
             self.nodes[self.root_node].children[0]
         }
     }
+
+    /// A block file with text or an embed before its root node, or with no
+    /// root at all (§4.9): what comes before the root is in no block, so
+    /// the file is read-only until fixed by hand. `root.md` never is: text
+    /// before its first node is its Root's own.
+    pub fn malformed_block(&self) -> bool {
+        let root = &self.nodes[self.root_node];
+        if root.block.is_some() {
+            return false;
+        }
+        let text_before = root.content.iter().any(|c| match c {
+            Content::Text(sp) => !sp.text(&self.text).trim().is_empty(),
+            Content::Node(_) => false,
+        });
+        text_before || root.children.len() != 1 || self.nodes[root.children[0]].embed.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +204,14 @@ pub struct Frontmatter {
     pub raw: String,
     pub span: Span,
     pub props: IndexMap<String, String>,
+}
+
+impl Frontmatter {
+    /// The `id` key, if it validates against the syllable tables (§6.4):
+    /// what makes a file a block file.
+    pub fn id(&self) -> Option<Id> {
+        self.props.get("id").and_then(|v| Id::parse(v))
+    }
 }
 
 /// Scan frontmatter at byte 0 of a file. Returns None if absent.
@@ -435,10 +478,10 @@ struct Frame {
     is_embed: bool,
 }
 
-/// Parse one file's text into nodes. `file_idx` tags every node's `file`.
-/// `block` (with `id: Some`) marks a block file; `id: None` is `root.md`;
-/// `None` means "plain text, no block attachment" (used by tests).
-pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>) -> ParsedFile {
+/// Parse one file's text into nodes. `block` (with `id: Some`) marks a
+/// block file; `id: None` is `root.md`; `None` means "plain text, no block
+/// attachment" (used by tests).
+pub fn parse_file(path: &str, text: &str, block: Option<Block>) -> ParsedFile {
     let lines = split_lines(text);
     let n = lines.len();
     let mut nodes: Vec<Node> = Vec::new();
@@ -457,7 +500,6 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
         },
         children: Vec::new(),
         parent: None,
-        file: file_idx,
         block: None,
         embed: None,
         indent: 0,
@@ -626,7 +668,6 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     },
                     children: Vec::new(),
                     parent: Some(parent),
-                    file: file_idx,
                     block: None,
                     embed: match &info.kind {
                         TitleKind::Embed(id, _) => Some(id.clone()),
@@ -661,7 +702,6 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                     }
                 }
                 if node.title.is_empty() && node.embed.is_none() {
-                    node.noncanonical.push("empty title".into());
                     diagnostics.push(Diag {
                         span: node.title_span,
                         message: "title line with an empty title".into(),
@@ -670,7 +710,7 @@ pub fn parse_file(path: &str, text: &str, file_idx: usize, block: Option<Block>)
                 if node.title.contains('/') {
                     diagnostics.push(Diag {
                         span: node.title_span,
-                        message: "title contains '/'".into(),
+                        message: format!("title contains '/': {:?}", node.title),
                     });
                 }
                 let idx = nodes.len();
@@ -933,7 +973,6 @@ fn make_setext_section(
         },
         children: Vec::new(),
         parent: Some(parent),
-        file: nodes[parent].file,
         block: None,
         embed: None,
         indent: title_indent,

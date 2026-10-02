@@ -8,7 +8,7 @@
 //! replaces the block's span atomically.
 
 use crate::ident::Id;
-use crate::parse::{parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, Node, ParsedFile, Span};
+use crate::parse::{fence_transition, parse_file, parse_frontmatter, Block, Content, Frontmatter, Kind, Node, ParsedFile, Span};
 use crate::render::render_lines;
 use crate::tree::NRef;
 use crate::vault::Vault;
@@ -205,6 +205,20 @@ impl EditBuffer {
                 self.mark_dirty(o);
             }
         }
+    }
+
+    /// The blocks this buffer holds in transit (§5.2), with their files:
+    /// nested here, with no line left in it, embedded nowhere, and still in
+    /// the vault.
+    pub fn transit(&self, vault: &Vault) -> Vec<(Id, String)> {
+        let tree = &vault.tree;
+        self.owners
+            .iter()
+            .filter(|&(o, i)| i.parent.is_some() && !self.lines.iter().any(|l| l.owner == *o))
+            .filter_map(|(_, i)| i.id.as_ref())
+            .filter(|id| tree.embed_of(id).is_none())
+            .filter_map(|id| Some((id.clone(), tree.files[tree.block_by_id(id)?.0].path.clone())))
+            .collect()
     }
 
     /// Insert a line after `idx`; it inherits that line's tag (§5.2).
@@ -648,7 +662,7 @@ impl EditBuffer {
         // §4.9: a block file with text or an embed before its root is
         // read-only until fixed — the bytes before the root are not in the
         // buffer, and rewriting the file would drop them
-        if malformed_block_file(f) {
+        if f.malformed_block() {
             return Err(std::io::Error::other(format!(
                 "{}: text or an embed before the block's root; read-only until fixed",
                 path
@@ -660,7 +674,7 @@ impl EditBuffer {
         // re-spelled as a heading) is refused, not hidden, unless the file
         // had it so already
         let crowded = crowded_embeds(f);
-        if crowded_embeds(&parse_file(&path, &out, file, None)).iter().any(|id| !crowded.contains(id)) {
+        if crowded_embeds(&parse_file(&path, &out, None)).iter().any(|id| !crowded.contains(id)) {
             return Err(std::io::Error::other(format!(
                 "{}: a line would be nested under a block's embed, out of the outline; not saved",
                 path
@@ -675,7 +689,7 @@ impl EditBuffer {
                     frontmatter_span: None,
                     ..b.clone()
                 };
-                if malformed_block_file(&parse_file(&path, &out, file, Some(b))) {
+                if parse_file(&path, &out, Some(b)).malformed_block() {
                     return Err(std::io::Error::other(format!(
                         "{}: the block's text must start with its title line; not saved",
                         path
@@ -967,21 +981,6 @@ fn span_now(known: &str, now: &str, region: Option<Span>) -> Option<Span> {
     })
 }
 
-/// A block file with text or an embed before its root node, or with no
-/// root at all (§4.9). `root.md` never is: text before its first node is
-/// its Root's own.
-fn malformed_block_file(f: &ParsedFile) -> bool {
-    let root = &f.nodes[f.root_node];
-    if root.block.is_some() {
-        return false;
-    }
-    let text_before = root.content.iter().any(|c| match c {
-        Content::Text(sp) => !sp.text(&f.text).trim().is_empty(),
-        Content::Node(_) => false,
-    });
-    text_before || root.children.len() != 1 || f.nodes[root.children[0]].is_embed()
-}
-
 /// The blocks whose embed in `f` has lines nested under it: nodes, or text
 /// other than blank lines (§4.7: a diagnostic).
 fn crowded_embeds(f: &ParsedFile) -> Vec<&Id> {
@@ -1007,11 +1006,6 @@ fn owned_end(text: &str, span: Span) -> usize {
         .map(|i| content_end + i + 1)
         .unwrap_or(old.len());
     span.start + own
-}
-
-fn fence_transition(raw: &str, open: &mut Option<(char, usize)>) -> bool {
-    // fences as the parser reads them, so splice re-levels what it does
-    crate::parse::fence_transition(raw, open)
 }
 
 /// What the editor needs to know when it opens: the buffer plus a render of
