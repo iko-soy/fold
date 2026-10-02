@@ -122,6 +122,24 @@ fn right_click_menu_runs_actions() {
 }
 
 #[test]
+fn a_click_on_the_menu_s_border_keeps_it_open() {
+    // the menu is a popup like the others (§10.1): only a click off it,
+    // on the backdrop, closes it
+    let (_d, mut app) = app_with("# A\n\n- one\n- two\n");
+    right_click(&mut app, Hit::Row(2));
+    let s = draw(&mut app);
+    // the border right of an item
+    let (x, y) = app.hit_pos(Hit::MenuItem(fold_tui::app::node_menu_index(Action::Delete))).unwrap();
+    let row: Vec<char> = s.lines().nth(y as usize).unwrap().chars().collect();
+    let border = (x as usize..row.len()).find(|&i| row[i] == '│').unwrap() as u16;
+    app.handle_mouse(ev(MouseEventKind::Down(MouseButton::Left), (border, y)));
+    app.handle_mouse(ev(MouseEventKind::Up(MouseButton::Left), (border, y)));
+    assert!(draw(&mut app).contains("Move down"));
+    click(&mut app, Hit::Backdrop);
+    assert!(!draw(&mut app).contains("Move down"));
+}
+
+#[test]
 fn drag_onto_a_title_nests_and_left_of_it_places_before() {
     let (d, mut app) = app_with("# A\n\n- a1\n\n# B\n\n- b1\n");
     // rows: A, a1, B, b1 — drag b1 onto A's title: into A

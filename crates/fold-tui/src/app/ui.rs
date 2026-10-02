@@ -1279,6 +1279,7 @@ impl App {
         let y = if menu.y + h > screen.y + screen.height { screen.y + screen.height.saturating_sub(h) } else { menu.y };
         let r = Rect { x, y, width: w, height: h }.intersection(screen);
         self.ui.push(screen, Hit::Backdrop);
+        self.ui.push(r, Hit::Popup);
         f.render_widget(Clear, r);
         let title = title_text(&self.vault.tree.node(target).title);
         let block = rounded(Line::from(Span::styled(format!(" {} ", fit(&title, 20)), Style::default().add_modifier(Modifier::BOLD))), true);
