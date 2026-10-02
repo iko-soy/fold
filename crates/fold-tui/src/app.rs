@@ -107,6 +107,8 @@ pub struct App {
     copied: (String, Kind),
     status: String,
     status_time: Instant,
+    /// The message is an error or a refusal (`complain`).
+    status_lasting: bool,
     log: ops::OpLog,
     // snapshot taken when a verb started, settled into `log` after it
     pending_undo: Option<ops::Snapshot>,
@@ -240,6 +242,7 @@ impl App {
             copied: (String::new(), Kind::Item),
             status: HINT.into(),
             status_time: Instant::now(),
+            status_lasting: false,
             log: ops::OpLog::default(),
             pending_undo: None,
             filter: String::new(),
@@ -334,6 +337,14 @@ impl App {
     pub fn say(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
         self.status_time = Instant::now();
+        self.status_lasting = false;
+    }
+
+    /// An error or a refusal: said as any message, and kept until a key or
+    /// click that comes once it is old (§10.1, `stale`).
+    pub fn complain(&mut self, msg: impl Into<String>) {
+        self.say(msg);
+        self.status_lasting = true;
     }
 
     /// What the status bar says on its left (§10.1), and whether it is a
@@ -362,7 +373,7 @@ impl App {
         match self.last_input {
             _ if self.status.is_empty() => true,
             None => false,
-            Some(t) if lasting(&self.status) => t >= old,
+            Some(t) if self.status_lasting => t >= old,
             Some(t) => t > self.status_time && Instant::now() >= old,
         }
     }
@@ -543,13 +554,14 @@ impl App {
         // took the typing, or why not, is said beside it
         let before = tops(&self.vault);
         let after = self.vault.on_disk().map(|v| tops(&v));
-        let status = std::mem::take(&mut self.status);
+        let (status, lasting) = (std::mem::take(&mut self.status), self.status_lasting);
         let dirty = self.editor_dirty();
         // a block cut in the editor stays in transit across the save: a
         // change to nothing it shows leaves it as it is (§5.2)
         self.save_editor();
         let edit = self.editor_key().map(|k| (k, self.editor_files()));
         let saved = std::mem::replace(&mut self.status, status);
+        self.status_lasting = lasting;
         let typed = saved.is_empty() && dirty && !self.editor_dirty();
         let cursor_key = self.current().map(|r| self.vault.key_of(r));
         // the zoom is held by key (§11.2): the merge flow re-parses the
@@ -587,7 +599,7 @@ impl App {
         } else {
             match self.vault.reload() {
                 Ok(()) => self.say(changed_outside(&before, &after.unwrap_or_else(|_| tops(&self.vault)), typed)),
-                Err(e) => self.say(format!("reload error: {}", e)),
+                Err(e) => self.complain(format!("reload error: {}", e)),
             }
         }
         // a change to what it shows re-renders it (below): its cut blocks
@@ -601,7 +613,7 @@ impl App {
         // nothing came in
         if !saved.is_empty() {
             let msg = if came_in { format!("{} · {}", self.status, saved) } else { saved };
-            self.say(msg);
+            self.complain(msg);
         }
         self.conflict_copies = self.vault.conflict_files().unwrap_or_default();
         self.conflict_copies.retain(|c| copies.contains(c));
@@ -677,7 +689,7 @@ impl App {
         }
         self.record_edit(snap);
         if let Err(e) = &res {
-            self.say(format!("error: {}", e));
+            self.complain(format!("error: {}", e));
         }
         res.is_ok()
     }
@@ -721,7 +733,7 @@ impl App {
                     self.say(format!("{}: click ⚠ to resolve", news));
                 }
             }
-            Err(e) => self.say(format!("merge error: {}", e)),
+            Err(e) => self.complain(format!("merge error: {}", e)),
         }
         true
     }
@@ -1015,7 +1027,7 @@ impl App {
                 }
                 self.refresh_after(&words);
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1071,7 +1083,7 @@ impl App {
                 }
                 self.refresh_after(&words);
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1090,7 +1102,7 @@ impl App {
                     self.move_cursor_to(nr);
                 }
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1127,7 +1139,7 @@ impl App {
         match ops::delete_subtree(&mut self.vault, r) {
             Ok(1) => self.refresh_after(&format!("deleted {} · {}", what, undo)),
             Ok(n) => self.refresh_after(&format!("deleted {} ({} nodes) · {}", what, n, undo)),
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1154,7 +1166,7 @@ impl App {
         self.push_undo(&format!("paste {}", name));
         match ops::paste(&mut self.vault, r, &text, after) {
             Ok(p) => self.refresh_after(&with_rule_note(&format!("pasted {}", name), p.clamped, kind)),
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1168,7 +1180,7 @@ impl App {
                     self.move_cursor_to(nr);
                 }
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1181,7 +1193,7 @@ impl App {
         let words = format!("made {} {}", self.named(r), spelling);
         // a node in a conflict pair keeps its spelling (§12.5)
         if ops::conflict_pair(&self.vault.tree, r).len() > 1 {
-            self.say(format!("can't respell {}: {}", self.named(r), ops::PAIR_SPELLING));
+            self.complain(format!("can't respell {}: {}", self.named(r), ops::PAIR_SPELLING));
             return;
         }
         self.push_undo(&format!("make {} {}", self.named(r), spelling));
@@ -1193,7 +1205,7 @@ impl App {
                 }
                 self.say(with_rule_note(&words, moved, kind));
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1208,13 +1220,13 @@ impl App {
         let first = ops::conflict_pair(&self.vault.tree, r)[0];
         let prev = sibs.iter().position(|&c| c == first).and_then(|i| i.checked_sub(1)).map(|i| sibs[i]);
         let Some(prev) = prev else {
-            self.say(format!("can't indent {}: nothing above it", self.named(r)));
+            self.complain(format!("can't indent {}: nothing above it", self.named(r)));
             return;
         };
         // nor into a conflict copy, which keeping ours trashes (§12.5); a
         // node in one moves within it
         if self.vault.tree.node(prev).conflict().is_some() {
-            self.say(format!("can't indent {} into a conflict copy", self.named(r)));
+            self.complain(format!("can't indent {} into a conflict copy", self.named(r)));
             return;
         }
         let name = self.named(r);
@@ -1227,7 +1239,7 @@ impl App {
                 self.move_cursor_to(p.node);
                 self.say(with_rule_note(&format!("indented {}", name), p.clamped, kind));
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1239,7 +1251,7 @@ impl App {
         // it goes beside its parent, right after it, under the parent's
         // parent (§10.3)
         if self.outline_parent(r).is_none() {
-            self.say(format!("can't outdent {}: it's at the top level", self.named(r)));
+            self.complain(format!("can't outdent {}: it's at the top level", self.named(r)));
             return;
         }
         let name = self.named(r);
@@ -1252,7 +1264,7 @@ impl App {
                 self.move_cursor_to(p.node);
                 self.say(with_rule_note(&format!("outdented {}", name), p.clamped, kind));
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1262,7 +1274,7 @@ impl App {
         self.push_undo(&format!("archive {}", name));
         match ops::archive(&mut self.vault, r) {
             Ok(p) => self.refresh_after(&with_rule_note(&format!("archived {}", name), p.clamped, kind)),
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1275,7 +1287,7 @@ impl App {
             Ok(0) => self.refresh_after(&format!("no done tasks to clear{}", under)),
             Ok(1) => self.refresh_after(&format!("cleared 1 done task{}", under)),
             Ok(n) => self.refresh_after(&format!("cleared {} done tasks{}", n, under)),
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1292,7 +1304,7 @@ impl App {
                 self.follow(on, p.node);
                 self.reveal(p.node);
             }
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1324,7 +1336,7 @@ impl App {
         };
         match made {
             Ok(nr) => self.edit_new_node(nr),
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -1511,7 +1523,7 @@ impl App {
         let saved = match res {
             Ok(_) => true,
             Err(e) => {
-                self.say(format!("error: {}", e));
+                self.complain(format!("error: {}", e));
                 false
             }
         };
@@ -1545,7 +1557,7 @@ impl App {
     fn close_editor(&mut self) -> bool {
         // a block cut and not pasted back is deleted once saved (§5.2)
         if !self.save_editor_releasing() {
-            self.say(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
+            self.complain(format!("{} — still editing; Revert (:q!) drops the changes", self.status));
             return false;
         }
         if let Some(ed) = self.editor.take() {
@@ -1763,7 +1775,7 @@ impl App {
             self.push_undo(&format!("remove {} from {}", k, self.named(t)));
             match ops::set_frontmatter_key(&mut self.vault, t.0, &k, None) {
                 Ok(()) => self.say(format!("{} removed", k)),
-                Err(e) => self.say(format!("error: {}", e)),
+                Err(e) => self.complain(format!("error: {}", e)),
             }
             self.reopen_props();
         }
@@ -1857,7 +1869,7 @@ impl App {
                         self.reveal(r);
                         self.say("captured");
                     }
-                    Err(e) => self.say(format!("error: {}", e)),
+                    Err(e) => self.complain(format!("error: {}", e)),
                 }
             }
             PromptAction::PropSet(ref k) => {
@@ -1880,7 +1892,7 @@ impl App {
                             self.props_target = Some(block);
                             self.reopen_props();
                         }
-                        Err(e) => self.say(format!("error: {}", e)),
+                        Err(e) => self.complain(format!("error: {}", e)),
                     }
                 }
             }
@@ -2091,7 +2103,7 @@ impl App {
                     };
                     match res {
                         Ok(()) => self.say(format!("kept {} for {} · u undoes", side, name)),
-                        Err(e) => self.say(format!("error: {}", e)),
+                        Err(e) => self.complain(format!("error: {}", e)),
                     }
                 }
             }
@@ -2221,6 +2233,7 @@ impl App {
     /// where the trash takes nothing.
     fn discard_editor(&mut self) {
         let mut said = String::from("changes discarded");
+        let mut failed = false;
         if let Some((name, text)) = self.editor_text().filter(|_| self.edit_refused && self.editor_dirty()) {
             match self.vault.trash_text(&name, &text) {
                 Ok(p) => {
@@ -2230,7 +2243,7 @@ impl App {
                 Err(_) if self.edit_uncopied.as_ref() == Some(&text) => said = format!("{}; no copy kept", said),
                 Err(e) => {
                     // what to press first: the error is what the bar cuts
-                    self.say(format!("can't copy to the trash; Revert (:q!) again drops the changes — {}", e));
+                    self.complain(format!("can't copy to the trash; Revert (:q!) again drops the changes — {}", e));
                     self.edit_uncopied = Some(text);
                     return;
                 }
@@ -2251,13 +2264,18 @@ impl App {
             let snap = ops::Snapshot::take(&self.vault, &format!("revert {}", edited(&ed, None)));
             if let Err(e) = ed.buf.discard(&mut self.vault) {
                 said = format!("{}; error: {}", said, e);
+                failed = true;
             }
             self.record_edit(snap);
             self.edit_clip = ed.clip;
         }
         self.settle_zoom();
         self.clamp_cursor();
-        self.say(said);
+        if failed {
+            self.complain(said);
+        } else {
+            self.say(said);
+        }
     }
 
     /// When fold ends any way but a quit — a signal, an error, a panic —
@@ -2530,7 +2548,7 @@ impl App {
                 self.say(format!("{}: {}", done, what));
                 self.clamp_cursor();
             }
-            Some(Err(e)) => self.say(format!("{} refused: {}", verb, e)),
+            Some(Err(e)) => self.complain(format!("{} refused: {}", verb, e)),
         }
     }
 
@@ -2750,7 +2768,7 @@ impl App {
         self.push_undo(&step);
         match ops::toggle_task(&mut self.vault, r) {
             Ok(()) => self.say(words),
-            Err(e) => self.say(format!("error: {}", e)),
+            Err(e) => self.complain(format!("error: {}", e)),
         }
     }
 
@@ -2802,7 +2820,7 @@ impl App {
             let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
             match std::process::Command::new(opener).arg(&url).spawn() {
                 Ok(_) => self.say(format!("opened {}", url)),
-                Err(e) => self.say(format!("open failed: {}", e)),
+                Err(e) => self.complain(format!("open failed: {}", e)),
             }
         } else {
             self.say("no link on this line");
@@ -3132,7 +3150,7 @@ impl App {
                 self.push_undo("canonicalize");
                 match fold_core::check::fix(&mut self.vault) {
                     Ok(n) => self.say(format!("{} file(s) canonicalized", n)),
-                    Err(e) => self.say(format!("error: {}", e)),
+                    Err(e) => self.complain(format!("error: {}", e)),
                 }
             }
             Action::Merge => {
@@ -3144,7 +3162,7 @@ impl App {
                             self.enter_conflict_view();
                         }
                     }
-                    Err(e) => self.say(format!("error: {}", e)),
+                    Err(e) => self.complain(format!("error: {}", e)),
                 }
             }
             Action::ResolveConflicts => self.enter_conflict_view(),
@@ -3339,12 +3357,6 @@ fn quoted(title: &str) -> String {
 /// The status bar's count of unresolved pairs (§10.1), as its ⚠ reads.
 fn conflict_count(n: usize) -> String {
     format!("⚠ {} conflict{}", n, if n == 1 { "" } else { "s" })
-}
-
-/// An error or a refusal, which the status bar keeps until the next key
-/// after it was read (§10.1).
-fn lasting(msg: &str) -> bool {
-    msg.starts_with("error:") || msg.starts_with("can't ") || [" error:", " refused:", " failed:"].iter().any(|w| msg.contains(w))
 }
 
 /// A key as the status bar names it: *q*, *Enter*, *Ctrl-Z*.
@@ -3607,4 +3619,31 @@ fn read_events() -> std::sync::mpsc::Receiver<std::io::Result<Event>> {
         }
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The message is as old as a message gets, and a key came a second
+    /// after it, while it was being read.
+    fn read_once(app: &mut App) {
+        let shown = Instant::now().checked_sub(MESSAGE_LIFE + Duration::from_millis(1)).unwrap();
+        app.status_time = shown;
+        app.last_input = Some(shown + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_title_that_reads_like_an_error_is_no_error() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("root.md"), "- [ ] parse error: retry\n").unwrap();
+        let mut app = App::new(d.path()).unwrap();
+        app.say("done: “parse error: retry”");
+        read_once(&mut app);
+        assert!(app.stale());
+        // while a refusal outlasts a key that came as it was read
+        app.complain("can't indent “retry”: nothing above it");
+        read_once(&mut app);
+        assert!(!app.stale());
+    }
 }

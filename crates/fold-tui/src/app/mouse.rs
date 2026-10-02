@@ -282,7 +282,11 @@ impl App {
             Some((j, Drop::Into)) => format!("move “{}” into “{}”", name(from), name(j)),
             None => format!("moving “{}” — drop on a title to nest, left of it to place before", name(from)),
         };
-        self.say(msg);
+        if into_copy {
+            self.complain(msg);
+        } else {
+            self.say(msg);
+        }
     }
 
     fn mouse_up(&mut self) {
@@ -302,7 +306,7 @@ impl App {
         let (Some(from), Some(to)) = (press.row.and_then(|i| rows.get(i)), rows.get(j)) else { return };
         // the rows may have changed since the drag last said where it goes
         if self.drop_into_copy(from.nref, to.nref, how) {
-            self.say(format!("can't move {} into a conflict copy", self.named(from.nref)));
+            self.complain(format!("can't move {} into a conflict copy", self.named(from.nref)));
             return;
         }
         // a drop is an outline verb: the editor saves first (§10.6), which
@@ -310,7 +314,7 @@ impl App {
         let keys = (self.vault.key_of(from.nref), self.vault.key_of(to.nref));
         let edit = self.editor_before_write("outline verb");
         let (Some(r), Some(target)) = (self.find_exact(&keys.0), self.find_exact(&keys.1)) else {
-            self.say("can't move: the outline changed");
+            self.complain("can't move: the outline changed");
             return;
         };
         let (rr, rt) = (self.vault.tree.resolved_child(r), self.vault.tree.resolved_child(target));
@@ -325,7 +329,7 @@ impl App {
                 self.follow(on, p.node);
                 self.reveal(p.node);
             }
-            Err(e) => self.say(format!("can't move: {}", e)),
+            Err(e) => self.complain(format!("can't move: {}", e)),
         }
         self.editor_after_write(edit);
     }
