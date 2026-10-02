@@ -936,6 +936,54 @@ impl Editor {
         }
     }
 
+    /// Vim's and Helix's insert mode: what is typed until it is left is one
+    /// undo step.
+    fn begin_insert(&mut self) {
+        self.checkpoint();
+        self.group = Group::Typing;
+        self.mode = Mode::Insert;
+        self.anchor = None;
+    }
+
+    /// Back to normal mode from insert mode.
+    fn end_insert(&mut self) {
+        self.mode = Mode::Normal;
+        self.group = Group::None;
+    }
+
+    /// The keys Vim's and Helix's insert modes share: typing, deleting, and
+    /// the cursor keys, Left and Right going on past the line's ends where
+    /// `across` (Helix) and stopping there where not (Vim). A key that moves
+    /// the cursor ends a run of typing: what is typed after it is its own
+    /// undo step.
+    fn insert_key(&mut self, key: KeyEvent, across: bool) {
+        let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
+            self.group = Group::None;
+        }
+        let (p, len) = (self.cursor, self.len(self.cursor.line));
+        match key.code {
+            KeyCode::Char('w') if ctl => self.delete_word_back(),
+            KeyCode::Char(c) if !ctl => self.type_char(c),
+            KeyCode::Enter => self.newline(),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete_forward(),
+            KeyCode::Tab => {
+                self.type_char(' ');
+                self.type_char(' ');
+            }
+            KeyCode::Left if across => self.set_cursor(self.prev(p).unwrap_or(p)),
+            KeyCode::Right if across => self.set_cursor(self.next(p).unwrap_or(p)),
+            KeyCode::Left => self.set_cursor(Pos::new(p.line, p.col.saturating_sub(1))),
+            KeyCode::Right => self.set_cursor(Pos::new(p.line, (p.col + 1).min(len))),
+            KeyCode::Up => self.move_vert(-1),
+            KeyCode::Down => self.move_vert(1),
+            KeyCode::Home => self.set_cursor(Pos::new(p.line, 0)),
+            KeyCode::End => self.set_cursor(Pos::new(p.line, len)),
+            _ => {}
+        }
+    }
+
     /// Delete back to the start of the word (Ctrl-W, Alt-Backspace): part
     /// of a run of typing, as Backspace is.
     pub fn delete_word_back(&mut self) {

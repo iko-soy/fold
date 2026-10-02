@@ -1,7 +1,7 @@
 //! The Helix keymap: selection first. Motions select, actions act on the
 //! selection; `v` makes motions extend it. One selection (no multi-cursor).
 
-use super::{class, order, take_count, Editor, Group, Mode, Outcome, Pos};
+use super::{class, order, take_count, Editor, Mode, Outcome, Pos};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
@@ -119,45 +119,16 @@ pub fn handle(e: &mut Editor, key: KeyEvent) -> Outcome {
 
 fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
-    // a key that moves the cursor ends a run of typing: what is typed
-    // after it is its own undo step, as in the other keymaps
-    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
-        e.group = Group::None;
-    }
     match key.code {
-        KeyCode::Esc => {
-            e.mode = Mode::Normal;
-            e.group = Group::None;
-        }
-        KeyCode::Char('c') if ctl => {
-            e.mode = Mode::Normal;
-            e.group = Group::None;
-        }
-        KeyCode::Char('w') if ctl => e.delete_word_back(),
-        KeyCode::Char(c) if !ctl => e.type_char(c),
-        KeyCode::Enter => e.newline(),
-        KeyCode::Backspace => e.backspace(),
-        KeyCode::Delete => e.delete_forward(),
-        KeyCode::Tab => {
-            e.type_char(' ');
-            e.type_char(' ');
-        }
-        KeyCode::Left => e.set_cursor(e.prev(e.cursor).unwrap_or(e.cursor)),
-        KeyCode::Right => e.set_cursor(e.next(e.cursor).unwrap_or(e.cursor)),
-        KeyCode::Up => e.move_vert(-1),
-        KeyCode::Down => e.move_vert(1),
-        KeyCode::Home => e.set_cursor(Pos::new(e.cursor.line, 0)),
-        KeyCode::End => e.set_cursor(Pos::new(e.cursor.line, e.len(e.cursor.line))),
-        _ => {}
+        KeyCode::Esc => e.end_insert(),
+        KeyCode::Char('c') if ctl => e.end_insert(),
+        _ => e.insert_key(key, true),
     }
     Outcome::default()
 }
 
 fn to_insert(e: &mut Editor, at: Pos) {
-    e.checkpoint();
-    e.group = Group::Typing;
-    e.mode = Mode::Insert;
-    e.anchor = None;
+    e.begin_insert();
     e.set_cursor(at);
 }
 
@@ -510,6 +481,13 @@ fn prefixed(e: &mut Editor, p: char, c: char) -> Outcome {
 mod tests {
     use super::super::test_util::{body, editor, keys};
     use super::super::{Keys, Mode, Pos};
+
+    #[test]
+    fn left_in_insert_mode_goes_on_to_the_line_above() {
+        let (_d, mut e) = editor("a\nb\n", Keys::Helix);
+        keys(&mut e, "ji<Left>x<Esc>");
+        assert_eq!(body(&e), "ax\nb");
+    }
 
     #[test]
     fn an_insert_is_one_undo_step_ctrl_w_and_all() {

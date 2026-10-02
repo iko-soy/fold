@@ -1,7 +1,7 @@
 //! The Vim keymap: normal, insert and visual modes; counts; motions,
 //! operators and text objects; `.` repeat; `:` and `/`.
 
-use super::{class, order, take_count, Class, Editor, Group, Mode, Outcome, Pos, MAX_COUNT, MAX_TEXT};
+use super::{class, order, take_count, Class, Editor, Mode, Outcome, Pos, MAX_COUNT, MAX_TEXT};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Default)]
@@ -119,52 +119,25 @@ fn with_count(keys: &[KeyEvent], n: usize) -> Vec<KeyEvent> {
     out
 }
 
-fn to_insert(e: &mut Editor) {
-    e.checkpoint();
-    e.group = Group::Typing;
-    e.mode = Mode::Insert;
-    e.anchor = None;
-}
-
 fn insert(e: &mut Editor, key: KeyEvent) -> Outcome {
     let ctl = key.modifiers.contains(KeyModifiers::CONTROL);
-    // a key that moves the cursor ends a run of typing: what is typed
-    // after it is its own undo step, as in Vim
-    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End) {
-        e.group = Group::None;
-    }
     match key.code {
         KeyCode::Esc => leave_insert(e),
         KeyCode::Char('c') | KeyCode::Char('[') if ctl => leave_insert(e),
-        KeyCode::Char('w') if ctl => e.delete_word_back(),
         KeyCode::Char('u') if ctl => {
             e.checkpoint_typing();
             let start = Pos::new(e.cursor.line, e.first_non_blank(e.cursor.line).min(e.cursor.col));
             e.delete(start, e.cursor);
             e.cursor = start;
         }
-        KeyCode::Char(c) if !ctl => e.type_char(c),
-        KeyCode::Enter => e.newline(),
-        KeyCode::Backspace => e.backspace(),
-        KeyCode::Delete => e.delete_forward(),
-        KeyCode::Tab => {
-            e.type_char(' ');
-            e.type_char(' ');
-        }
-        KeyCode::Left => e.set_cursor(Pos::new(e.cursor.line, e.cursor.col.saturating_sub(1))),
-        KeyCode::Right => e.set_cursor(Pos::new(e.cursor.line, (e.cursor.col + 1).min(e.len(e.cursor.line)))),
-        KeyCode::Up => e.move_vert(-1),
-        KeyCode::Down => e.move_vert(1),
-        KeyCode::Home => e.set_cursor(Pos::new(e.cursor.line, 0)),
-        KeyCode::End => e.set_cursor(Pos::new(e.cursor.line, e.len(e.cursor.line))),
-        _ => {}
+        _ => e.insert_key(key, false),
     }
     Outcome::default()
 }
 
+/// Leaving insert mode steps back onto the last character typed, as in Vim.
 fn leave_insert(e: &mut Editor) {
-    e.mode = Mode::Normal;
-    e.group = Group::None;
+    e.end_insert();
     e.cursor.col = e.cursor.col.saturating_sub(1);
 }
 
@@ -417,21 +390,21 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         return visual_cmd(e, c, n);
     }
     match c {
-        'i' => to_insert(e),
+        'i' => e.begin_insert(),
         'a' => {
-            to_insert(e);
+            e.begin_insert();
             e.cursor.col = (e.cursor.col + 1).min(e.len(e.cursor.line));
         }
         'I' => {
-            to_insert(e);
+            e.begin_insert();
             e.cursor.col = e.first_non_blank(e.cursor.line);
         }
         'A' => {
-            to_insert(e);
+            e.begin_insert();
             e.cursor.col = e.len(e.cursor.line);
         }
         'o' | 'O' => {
-            to_insert(e);
+            e.begin_insert();
             let l = e.cursor.line;
             let indent: String = e.line(l).chars().take_while(|c| *c == ' ').collect();
             if c == 'o' {
@@ -459,7 +432,7 @@ fn normal(e: &mut Editor, key: KeyEvent) -> Outcome {
         's' => {
             let p = e.cursor;
             let b = Pos::new(p.line, p.col.saturating_add(n).min(e.len(p.line)));
-            to_insert(e);
+            e.begin_insert();
             let t = e.delete(p, b);
             e.copy(t, false);
         }
@@ -673,7 +646,7 @@ fn apply(e: &mut Editor, op: char, from: Pos, to: Pos, kind: Kind) {
                 e.cursor = Pos::new(l1, e.cursor.col.min(e.len(l1)));
             }
             'c' => {
-                to_insert(e);
+                e.begin_insert();
                 let indent: String = e.line(l1).chars().take_while(|c| *c == ' ').collect();
                 let mut t = String::new();
                 for l in l1..=l2 {
@@ -708,7 +681,7 @@ fn apply(e: &mut Editor, op: char, from: Pos, to: Pos, kind: Kind) {
             e.cursor = s;
         }
         'c' => {
-            to_insert(e);
+            e.begin_insert();
             let t = e.delete(s, en);
             e.copy(t, false);
             e.cursor = s;
@@ -874,6 +847,13 @@ mod tests {
         assert_eq!(body(&e), "a!\n  a!");
         keys(&mut e, "kJ");
         assert_eq!(body(&e), "a! a!");
+    }
+
+    #[test]
+    fn left_in_insert_mode_stops_at_the_start_of_the_line() {
+        let (_d, mut e) = editor("a\nb\n", Keys::Vim);
+        keys(&mut e, "ji<Left>x<Esc>");
+        assert_eq!(body(&e), "a\nxb");
     }
 
     #[test]
